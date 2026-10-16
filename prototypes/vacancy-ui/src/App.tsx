@@ -1,4 +1,4 @@
-// PROTOTYPE: three variants of the whole Vacancy flow, switchable via ?variant=A|B|C, ?os=win|mac, ?step=scan|overview|plan|run|summary.
+// PROTOTYPE: variants of the whole Vacancy flow (D is the picked direction), switchable via ?variant=D|A|B|C, ?os=win|mac, ?step=scan|overview|plan|run|summary.
 import { useEffect, useState } from 'react';
 import { datasets, defaultSelection, type OS } from './shared/data';
 import { STEPS, type Step, type VariantModule } from './shared/types';
@@ -7,15 +7,16 @@ import { PrototypeSwitcher } from './shared/PrototypeSwitcher';
 import { variant as A } from './variants/A';
 import { variant as B } from './variants/B';
 import { variant as C } from './variants/C';
+import { variant as D } from './variants/D';
 
-const VARIANTS: VariantModule[] = [A, B, C];
+const VARIANTS: VariantModule[] = [D, A, B, C];
 
 function readParams() {
   const q = new URLSearchParams(location.search);
-  const v = q.get('variant') ?? 'A';
+  const v = q.get('variant') ?? 'D';
   const os = (q.get('os') === 'mac' ? 'mac' : 'win') as OS;
   const s = q.get('step') as Step | null;
-  return { v: VARIANTS.some((x) => x.key === v) ? v : 'A', os, step: s && STEPS.includes(s) ? s : 'scan' };
+  return { v: VARIANTS.some((x) => x.key === v) ? v : 'D', os, step: s && STEPS.includes(s) ? s : 'scan' };
 }
 
 export function App() {
