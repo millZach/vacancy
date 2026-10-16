@@ -21,8 +21,9 @@ Vacancy deletes files permanently. A wrong rule or a bad path join destroys some
 
 ## Read first
 
-- This file, then `CONTEXT.md` and `docs/adr/` once they exist.
-- `prototypes/` holds the throwaway UI prototypes used to pick the design.
+- This file, then `docs/adr/` (and `CONTEXT.md` once it exists).
+- The spec is issue #1; tickets are its sub-issues, with blocking links.
+- The UI reference is the prototype at tag `prototype/vacancy-ui`, variant D (`prototypes/vacancy-ui/src/variants/D`). Run it with `npm install && npm run dev` there and open `?variant=D`. It is throwaway code: match its look and behaviour, don't copy its shortcuts.
 
 ## Run, test, prove
 
