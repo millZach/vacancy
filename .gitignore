@@ -1,0 +1,27 @@
+# Node / Vite
+node_modules/
+dist/
+*.local
+.vite/
+
+# Rust / Tauri
+target/
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Prototypes and test output
+prototypes/**/node_modules/
+playwright-report/
+test-results/
+coverage/
+
+# Editors and OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Agent run files
+.zstack/
