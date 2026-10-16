@@ -1,0 +1,17 @@
+.wordmark {
+  font: 400 var(--text-wordmark) / 1 var(--font-script);
+  color: rgba(255, 196, 228, 0.5);
+  text-shadow: 0 0 6px rgba(var(--neon-rgb), 0.18);
+  padding: 4px 4px 0 0;
+  user-select: none;
+  white-space: nowrap;
+  transition:
+    color 0.4s,
+    text-shadow 0.4s;
+}
+
+.wordmark.is-lit {
+  color: var(--color-neon-ink);
+  text-shadow: var(--glow-neon-text);
+  animation: neon-on 1.3s linear both;
+}

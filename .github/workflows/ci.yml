@@ -1,0 +1,101 @@
+# Every PR and every push to main, on Windows and macOS: Rust format, clippy and core tests, generated types up to
+# date, UI typecheck, lint and tests, then a full release build whose installers are uploaded as artifacts.
+# The two job names ("Test and build on Windows", "Test and build on macOS") are the merge bar in AGENTS.md: keep
+# them stable.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: Test and build on ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            rust-targets: ''
+            build-args: ''
+            bundles: |
+              target/release/bundle/msi/*.msi
+              target/release/bundle/nsis/*.exe
+          - name: macOS
+            os: macos-latest
+            # One .dmg for Apple silicon and Intel Macs.
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            build-args: --target universal-apple-darwin
+            bundles: |
+              target/universal-apple-darwin/release/bundle/dmg/*.dmg
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install npm packages
+        run: npm ci
+
+      - name: Rust format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Core tests
+        run: cargo test --workspace --locked
+
+      - name: Generated TypeScript types are up to date
+        run: |
+          git diff --exit-code -- src/bindings
+          untracked=$(git status --porcelain -- src/bindings)
+          if [ -n "$untracked" ]; then
+            echo "::error::src/bindings is stale. Run cargo test and commit src/bindings."
+            echo "$untracked"
+            exit 1
+          fi
+
+      - name: UI typecheck
+        run: npm run typecheck
+
+      - name: UI lint
+        run: npm run lint
+
+      - name: UI tests
+        run: npm test
+
+      - name: Build installers
+        run: npm run tauri build -- ${{ matrix.build-args }}
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v7
+        with:
+          name: Vacancy-${{ matrix.name }}
+          path: ${{ matrix.bundles }}
+          if-no-files-found: error

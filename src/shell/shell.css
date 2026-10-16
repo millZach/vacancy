@@ -1,0 +1,73 @@
+.shell {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--color-bg);
+}
+
+.shell-head {
+  flex: none;
+  height: var(--header-h);
+  display: flex;
+  align-items: center;
+  gap: var(--space-7);
+  padding: 0 16px 0 var(--space-6);
+  background: var(--color-head);
+  border-bottom: 1px solid var(--color-line);
+  user-select: none;
+}
+/* The macOS traffic lights sit over the header's left end. */
+.shell[data-chrome='overlay'] .shell-head {
+  padding-left: var(--traffic-lights-w);
+}
+
+.head-disk {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  color: var(--color-text-2);
+}
+.head-disk-name {
+  color: var(--color-text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.head-meter {
+  position: relative;
+  display: block;
+  flex: none;
+  width: 110px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--color-meter-track);
+  overflow: hidden;
+}
+.head-meter > i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: var(--color-meter);
+}
+.head-disk-nums {
+  font-size: var(--text-sm);
+  color: var(--color-text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.head-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+}
+
+.shell-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}

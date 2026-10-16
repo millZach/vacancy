@@ -1,0 +1,57 @@
+/* Shared controls. */
+
+/* The call to action: the one neon button on a screen. */
+.cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  padding: 9px 16px 8px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--color-neon);
+  color: var(--color-on-neon);
+  font: 700 var(--text-base) / 1.2 var(--font-sans);
+  box-shadow: var(--glow-cta);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    filter 0.15s,
+    box-shadow 0.15s,
+    transform 0.1s;
+}
+.cta:hover:not(:disabled) {
+  filter: brightness(1.08);
+  box-shadow: var(--glow-cta-hover);
+}
+.cta:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.cta:disabled {
+  background: #262c36;
+  color: var(--color-text-3);
+  box-shadow: none;
+  cursor: default;
+}
+.cta--lg {
+  padding: 13px 24px 12px;
+  font-size: var(--text-lg);
+  border-radius: var(--radius-lg);
+}
+
+/* A small rounded tag in the header. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 4px 10px 3px;
+  border: 1px solid var(--color-line-2);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--color-text-2);
+  white-space: nowrap;
+}
+.pill.is-muted {
+  opacity: 0.7;
+}
