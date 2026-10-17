@@ -132,6 +132,10 @@ pub struct Moment {
     /// Running apps' names and bundle ids, as the OS reports them; `None` when Vacancy couldn't find out. Rules
     /// that leave running apps' caches alone then propose nothing, rather than guess that nothing runs.
     pub running_apps: Option<Vec<String>>,
+    /// Installed apps' names (macOS: the `.app` bundles in the Applications folders). A cache folder named after
+    /// none of them, and not after a bundle id or a known vendor, can't be tied to an app, so it is treated as
+    /// possibly in use.
+    pub installed_apps: Vec<String>,
 }
 
 impl Moment {
@@ -140,6 +144,7 @@ impl Moment {
         Self {
             now: unix_now(),
             running_apps: running::apps(),
+            installed_apps: running::installed(),
         }
     }
 }
@@ -248,6 +253,11 @@ pub(crate) fn propose_until(
             .running_apps
             .as_ref()
             .map(|apps| apps.iter().map(|a| a.to_lowercase()).collect()),
+        installed: moment
+            .installed_apps
+            .iter()
+            .map(|a| a.to_lowercase())
+            .collect(),
         stop,
         checks: 0,
     };
@@ -474,6 +484,8 @@ struct Engine<'a> {
     moment: &'a Moment,
     /// Running apps, lowercased; `None` if unknown.
     running: Option<Vec<String>>,
+    /// Installed apps' names, lowercased.
+    installed: Vec<String>,
     stop: &'a dyn Fn() -> bool,
     checks: usize,
 }
@@ -506,6 +518,59 @@ fn kept_data(snap: &Snapshot, stop: &dyn Fn() -> bool) -> Option<Vec<bool>> {
         }
     }
     Some(keep)
+}
+
+/// Vendors whose apps keep their caches in one folder named after the vendor, and their bundle ids' prefix.
+const VENDORS: [(&str, &str); 6] = [
+    ("jetbrains", "com.jetbrains."),
+    ("google", "com.google."),
+    ("microsoft", "com.microsoft."),
+    ("adobe", "com.adobe."),
+    ("mozilla", "org.mozilla."),
+    ("apple", "com.apple."),
+];
+
+fn vendor_prefix(folder: &str) -> Option<&'static str> {
+    VENDORS
+        .iter()
+        .find(|(vendor, _)| *vendor == folder)
+        .map(|(_, prefix)| *prefix)
+}
+
+/// `com.spotify.client`: reverse-DNS, as macOS names apps and their caches. Lowercase.
+fn is_bundle_id(name: &str) -> bool {
+    name.split('.').count() >= 3
+        && name.starts_with(|c: char| c.is_ascii_alphabetic())
+        && !name.contains(' ')
+}
+
+/// Whether a running app (by name or bundle id, lowercased) owns a folder with this name (lowercased).
+fn runs(folder: &str, running: &[String]) -> bool {
+    if is_bundle_id(folder) {
+        return running.iter().any(|r| {
+            r == folder
+                || folder.starts_with(&format!("{r}."))
+                || r.starts_with(&format!("{folder}."))
+        });
+    }
+    if let Some(prefix) = vendor_prefix(folder) {
+        return running.iter().any(|r| r.starts_with(prefix));
+    }
+    running.iter().any(|r| same_app(r, folder))
+}
+
+/// Whether an app's name and a folder's name are the same app's: "Discord" and "discord", "IntelliJ IDEA" and
+/// "IntelliJIdea2024.1". Letters and digits only, either one starting the other, four of them at least.
+fn same_app(app: &str, folder: &str) -> bool {
+    let compact = |s: &str| {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect::<String>()
+    };
+    let (a, f) = (compact(app), compact(folder));
+    !a.is_empty()
+        && (a == f || (a.len() >= 4 && f.starts_with(&a)) || (f.len() >= 4 && a.starts_with(&f)))
 }
 
 /// No running apps, for rules that don't ask.
@@ -701,14 +766,52 @@ impl Engine<'_> {
                 return false;
             }
         }
-        if skip.running_apps
-            && let Some(base) = owners_in
-            && let Some(owner) = self.owner_of(base, at)
-            && self.is_running(&owner)
-        {
-            return false;
+        if skip.running_apps {
+            // Without a folder an app's name could be read from, ownership can't be established either.
+            let chain = owners_in.and_then(|base| self.owner_chain(base, at));
+            if chain.is_none_or(|chain| self.possibly_in_use(&chain)) {
+                return false;
+            }
         }
         true
+    }
+
+    /// The names of the folders from the one directly in `base` down to `at` (its folder, for files).
+    fn owner_chain(&self, base: DirId, at: ItemRef) -> Option<Vec<String>> {
+        let mut d = match at {
+            ItemRef::Dir(d) | ItemRef::FilesIn(d) => d,
+            ItemRef::File(f) => self.snap.file(f).parent,
+            ItemRef::Proposal(_) => return None,
+        };
+        let mut chain = Vec::new();
+        loop {
+            chain.push(self.snap.name(d).to_string_lossy().into_owned());
+            let parent = self.snap.parent(d)?;
+            if parent == base {
+                chain.reverse();
+                return Some(chain);
+            }
+            d = parent;
+        }
+    }
+
+    /// Whether an app may be using a folder whose path below its base is `chain` (`["JetBrains",
+    /// "IntelliJIdea2024.1", ...]`): one of the folders is a running app's (by bundle id, vendor or name), or the
+    /// top one can't be tied to any app Vacancy knows of. Unknown running apps mean anything may be in use.
+    fn possibly_in_use(&self, chain: &[String]) -> bool {
+        let Some(running) = &self.running else {
+            return true;
+        };
+        if chain.iter().any(|name| runs(&name.to_lowercase(), running)) {
+            return true;
+        }
+        let Some(owner) = chain.first().map(|o| o.to_lowercase()) else {
+            return true;
+        };
+        let owned = is_bundle_id(&owner)
+            || vendor_prefix(&owner).is_some()
+            || self.installed.iter().any(|app| same_app(app, &owner));
+        !owned
     }
 
     /// Whether `dir` is, or holds, one of the places a rule must never sweep: the drive, the users' folder, the
@@ -722,19 +825,6 @@ impl Engine<'_> {
             .iter()
             .filter(|(_, downloads)| !(downloads_ok && *downloads))
             .any(|(p, _)| p.starts_with(&key))
-    }
-
-    /// Whether an app folder named `owner` (`com.spotify.client`, `Slack`, `Google`) belongs to a running app.
-    fn is_running(&self, owner: &str) -> bool {
-        let owner = owner.to_lowercase();
-        let Some(running) = &self.running else {
-            return true; // unknown: anything may be running
-        };
-        running.iter().any(|r| {
-            *r == owner
-                || r.starts_with(&format!("{owner} "))
-                || owner.starts_with(&format!("{r}."))
-        })
     }
 
     /// The name of the folder directly in `base` that `at` is in (or is).

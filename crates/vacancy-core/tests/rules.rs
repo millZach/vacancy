@@ -22,10 +22,22 @@ fn now() -> i64 {
         .as_secs() as i64
 }
 
+/// The apps the fixtures' Macs have installed.
+const INSTALLED: [&str; 7] = [
+    "Discord",
+    "Slack",
+    "Spotify",
+    "Ledger App",
+    "Xcode",
+    "Google Chrome",
+    "IntelliJ IDEA",
+];
+
 fn moment(running: &[&str]) -> Moment {
     Moment {
         now: now(),
         running_apps: Some(running.iter().map(|s| (*s).to_owned()).collect()),
+        installed_apps: INSTALLED.iter().map(|s| (*s).to_owned()).collect(),
     }
 }
 
@@ -507,6 +519,7 @@ fn the_mac_rules_find_what_the_prototype_proposes() {
     let unknown = Moment {
         now: now(),
         running_apps: None,
+        installed_apps: Vec::new(),
     };
     let (_, blind) = run(&fx, &env, &unknown);
     for id in ["m-caches", "m-appcache", "m-appcache-other", "m-derived"] {
@@ -569,11 +582,59 @@ fn local_history_is_never_swept_up_with_caches() {
                 "the caches beside the history still go: {all:?}"
             );
             assert!(
-                all.contains(&"Users/alex/Library/Caches/pypoetry/cache".to_owned()),
+                all.contains(&"Users/alex/Library/Caches/pypoetry/cache/http".to_owned()),
                 "{all:?}"
             );
         }
     }
+}
+
+/// A cache folder is left alone while its app runs, told by bundle id, by vendor (a JetBrains IDE in
+/// `Caches/JetBrains`, Chrome in `Caches/Google`) or by name; and one no known app owns is treated as in use.
+#[test]
+fn caches_of_running_apps_are_found_by_bundle_id_vendor_and_name() {
+    let fx = Fixture::new();
+    let caches = "Users/alex/Library/Caches";
+    for dir in [
+        "JetBrains/IntelliJIdea2024.1/caches",
+        "Google/Chrome/Default",
+        "com.adobe.acc.AdobeCreativeCloud/x",
+        "Discord/x",
+        "SomeHelper/x",
+    ] {
+        fx.file(&format!("{caches}/{dir}/blob"), MIB);
+    }
+    let env = Env::macos(fx.root(), "alex");
+    let owners = |m: &Moment| {
+        let (snap, proposals) = run(&fx, &env, m);
+        let mut owners: Vec<String> = targets(&fx, &snap, &proposals, "m-caches")
+            .iter()
+            .map(|t| {
+                t.trim_start_matches(&format!("{caches}/"))
+                    .split('/')
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        owners.dedup();
+        owners
+    };
+    assert_eq!(
+        owners(&moment(&[
+            "IntelliJ IDEA",
+            "com.jetbrains.intellij",
+            "Google Chrome",
+            "com.google.Chrome"
+        ])),
+        vec!["Discord", "com.adobe.acc.AdobeCreativeCloud"],
+        "the IDE and Chrome run; SomeHelper belongs to no app Vacancy knows"
+    );
+    assert_eq!(
+        owners(&moment(&["Finder", "com.apple.finder", "Discord"])),
+        vec!["Google", "JetBrains", "com.adobe.acc.AdobeCreativeCloud"],
+        "Discord runs now"
+    );
 }
 
 /// Every proposal's tile is on the map, in its category; every byte is still in exactly one tile; and opening a

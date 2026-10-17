@@ -17,6 +17,37 @@ pub(super) fn apps() -> Option<Vec<String>> {
     }
 }
 
+/// The names of the apps installed in the Applications folders (`/Applications`, its `Utilities`, the system's,
+/// `~/Applications`), without `.app`.
+#[cfg(target_os = "macos")]
+pub(super) fn installed() -> Vec<String> {
+    let mut dirs = vec![
+        std::path::PathBuf::from("/Applications"),
+        std::path::PathBuf::from("/Applications/Utilities"),
+        std::path::PathBuf::from("/System/Applications"),
+        std::path::PathBuf::from("/System/Applications/Utilities"),
+    ];
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(std::path::PathBuf::from(home).join("Applications"));
+    }
+    let mut out = Vec::new();
+    for dir in dirs {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(app) = name.strip_suffix(".app") {
+                out.push(app.to_owned());
+            }
+        }
+    }
+    out
+}
+
+/// Off macOS no rule asks which apps are installed.
+#[cfg(not(target_os = "macos"))]
+pub(super) fn installed() -> Vec<String> {
+    Vec::new()
+}
+
 /// Off macOS no rule needs to know which apps run, so nothing is looked for: unknown.
 #[cfg(not(target_os = "macos"))]
 pub(super) fn apps() -> Option<Vec<String>> {

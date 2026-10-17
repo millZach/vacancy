@@ -259,7 +259,15 @@ fn macos(env: &Env, r: &mut Rules) {
     let lib = home.join("Library");
 
     // Package managers' download caches sit among app caches but belong to developer tools.
-    for dev in ["Homebrew", "pip", "Yarn", "go-build", "pnpm", "JetBrains"] {
+    for dev in [
+        "Homebrew",
+        "pip",
+        "Yarn",
+        "go-build",
+        "pnpm",
+        "pypoetry",
+        "JetBrains",
+    ] {
         r.add(lib.join("Caches").join(dev), CategoryId::Dev);
     }
     r.add(lib.join("Caches"), CategoryId::Caches);
