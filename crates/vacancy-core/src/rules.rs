@@ -234,8 +234,10 @@ pub(crate) fn propose_until(
         .map(|k| (k, false))
         .collect();
     personal.extend(PathKey::of(&k.downloads).map(|k| (k, true)));
+    let keep = kept_data(snapshot, stop)?;
     let mut engine = Engine {
         snap: snapshot,
+        keep,
         case: env.case,
         guarded,
         personal,
@@ -459,6 +461,9 @@ impl Claims {
 
 struct Engine<'a> {
     snap: &'a Snapshot,
+    /// Per folder: it is, or holds, data that isn't regenerable although it sits among caches (see
+    /// [`KEPT_DATA`]).
+    keep: Vec<bool>,
     /// How the volume compares names: places are found by their exact spelling on a case-sensitive one.
     case: Case,
     guarded: Guarded<'a>,
@@ -471,6 +476,36 @@ struct Engine<'a> {
     running: Vec<String>,
     stop: &'a dyn Fn() -> bool,
     checks: usize,
+}
+
+/// Folders of data that isn't regenerable, which apps keep among their caches. No rule takes one, or a folder
+/// holding one, whole; what is beside it may go.
+///
+/// - `LocalHistory`: JetBrains IDEs' (and Android Studio's) local history of every edit, in their cache folders.
+/// - `virtualenvs`: Poetry's virtual environments, in its cache folder by default.
+const KEPT_DATA: [&str; 2] = ["LocalHistory", "virtualenvs"];
+
+fn is_kept_data(name: &OsStr) -> bool {
+    KEPT_DATA.iter().any(|k| name.eq_ignore_ascii_case(k))
+}
+
+/// Per folder: whether it is or holds kept data. `None` if `stop` says so.
+fn kept_data(snap: &Snapshot, stop: &dyn Fn() -> bool) -> Option<Vec<bool>> {
+    let mut keep = vec![false; snap.dir_count()];
+    for dir in snap.dirs().rev() {
+        if dir.index() % CHECK_EVERY == 0 && stop() {
+            return None;
+        }
+        if snap.parent(dir).is_some() && is_kept_data(snap.name(dir)) {
+            keep[dir.index()] = true;
+        }
+        if keep[dir.index()]
+            && let Some(p) = snap.parent(dir)
+        {
+            keep[p.index()] = true;
+        }
+    }
+    Some(keep)
 }
 
 /// Something a rule turned up: the place, what it belongs to (for the text), and for rules that skip running apps,
@@ -498,9 +533,22 @@ impl Engine<'_> {
         {
             return Some(found);
         }
-        let candidates = self.candidates(rule)?;
-        for (at, label, owners_in) in candidates {
+        let mut candidates = self.candidates(rule)?;
+        candidates.reverse(); // taken from the end, in the finder's order
+        while let Some((at, label, owners_in)) = candidates.pop() {
             self.tick()?;
+            if let ItemRef::Dir(d) = at
+                && self.keep[d.index()]
+            {
+                // Data that isn't regenerable lives here or below (JetBrains' LocalHistory): never the folder
+                // itself, but what is beside that data may still go.
+                if !is_kept_data(self.snap.name(d)) {
+                    for part in self.contents(d).into_iter().rev() {
+                        candidates.push((part, label.clone(), owners_in));
+                    }
+                }
+                continue;
+            }
             if !self.wanted(rule, at, owners_in) || !self.guarded.allows(at, rule.build_output) {
                 continue;
             }

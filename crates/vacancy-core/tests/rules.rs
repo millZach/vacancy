@@ -478,6 +478,62 @@ fn the_mac_rules_find_what_the_prototype_proposes() {
     assert!(get(&with_xcode, "m-derived").is_none());
 }
 
+/// JetBrains IDEs keep their local history of every edit in their cache folders. It never goes; the caches beside
+/// it may.
+#[test]
+fn local_history_is_never_swept_up_with_caches() {
+    let fx = Fixture::new();
+    let mac_ide = "Users/alex/Library/Caches/JetBrains/IntelliJIdea2024.1";
+    let win_ide = "Users/alex/AppData/Local/JetBrains/IntelliJIdea2024.1";
+    for ide in [mac_ide, win_ide] {
+        fx.file(&format!("{ide}/LocalHistory/changes.storageData"), MIB);
+        fx.file(&format!("{ide}/caches/content.dat"), MIB);
+        fx.file(&format!("{ide}/index/stubs.bin"), MIB);
+    }
+    fx.file(
+        "Users/alex/Library/Caches/pypoetry/virtualenvs/app-py3.12/lib/site.py",
+        MIB,
+    );
+    fx.file("Users/alex/Library/Caches/pypoetry/cache/http/x", MIB);
+    for env in [
+        Env::windows(fx.root(), "alex"),
+        Env::macos(fx.root(), "alex"),
+    ] {
+        let (snap, proposals) = run(&fx, &env, &moment(&[]));
+        let all = all_targets(&fx, &snap, &proposals);
+        for t in &all {
+            assert!(
+                !t.contains("LocalHistory") && !t.contains("virtualenvs"),
+                "{t} is or holds kept data"
+            );
+            for kept in ["LocalHistory", "pypoetry/virtualenvs"] {
+                assert!(
+                    !fx.path(&format!("{mac_ide}/{kept}"))
+                        .starts_with(fx.path(t))
+                        && !fx
+                            .path(&format!("{win_ide}/{kept}"))
+                            .starts_with(fx.path(t))
+                        && !fx
+                            .path("Users/alex/Library/Caches/pypoetry/virtualenvs")
+                            .starts_with(fx.path(t)),
+                    "{t} holds kept data"
+                );
+            }
+        }
+        if env.platform == vacancy_core::Platform::MacOs {
+            assert!(
+                all.contains(&format!("{mac_ide}/caches"))
+                    && all.contains(&format!("{mac_ide}/index")),
+                "the caches beside the history still go: {all:?}"
+            );
+            assert!(
+                all.contains(&"Users/alex/Library/Caches/pypoetry/cache".to_owned()),
+                "{all:?}"
+            );
+        }
+    }
+}
+
 /// Every proposal's tile is on the map, in its category; every byte is still in exactly one tile; and opening a
 /// folder part of which was proposed shows only the rest.
 #[test]
