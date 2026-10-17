@@ -203,9 +203,28 @@ pub(crate) fn propose_until(
 ) -> Option<Proposals> {
     let guard = Guard::new(env, &env.root);
     let guarded = Guarded::new(snapshot, categories, guard, stop)?;
+    let k = &env.known;
+    let mut personal: Vec<&Path> = vec![
+        &env.root,
+        &env.home,
+        &env.local_app_data,
+        &env.app_data,
+        &k.downloads,
+        &k.documents,
+        &k.desktop,
+        &k.pictures,
+        &k.videos,
+        &k.music,
+    ];
+    personal.extend(env.home.parent());
+    let app_data = env.home.join("AppData");
+    let library = env.home.join("Library");
+    personal.push(&app_data);
+    personal.push(&library);
     let mut engine = Engine {
         snap: snapshot,
         guarded,
+        personal: personal.into_iter().filter_map(PathKey::of).collect(),
         claims: Claims::new(snapshot.dir_count()),
         moment,
         running: moment
@@ -255,13 +274,14 @@ struct Found {
     files: u64,
 }
 
-/// The Guard, with what the scan saw: which folders are protected or hold something protected.
+/// The Guard, with what the scan saw: which folders are protected, and which hold something protected.
 struct Guarded<'a> {
     guard: Guard,
     snap: &'a Snapshot,
-    /// The folder is protected, or is inside a protected folder.
+    /// The folder is protected (the OS, a Photos library, a cloud-sync folder, an app bundle...), or is inside one.
     under: Vec<bool>,
-    /// The folder holds a protected folder somewhere below it.
+    /// The folder holds, somewhere below it, a folder whose protection reaches whatever holds it: everything but an
+    /// app bundle (see [`Guard::protected_os_name`]).
     holds: Vec<bool>,
 }
 
@@ -274,24 +294,27 @@ impl<'a> Guarded<'a> {
     ) -> Option<Self> {
         let n = snap.dir_count();
         let mut under = vec![false; n];
-        let mut holds = vec![false; n];
+        let mut holding = vec![false; n];
         for dir in snap.dirs() {
             if dir.index() % CHECK_EVERY == 0 && stop() {
                 return None;
             }
-            let here = cats.category_of(dir).protected()
-                || snap.flags(dir).contains(DirFlags::CLOUD)
-                || (snap.parent(dir).is_some()
-                    && guard.protected_os_name(snap.name(dir)).is_some());
-            under[dir.index()] = here || snap.parent(dir).is_some_and(|p| under[p.index()]);
+            let by_scan =
+                cats.category_of(dir).protected() || snap.flags(dir).contains(DirFlags::CLOUD);
+            let by_name = snap
+                .parent(dir)
+                .and_then(|_| guard.protected_os_name(snap.name(dir)));
+            holding[dir.index()] = by_scan || by_name.is_some_and(|(_, reaches)| reaches);
+            under[dir.index()] =
+                by_scan || by_name.is_some() || snap.parent(dir).is_some_and(|p| under[p.index()]);
         }
+        let mut holds = vec![false; n];
         for dir in snap.dirs().rev() {
             if dir.index() % CHECK_EVERY == 0 && stop() {
                 return None;
             }
             if let Some(p) = snap.parent(dir)
-                && (under[dir.index()] || holds[dir.index()])
-                && !under[p.index()]
+                && (holding[dir.index()] || holds[dir.index()])
             {
                 holds[p.index()] = true;
             }
@@ -408,6 +431,8 @@ impl Claims {
 struct Engine<'a> {
     snap: &'a Snapshot,
     guarded: Guarded<'a>,
+    /// Places no rule sweeps whole, nor anything holding them (see [`Engine::holds_personal`]).
+    personal: Vec<PathKey>,
     claims: Claims,
     moment: &'a Moment,
     /// Running apps, lowercased.
@@ -519,7 +544,9 @@ impl Engine<'_> {
                 anywhere,
                 top_only,
             } => {
-                if let Some(base) = self.locate(under) {
+                if let Some(base) = self.locate(under)
+                    && !self.holds_personal(base, PathKey::of(under).as_ref())
+                {
                     for f in self.files_below(base, anywhere, top_only)? {
                         direct.push((ItemRef::File(f), None, None));
                     }
@@ -527,6 +554,9 @@ impl Engine<'_> {
             }
         }
         for spot in spots {
+            if rule.action == catalog::Act::Contents && self.holds_personal(spot.dir, None) {
+                continue; // a temp folder pointed at the home folder empties nothing
+            }
             match rule.action {
                 catalog::Act::Contents => {
                     for at in self.contents(spot.dir) {
@@ -551,6 +581,12 @@ impl Engine<'_> {
                 return false;
             }
         }
+        if let Some(base) = owners_in
+            && let Some(owner) = self.owner_of(base, at)
+            && skip.names.iter().any(|n| n.eq_ignore_ascii_case(&owner))
+        {
+            return false;
+        }
         if skip.idle_days > 0 {
             let used = self.last_used(at);
             if used <= 0 || used > self.moment.now - days(skip.idle_days) {
@@ -565,6 +601,18 @@ impl Engine<'_> {
             return false;
         }
         true
+    }
+
+    /// Whether `dir` is, or holds, one of the places a rule must never sweep: the drive, the users' folder, the
+    /// home folder, its known folders and app data. `except` is the one place the rule is about (Downloads).
+    fn holds_personal(&self, dir: DirId, except: Option<&PathKey>) -> bool {
+        let Some(key) = PathKey::of(&self.snap.path(dir)) else {
+            return true;
+        };
+        self.personal
+            .iter()
+            .filter(|p| Some(*p) != except)
+            .any(|p| p.starts_with(&key))
     }
 
     /// Whether an app folder named `owner` (`com.spotify.client`, `Slack`, `Google`) belongs to a running app.
@@ -862,6 +910,7 @@ fn proposal(snap: &Snapshot, rule: &Rule, found: &Found) -> Proposal {
             .replace("{files}", &group_digits(found.files))
             .replace("{fs}", if found.files == 1 { "" } else { "s" })
             .replace("{labels_n}", &group_digits(names.len() as u64))
+            .replace("{ls}", if names.len() == 1 { "" } else { "s" })
             .replace("{labels}", &list(&names))
     };
     let mut samples: Vec<String> = Vec::new();

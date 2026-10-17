@@ -364,10 +364,11 @@ const DEV_HOME: [&str; 27] = [
 
 /// Folder names apps use for caches they rebuild on their own: browsers, Electron apps, GPU shader caches.
 pub(super) fn is_cache_name(name: &str) -> bool {
-    const NAMES: [&str; 16] = [
+    const NAMES: [&str; 17] = [
         "cache",
         "caches",
         "code cache",
+        "cacheddata",
         "gpucache",
         "cache2",
         "cache_data",

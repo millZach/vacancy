@@ -1,5 +1,5 @@
-//! Scans a folder or volume and prints what the scanner found, how long it took and the process's peak memory.
-//! Read-only. Used to measure the scanner on a real drive:
+//! Scans a folder or volume and prints what the scanner found, how long it took, the categories, the cleanups the
+//! rules propose and the process's peak memory. Read-only: nothing is deleted. Used to measure the scanner on a real drive:
 //!
 //! ```text
 //! cargo run --release -p vacancy-core --example scan -- C:\ [--threads N]
@@ -9,7 +9,9 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use vacancy_core::{CancelToken, Env, ItemRef, ScanOptions, categorize, scan, volume_info};
+use vacancy_core::{
+    CancelToken, Env, ItemRef, Moment, ScanOptions, categorize, propose, scan, volume_info,
+};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -69,12 +71,35 @@ fn main() {
     for p in unreadable.iter().take(25) {
         println!("  unreadable    {}", p.display());
     }
+    let env = Env::detect(&path);
     let started = std::time::Instant::now();
-    let cats = categorize(&snapshot, &Env::detect(&path));
+    let cats = categorize(&snapshot, &env);
     println!(
         "categorized in {:.0} ms",
         started.elapsed().as_secs_f64() * 1000.0
     );
+    let started = std::time::Instant::now();
+    let proposals = propose(&snapshot, &cats, &env, &Moment::detect());
+    println!(
+        "proposed in {:.0} ms: {:.2} GB to reclaim",
+        started.elapsed().as_secs_f64() * 1000.0,
+        proposals.reclaimable_bytes() as f64 / 1e9
+    );
+    for p in proposals.list() {
+        println!(
+            "  {:>9.2} GB  {:<8} {:<7} {}  ({} files, {})",
+            p.bytes as f64 / 1e9,
+            p.id,
+            format!("{:?}", p.risk).to_lowercase(),
+            p.title,
+            p.item_count,
+            if p.default_on { "on" } else { "off" }
+        );
+        println!("               {}", p.summary);
+        for s in &p.sample_paths {
+            println!("               - {s}");
+        }
+    }
     for cat in cats.list().iter().filter(|c| c.bytes > 0) {
         println!(
             "{:<28} {:>9.2} GB  {:>6} items{}",

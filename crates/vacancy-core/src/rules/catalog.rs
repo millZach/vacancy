@@ -6,7 +6,8 @@
 //! general ones (package managers' caches before app caches, browsers before other apps).
 //!
 //! Texts may hold `{n}` (places found), `{s}` (an "s" unless `{n}` is 1), `{files}` and `{fs}` (the same for
-//! files), `{labels}` (what the places belong to: "Edge and Chrome") and `{labels_n}` (how many).
+//! files), `{labels}` (what the places belong to: "Edge and Chrome"), `{labels_n}` (how many) and `{ls}` (an "s"
+//! unless that is 1).
 //!
 //! Tool and hint rules arrive in ticket 06.
 
@@ -577,7 +578,7 @@ fn macos(env: &Env) -> Vec<Rule> {
             },
             text: Text {
                 title: "Library caches",
-                summary: "Caches in your Library from {labels_n} apps that aren't running.",
+                summary: "Caches in your Library, from {labels_n} app{ls}.",
                 why: "Apps rebuild caches as needed. Caches of apps that are running are left alone.",
             },
         },

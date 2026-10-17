@@ -86,6 +86,48 @@ pub fn write_file(p: &Path, len: u64) {
     f.sync_all().expect("sync");
 }
 
+/// Makes everything at and below `path` look last used `days` ago: the modified and accessed times of every file
+/// and folder. Call it once the tree is built: creating anything inside afterwards makes its folder new again.
+pub fn age(path: &Path, days: u64) {
+    let when = std::time::SystemTime::now() - Duration::from_secs(days * 86_400);
+    let times = fs::FileTimes::new().set_modified(when).set_accessed(when);
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        let dir = fs::symlink_metadata(&p).expect("stat").is_dir();
+        if dir {
+            for entry in fs::read_dir(&p).expect("list") {
+                stack.push(entry.expect("entry").path());
+            }
+        }
+        open_for_times(&p, dir)
+            .set_times(times)
+            .unwrap_or_else(|e| panic!("set times on {}: {e}", p.display()));
+    }
+}
+
+#[cfg(windows)]
+fn open_for_times(path: &Path, _dir: bool) -> fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
+    };
+    fs::OpenOptions::new()
+        .access_mode(FILE_WRITE_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .expect("open for its times")
+}
+
+#[cfg(unix)]
+fn open_for_times(path: &Path, dir: bool) -> fs::File {
+    if dir {
+        fs::File::open(path)
+    } else {
+        fs::OpenOptions::new().write(true).open(path)
+    }
+    .expect("open for its times")
+}
+
 pub fn scan_with(root: &Path, keep_files_from: u64) -> Snapshot {
     scan(
         root,

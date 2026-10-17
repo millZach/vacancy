@@ -80,8 +80,19 @@ impl Guard {
         };
         if home_here {
             g.allow(&env.home);
+            // A temp folder outside the home folder (`C:\Temp`) is allowed only if it is called that: `%TEMP%`
+            // pointed at some other folder must not open it up.
             for t in &env.temp {
-                g.allow(t);
+                let named_temp = PathKey::of(t)
+                    .and_then(|k| {
+                        k.names_from_last()
+                            .next()
+                            .map(|n| n == "temp" || n == "tmp")
+                    })
+                    .unwrap_or(false);
+                if named_temp {
+                    g.allow(t);
+                }
             }
         } else {
             g.allow(volume_root);
@@ -166,9 +177,13 @@ impl Guard {
         }
     }
 
-    /// [`protected_name`](Self::protected_name) for a name as the OS spells it.
-    pub(crate) fn protected_os_name(&self, name: &std::ffi::OsStr) -> Option<&'static str> {
-        self.protected_name(&name_key(name))
+    /// [`protected_name`](Self::protected_name) for a name as the OS spells it, and whether a folder that holds
+    /// one is protected too. A Photos library or a backup somewhere inside makes the whole folder off-limits; an
+    /// app bundle doesn't, because Xcode's build output and archives hold the apps they build, and they may go.
+    pub(crate) fn protected_os_name(&self, name: &std::ffi::OsStr) -> Option<(&'static str, bool)> {
+        let key = name_key(name);
+        let what = self.protected_name(&key)?;
+        Some((what, what != "an app"))
     }
 }
 
