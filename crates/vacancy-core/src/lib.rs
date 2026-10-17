@@ -20,7 +20,7 @@ pub use categorize::{
 pub use machine::machine_name;
 pub use map::{
     CategoryTotal, ItemKind, MapCategory, MapError, MapFolder, MapItem, Overview, ScanOutcome,
-    ScanSummary, ScanUpdate, browse, overview, scan_update,
+    ScanSummary, ScanUpdate, ScannedVolume, browse, overview, scan_for_map, scan_update,
 };
 pub use scan::{CancelToken, ScanError, ScanOptions, ScanProgress, scan};
 pub use snapshot::{

@@ -61,6 +61,15 @@ impl Default for ScanOptions {
 #[derive(Clone, Debug, Default)]
 pub struct CancelToken(Arc<AtomicBool>);
 
+/// Two tokens are equal when they are clones of each other: cancelling one cancels the other.
+impl PartialEq for CancelToken {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for CancelToken {}
+
 impl CancelToken {
     /// A token that has not been cancelled.
     pub fn new() -> Self {

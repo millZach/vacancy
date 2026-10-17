@@ -279,26 +279,26 @@ fn macos(env: &Env, r: &mut Rules) {
 }
 
 /// Folder names apps use for caches they rebuild on their own: browsers, Electron apps, GPU shader caches.
-pub(super) fn is_cache_name(lower: &str) -> bool {
-    matches!(
-        lower,
-        "cache"
-            | "caches"
-            | "code cache"
-            | "gpucache"
-            | "cache2"
-            | "cache_data"
-            | "shadercache"
-            | "dawncache"
-            | "dawngraphitecache"
-            | "dawnwebgpucache"
-            | "grshadercache"
-            | "graphitedawncache"
-            | "cachestorage"
-            | "crashpad"
-            | "crashdumps"
-            | "inetcache"
-    )
+pub(super) fn is_cache_name(name: &str) -> bool {
+    const NAMES: [&str; 16] = [
+        "cache",
+        "caches",
+        "code cache",
+        "gpucache",
+        "cache2",
+        "cache_data",
+        "shadercache",
+        "dawncache",
+        "dawngraphitecache",
+        "dawnwebgpucache",
+        "grshadercache",
+        "graphitedawncache",
+        "cachestorage",
+        "crashpad",
+        "crashdumps",
+        "inetcache",
+    ];
+    NAMES.iter().any(|n| n.eq_ignore_ascii_case(name))
 }
 
 /// A category's name and blurb on a platform. `cloud` names the sync services found; `files` is the category's

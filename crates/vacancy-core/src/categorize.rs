@@ -479,10 +479,11 @@ fn name_rule(
     inherited: CategoryId,
     ctx: Ctx,
 ) -> Option<CategoryId> {
-    let lower = name.to_str()?.to_ascii_lowercase();
+    // Called for most folders, so it compares without allocating.
+    let name = name.to_str()?;
+    let is = |other: &str| name.eq_ignore_ascii_case(other);
     // A Steam library anywhere is games.
-    if lower == "steamapps"
-        || (lower == "common" && snapshot.name(parent).eq_ignore_ascii_case("steamapps"))
+    if is("steamapps") || (is("common") && snapshot.name(parent).eq_ignore_ascii_case("steamapps"))
     {
         return (!inherited.protected()).then_some(CategoryId::Apps);
     }
@@ -492,22 +493,30 @@ fn name_rule(
     ) {
         return None;
     }
-    if env.platform == Platform::MacOs && lower.ends_with(".photoslibrary") {
+    if env.platform == Platform::MacOs && ends_with_ignore_case(name, ".photoslibrary") {
         return Some(CategoryId::Photos);
     }
     let markers = snapshot.markers(dir);
-    let dev = lower == "node_modules"
-        || (lower == "target" && snapshot.markers(parent).contains(Markers::CARGO_TOML))
+    let dev = is("node_modules")
+        || (is("target") && snapshot.markers(parent).contains(Markers::CARGO_TOML))
         || markers.contains(Markers::GIT)
         || markers.contains(Markers::PYVENV)
-        || matches!(lower.as_str(), "__pycache__" | ".gradle" | "deriveddata");
+        || is("__pycache__")
+        || is(".gradle")
+        || is("DerivedData");
     if dev {
         return Some(CategoryId::Dev);
     }
-    if ctx.app_data && inherited == CategoryId::Other && catalog::is_cache_name(&lower) {
+    if ctx.app_data && inherited == CategoryId::Other && catalog::is_cache_name(name) {
         return Some(CategoryId::Caches);
     }
     None
+}
+
+fn ends_with_ignore_case(name: &str, suffix: &str) -> bool {
+    name.len() >= suffix.len()
+        && name.is_char_boundary(name.len() - suffix.len())
+        && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
 /// Known locations, keyed by path components compared without case.

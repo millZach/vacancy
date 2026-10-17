@@ -7,16 +7,16 @@
 //! the file system's own records) is shown as one item in System rather than spread over guesses.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::categorize::Platform;
-use crate::categorize::{Categories, CategoryId, Item, ItemRef};
-use crate::scan::ScanProgress;
+use crate::categorize::{Categories, CategoryId, Env, Item, ItemRef, Platform, categorize};
+use crate::scan::{CancelToken, ScanError, ScanOptions, ScanProgress, scan};
 use crate::snapshot::{RootKind, Snapshot, UnixTime};
 use crate::text::group_digits;
-use crate::volume::VolumeInfo;
+use crate::volume::{VolumeInfo, volume_info};
 
 /// Items a category shows before the rest are folded into one "smaller items" tile.
 const CATEGORY_ITEMS: usize = 48;
@@ -222,6 +222,61 @@ pub enum MapError {
     NoSuchFolder(String),
 }
 
+/// A volume scanned for the map: the snapshot and its categories (kept for drill-down) and the overview.
+#[derive(Debug)]
+pub struct ScannedVolume {
+    /// What the scan found.
+    pub snapshot: Snapshot,
+    /// How it sorts into categories.
+    pub categories: Categories,
+    /// The overview map.
+    pub overview: Overview,
+}
+
+/// Scans a volume for the map: [`scan`], then [`categorize`] with `env`, then [`overview`] against the volume's
+/// own numbers, read when the scan finishes.
+///
+/// `on_update` gets the HUD's numbers about ten times a second, and now and then a preview of the categories so
+/// the map can fill in. A preview holds the scan's workers while it is taken, so previews come less often as the
+/// tree grows: never more than about a tenth of the scan's time goes to them.
+pub fn scan_for_map(
+    volume: &Path,
+    env: &Env,
+    on_update: &mut dyn FnMut(ScanUpdate),
+    cancel: &CancelToken,
+) -> Result<ScannedVolume, ScanError> {
+    let mut next_preview = Duration::ZERO;
+    let snapshot = scan(
+        volume,
+        &ScanOptions::default(),
+        &mut |progress| {
+            let preview = (progress.elapsed >= next_preview).then(|| {
+                let started = Instant::now();
+                let categories = progress.preview(|partial| categorize(partial, env));
+                next_preview =
+                    progress.elapsed + (started.elapsed() * 10).max(Duration::from_millis(700));
+                categories
+            });
+            on_update(scan_update(progress, preview.as_ref()));
+        },
+        cancel,
+    )?;
+    let categories = categorize(&snapshot, env);
+    let scanned = snapshot.stats().bytes;
+    let info = volume_info(volume).unwrap_or_else(|_| VolumeInfo {
+        name: volume.display().to_string(),
+        mount_point: volume.display().to_string(),
+        total_bytes: scanned,
+        used_bytes: scanned,
+    });
+    let overview = overview(&snapshot, &categories, info);
+    Ok(ScannedVolume {
+        snapshot,
+        categories,
+        overview,
+    })
+}
+
 /// The overview map of a finished scan. `volume` is the OS's view of the volume, read when the scan finished.
 pub fn overview(snapshot: &Snapshot, categories: &Categories, volume: VolumeInfo) -> Overview {
     let stats = snapshot.stats();
@@ -243,7 +298,7 @@ pub fn overview(snapshot: &Snapshot, categories: &Categories, volume: VolumeInfo
             let mut items = fold(
                 cat.items.iter().map(|i| map_item(snapshot, categories, i)),
                 CATEGORY_ITEMS,
-                &format!("more:{}", format!("{:?}", cat.id).to_ascii_lowercase()),
+                &format!("more:{:?}", cat.id).to_ascii_lowercase(),
             );
             let mut bytes = cat.bytes;
             if cat.id == CategoryId::System && hidden > 0 {

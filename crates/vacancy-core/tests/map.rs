@@ -255,3 +255,48 @@ fn full_disk_access_is_a_mac_setting() {
     );
     assert!(vacancy_core::permissions::open_full_disk_access_settings().is_err());
 }
+
+#[test]
+fn scans_a_folder_for_the_map_in_one_call() {
+    let fx = Fixture::new();
+    fx.file("Users/alex/Downloads/big.iso", 2 * MIB);
+    fx.file("Program Files/Tool/tool.exe", MIB);
+    let env = Env::windows(fx.root(), "alex");
+    let mut updates = Vec::new();
+    let scanned = vacancy_core::scan_for_map(
+        fx.root(),
+        &env,
+        &mut |u| updates.push(u),
+        &CancelToken::new(),
+    )
+    .expect("scan for the map");
+    assert!(
+        updates
+            .first()
+            .and_then(|u| u.categories.as_ref())
+            .is_some(),
+        "the first update already previews the map"
+    );
+    assert_eq!(updates.last().unwrap().bytes, 3 * MIB);
+    let map = &scanned.overview;
+    assert_eq!(map.scan.scanned_bytes, 3 * MIB);
+    assert!(
+        map.categories
+            .iter()
+            .any(|c| c.id == CategoryId::Downloads && c.bytes == 2 * MIB)
+    );
+    let tool = map
+        .categories
+        .iter()
+        .flat_map(|c| &c.items)
+        .find(|i| i.name == "Tool")
+        .expect("the tool is an item");
+    assert!(browse(&scanned.snapshot, &scanned.categories, &tool.id).is_ok());
+
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    assert!(matches!(
+        vacancy_core::scan_for_map(fx.root(), &env, &mut |_| {}, &cancel),
+        Err(vacancy_core::ScanError::Cancelled)
+    ));
+}
