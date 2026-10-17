@@ -3,6 +3,7 @@ members = ["crates/vacancy-core", "src-tauri"]
 resolver = "3"
 
 [workspace.package]
+# Vacancy's version, and the only place it is set: Tauri, the installers and the release tag (v<version>) all read it.
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"

@@ -1,7 +1,6 @@
 {
   "name": "vacancy",
   "private": true,
-  "version": "0.1.0",
   "type": "module",
   "description": "See where your disk space went, get it back, and find out what changed.",
   "scripts": {

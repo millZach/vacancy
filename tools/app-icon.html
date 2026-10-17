@@ -1,6 +1,9 @@
 <!doctype html>
-<!-- The app icon's source: a lit neon "V" from the wordmark on the dark dot ground. Rendered to
-     src-tauri/icons/app-icon.png by tools/render-icon.mjs, which then runs `tauri icon`. -->
+<!-- The app icon's source: the wordmark's "V" as a lit neon tube (white-hot core, neon rim, glow) on the dark dot
+     ground. tools/render-icon.mjs renders it twice and runs `tauri icon` on each:
+       - default: Apple's grid (an 824px tile on a 1024px canvas) for macOS and every PNG size;
+       - ?layout=windows: a full-bleed tile for icon.ico, because Windows icons fill their square.
+     The tube is drawn thick on purpose so the V stays legible at 16 and 32 px. -->
 <html>
   <head>
     <meta charset="utf-8" />
@@ -8,6 +11,16 @@
       @font-face {
         font-family: 'Neonderthaw';
         src: url('../node_modules/@fontsource/neonderthaw/files/neonderthaw-latin-400-normal.woff2') format('woff2');
+      }
+      :root {
+        --margin: 100px;
+        --radius: 185px;
+        --scale: 1;
+      }
+      :root.windows {
+        --margin: 24px;
+        --radius: 218px;
+        --scale: 1.186; /* the full-bleed tile is 976px instead of 824px */
       }
       html,
       body {
@@ -18,11 +31,8 @@
       }
       .tile {
         position: absolute;
-        left: 100px;
-        top: 100px;
-        width: 824px;
-        height: 824px;
-        border-radius: 185px;
+        inset: var(--margin);
+        border-radius: var(--radius);
         overflow: hidden;
         background:
           radial-gradient(60% 55% at 50% 52%, rgba(255, 79, 179, 0.16), transparent 70%),
@@ -32,14 +42,17 @@
           inset 0 0 0 3px #303845,
           inset 0 2px 0 6px rgba(255, 255, 255, 0.03);
       }
+      /* Neonderthaw's V sits left of its advance box; the right padding centres the drawn glyph in the tile. */
       .v {
         position: absolute;
         inset: 0;
         display: grid;
         place-items: center;
-        padding: 40px 190px 0 0;
-        font: 400 500px/1 'Neonderthaw', cursive;
-        color: #ffe4f3;
+        padding: calc(50px * var(--scale)) calc(225px * var(--scale)) 0 0;
+        font: 400 calc(590px * var(--scale)) / 1 'Neonderthaw', cursive;
+        color: #fff7fb;
+        -webkit-text-stroke: calc(44px * var(--scale)) #ff7cc6;
+        paint-order: stroke fill;
         text-shadow:
           0 0 6px #fff,
           0 0 18px #ff4fb3,
@@ -47,6 +60,11 @@
           0 0 110px rgba(255, 79, 179, 0.6);
       }
     </style>
+    <script>
+      if (new URLSearchParams(location.search).get('layout') === 'windows') {
+        document.documentElement.classList.add('windows');
+      }
+    </script>
   </head>
   <body>
     <div class="tile"><div class="v">V</div></div>
