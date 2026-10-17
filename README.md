@@ -9,7 +9,7 @@ Vacancy is in early development. Releases before 1.0 are previews, and each rele
 ## What Vacancy does
 
 - **Maps your drive.** You see where the space goes as a map you can explore.
-- **Proposes cleanups.** Built-in rules find known junk offline: caches, temp files, old installers, build folders, and leftovers from Docker, Xcode and package managers. Each proposal shows its size, why it is safe, and how risky it is. Duplicate detection is still planned.
+- **Proposes cleanups.** Built-in rules find known junk offline: caches, temp files, old installers, build folders, and leftovers from Xcode and package managers. Each proposal shows its size, why it is safe, and how risky it is. Duplicate detection is still planned.
 - **AI assistance is deferred.** Claude Code and Codex integrations remain unavailable until Vacancy can enforce metadata-only access. Unknown-folder explanations and AI reorganization are not active features.
 - **Runs only what you approve.** You pick the items and confirm once, then watch the space come back.
 - **Shows what it did.** The run ends with a report: space freed, what was deleted, what was moved, and what was skipped and why.
