@@ -39,7 +39,8 @@ use links::{LinkKey, LinkSet};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScanOptions {
     /// Files at or above this many allocated bytes are kept individually in the snapshot; smaller ones are only
-    /// added to their folder's totals. Default: 1 MiB.
+    /// added to their folder's totals, except installers and disk images (see [`is_installer`]), which are always
+    /// kept so the old-installer rules can name them. Default: 1 MiB.
     pub keep_files_from: u64,
     /// Worker threads. Default: two per core, from 8 to 32.
     pub threads: Option<NonZeroUsize>,
@@ -373,6 +374,33 @@ pub(crate) enum EntryKind {
     Other,
 }
 
+/// Extensions of installers and disk images: `.exe`, `.msi`, `.msix`, `.msixbundle`, `.appx`, `.appxbundle`, `.dmg`,
+/// `.pkg`, `.mpkg`. Files with them are kept whatever their size.
+const INSTALLER_EXTENSIONS: [&str; 9] = [
+    "exe",
+    "msi",
+    "msix",
+    "msixbundle",
+    "appx",
+    "appxbundle",
+    "dmg",
+    "pkg",
+    "mpkg",
+];
+
+/// Whether a file's name ends in an installer's extension (any case). Cheap enough to call for every file.
+pub(crate) fn is_installer(name: &std::ffi::OsStr) -> bool {
+    let bytes = name.as_encoded_bytes();
+    let Some(dot) = bytes.iter().rposition(|&b| b == b'.') else {
+        return false;
+    };
+    let ext = &bytes[dot + 1..];
+    ext.len() <= 10
+        && INSTALLER_EXTENSIONS
+            .iter()
+            .any(|e| e.as_bytes().eq_ignore_ascii_case(ext))
+}
+
 /// Turns entries into a folder's [`Listing`]: hard links merged, small files folded into the folder's totals,
 /// big ones kept, markers noted.
 pub(crate) struct Collector<'a> {
@@ -399,7 +427,7 @@ impl Collector<'_> {
                 listing.own_bytes += e.allocated;
                 listing.own_files += 1;
                 listing.own_last_used = listing.own_last_used.max(used);
-                if e.allocated >= self.keep_from {
+                if e.allocated >= self.keep_from || is_installer(e.name) {
                     listing.push_kept(e.name, e.allocated, used);
                 }
                 let len = e.name.len();

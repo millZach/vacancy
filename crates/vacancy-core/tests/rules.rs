@@ -533,6 +533,42 @@ fn the_mac_rules_find_what_the_prototype_proposes() {
     }
 }
 
+/// Installers smaller than the scan's keep threshold (stub installers, small `.msi` and `.pkg` files) are found
+/// too: the scanner keeps every file with an installer's extension.
+#[test]
+fn small_installers_are_found_too() {
+    let fx = Fixture::new();
+    fx.file("Users/alex/Downloads/ChromeSetup.exe", 96 * KIB);
+    fx.file("Users/alex/Downloads/Installers/tool.msi", 64 * KIB);
+    fx.file("Users/alex/Downloads/Tiny.pkg", 32 * KIB);
+    fx.file("Users/alex/Downloads/notes.txt", 32 * KIB);
+    age(&fx.path("Users/alex/Downloads"), 60);
+    // Kept at any size; other small files are not.
+    let snap = fx.scan();
+    assert!(
+        snap.find_file(&fx.path("Users/alex/Downloads/ChromeSetup.exe"))
+            .is_some()
+    );
+    assert!(
+        snap.find_file(&fx.path("Users/alex/Downloads/notes.txt"))
+            .is_none()
+    );
+
+    let (snap, proposals) = run(&fx, &Env::windows(fx.root(), "alex"), &moment(&[]));
+    assert_eq!(
+        targets(&fx, &snap, &proposals, "w-installers"),
+        vec![
+            "Users/alex/Downloads/ChromeSetup.exe".to_owned(),
+            "Users/alex/Downloads/Installers/tool.msi".to_owned(),
+        ]
+    );
+    let (snap, proposals) = run(&fx, &Env::macos(fx.root(), "alex"), &moment(&[]));
+    assert_eq!(
+        targets(&fx, &snap, &proposals, "m-dmgs"),
+        vec!["Users/alex/Downloads/Tiny.pkg".to_owned()]
+    );
+}
+
 /// JetBrains IDEs keep their local history of every edit in their cache folders. It never goes; the caches beside
 /// it may.
 #[test]
