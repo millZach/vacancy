@@ -897,6 +897,37 @@ mod guard {
         }
     }
 
+    /// A sync root chosen as the place to scan (a Downloads folder Google Drive mirrors, a home folder kept in
+    /// Dropbox): its own working folders mark it, so nothing in it is offered. Without them, the same scans offer
+    /// the old installers and the idle project.
+    #[test]
+    fn a_sync_root_scanned_directly() {
+        for at in ["Users/alex/Downloads", "Users/alex"] {
+            for marker in [None, Some(".tmp.drivedownload"), Some(".dropbox.cache")] {
+                let fx = Fixture::new();
+                bait(&fx, at);
+                if let Some(marker) = marker {
+                    fx.dir(&format!("{at}/{marker}"));
+                }
+                for env in [win(&fx), mac(&fx)] {
+                    let snap = support::scan_with(&fx.path(at), 256 * KIB);
+                    let cats = categorize(&snap, &env);
+                    let proposals = propose(&snap, &cats, &env, &moment(&[]));
+                    let found = all_targets(&fx, &snap, &proposals);
+                    let root = cats.category_of(snap.roots()[0].dir);
+                    let case = format!("{at} with {marker:?} on {:?}: {found:?}", env.platform);
+                    if marker.is_some() {
+                        assert!(found.is_empty(), "{case}");
+                        assert_eq!(root, CategoryId::Cloud, "{case}");
+                    } else {
+                        assert!(!found.is_empty(), "{case}");
+                        assert_ne!(root, CategoryId::Cloud, "{case}");
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn os_folders() {
         let fx = Fixture::new();

@@ -426,6 +426,11 @@ pub(crate) fn categorize_until(
                 container: false,
             };
             ctx.sealed = true;
+        } else if let Some(provider) = sync_root_marks(snapshot.markers(root.dir)) {
+            // The scan started at a sync root: a mirrored Google Drive folder or a Dropbox folder chosen itself.
+            n_root.category = CategoryId::Cloud;
+            ctx.sealed = true;
+            cloud_names.push(provider.to_owned());
         }
         if !ctx.sealed
             && let Some(rule) = ctx.trie.and_then(|t| trie.rule(t))
