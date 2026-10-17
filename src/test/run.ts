@@ -105,3 +105,36 @@ export const report: RunReport = {
   reorganized: [],
   map: fixtures.windows.overview,
 };
+
+/** A hard-link note: deleted here, its space still held by another name elsewhere. */
+export const hardLinked: Skip = {
+  path: 'C:\\Users\\alex\\code\\portfolio-2024\\node_modules\\.pnpm',
+  reason: '38 files are also kept elsewhere under other names (hard links), so their space is still in use',
+  kind: 'hardLinked',
+  bytes: 0.09 * GB,
+  items: 38,
+};
+
+/**
+ * `report` with everything the finish can show: a hard-link note on the biggest win, advice left for the user, and
+ * folders reorganized (as ticket 08's runs will report them).
+ */
+export const fullReport: RunReport = {
+  ...report,
+  id: 'run-full',
+  steps: [{ ...nodeDone, skipped: [hardLinked] }, browserPartial],
+  movedItems: 1_028,
+  reorganized: [
+    { id: 'r-downloads', folder: 'Downloads', movedItems: 812 },
+    { id: 'r-desktop', folder: 'Desktop', movedItems: 216 },
+  ],
+  leftForYou: [
+    {
+      id: 'w-game',
+      title: 'Cyberpunk 2077 (not played in 14 months)',
+      summary: '71.0 GB in Steam.',
+      why: 'Vacancy won’t delete games directly. Uninstall it from Steam so Steam stays consistent.',
+      bytes: 71 * GB,
+    },
+  ],
+};

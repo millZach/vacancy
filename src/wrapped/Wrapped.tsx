@@ -196,7 +196,7 @@ export function Wrapped({ report, leaving, entering, onHandoff, overlayRef }: Pr
             type="button"
             className="round"
             onClick={() => go(index + 1)}
-            aria-label={index === last ? 'See it on the map' : 'Next slide'}
+            aria-label={index === last ? 'Show the map summary' : 'Next slide'}
           >
             <ChevronRight size={18} aria-hidden />
           </button>
