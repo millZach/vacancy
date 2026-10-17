@@ -75,6 +75,9 @@ fn main() {
         println!("  unreadable    {}", p.display());
     }
     let env = Env::detect(&path);
+    for c in &env.cloud {
+        println!("cloud root      {} ({})", c.path.display(), c.provider);
+    }
     let started = std::time::Instant::now();
     let cats = categorize(&snapshot, &env);
     println!(

@@ -63,9 +63,9 @@ struct Entry {
 pub struct Guard {
     platform: Platform,
     allowed: Vec<PathKey>,
-    /// On the Windows drive that holds the home folder, the drive's root: what is inside the folders people make
-    /// there (`C:\Dev`) is allowed too, except in `Users`.
-    drive_folders: Option<PathKey>,
+    /// On the Windows drive that holds the home folder, the drive's root and the folder of user accounts: what is
+    /// inside the folders people make at the root (`C:\Dev`) is allowed too, but never other users' homes.
+    drive_folders: Option<(PathKey, Option<PathKey>)>,
     entries: Vec<Entry>,
 }
 
@@ -99,8 +99,11 @@ impl Guard {
                     g.allow(t);
                 }
             }
-            if env.platform == Platform::Windows {
-                drive_folders = root.clone();
+            if env.platform == Platform::Windows
+                && let Some(root) = &root
+            {
+                let users = env.home.parent().and_then(PathKey::of);
+                drive_folders = Some((root.clone(), users));
             }
         } else {
             g.allow(volume_root);
@@ -157,9 +160,14 @@ impl Guard {
         if let Some(what) = key.names_from_last().find_map(|n| self.protected_name(n)) {
             return Err(Denied::Protected(what.to_owned()));
         }
-        let in_drive_folder = self.drive_folders.as_ref().is_some_and(|root| {
+        let in_drive_folder = self.drive_folders.as_ref().is_some_and(|(root, users)| {
             let n = root.keys().len();
-            key.keys().len() >= n + 2 && key.starts_with(root) && key.keys()[n] != "users"
+            key.keys().len() >= n + 2
+                && key.starts_with(root)
+                && users.as_ref().is_none_or(|u| !key.starts_with(u))
+                && !TOOLS_AT_ROOT.contains(&key.keys()[n].as_str())
+                && !key.keys()[n].starts_with("python")
+                && !key.keys()[n].starts_with("ruby")
         });
         if !in_drive_folder && !self.allowed.iter().any(|a| key.is_inside(a)) {
             return Err(Denied::OutsideAllowedRoots);
@@ -240,6 +248,27 @@ fn sub(base: &Path, rel: &str) -> std::path::PathBuf {
         .fold(base.to_path_buf(), |p, part| p.join(part))
 }
 
+/// Folders that toolchains and drivers install at the root of the system drive (keys, so lowercase). Not folders
+/// people made, so not open to the rules. Python and Ruby installs (`C:\Python312`) are told by their prefix.
+const TOOLS_AT_ROOT: &[&str] = &[
+    "msys64",
+    "msys32",
+    "cygwin",
+    "cygwin64",
+    "mingw64",
+    "strawberry",
+    "tools",
+    "inetpub",
+    "intel",
+    "amd",
+    "nvidia",
+    "drivers",
+    "android",
+    "flutter",
+    "xampp",
+    "wamp64",
+];
+
 /// What Windows and installers keep at the root of a drive. Protected on every drive; the rules never look there.
 pub(crate) const WINDOWS_DRIVE_SYSTEM: &[&str] = &[
     "Windows",
@@ -287,6 +316,16 @@ fn windows(env: &Env, volume_root: &Path, g: &mut Builder) {
     g.subtree(&sub(roaming, "Microsoft/Windows"), "Windows settings");
     g.subtree(&sub(local, "Microsoft/Credentials"), "saved sign-ins");
     g.subtree(&sub(roaming, "Microsoft/Credentials"), "saved sign-ins");
+    g.subtree(&sub(roaming, "Microsoft/Protect"), "encryption keys");
+    g.subtree(&sub(roaming, "Microsoft/Crypto"), "encryption keys");
+    g.subtree(
+        &sub(roaming, "Microsoft/SystemCertificates"),
+        "certificates",
+    );
+    g.subtree(&sub(local, "Microsoft/Vault"), "saved sign-ins");
+    g.subtree(&sub(local, "Microsoft/Outlook"), "your mail");
+    g.subtree(&env.home.join(".ssh"), "SSH keys");
+    g.subtree(&env.home.join(".gnupg"), "GnuPG keys");
 
     // Every drive's own system folders, wherever Windows is installed.
     for name in WINDOWS_DRIVE_SYSTEM {
@@ -313,6 +352,8 @@ fn macos(env: &Env, volume_root: &Path, g: &mut Builder) {
         g.exact(&sub(home, rel), what);
     }
     g.subtree(&home.join("Applications"), "installed apps");
+    g.subtree(&home.join(".ssh"), "SSH keys");
+    g.subtree(&home.join(".gnupg"), "GnuPG keys");
     g.subtree(&lib.join("Mobile Documents"), "iCloud Drive");
     g.subtree(&lib.join("CloudStorage"), "cloud-sync folders");
     for (rel, what) in [

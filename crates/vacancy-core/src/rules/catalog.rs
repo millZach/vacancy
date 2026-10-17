@@ -147,21 +147,17 @@ const APP_CACHES: &[&str] = &[
     "CachedData",
 ];
 
-/// The temp folders the temp rule empties: those in the home folder, and others only if they are called `Temp` or
-/// `tmp`. A `%TEMP%` pointed at some other folder (`C:\Tools`) is not a reason to empty it.
+/// The temp folders the temp rule empties: only those called `Temp` or `tmp`. A `%TEMP%` pointed at some other
+/// folder (`C:\Users\me\Projects`, `C:\Tools`) is not a reason to empty it.
 fn temp_places(env: &Env) -> Vec<Place> {
-    let home = PathKey::of(&env.home);
     env.temp
         .iter()
         .filter(|t| {
-            let Some(key) = PathKey::of(t) else {
-                return false;
-            };
-            home.as_ref().is_some_and(|h| key.is_inside(h))
-                || key
-                    .names_from_last()
+            PathKey::of(t).is_some_and(|key| {
+                key.names_from_last()
                     .next()
                     .is_some_and(|n| n == "temp" || n == "tmp")
+            })
         })
         .cloned()
         .map(unlabelled)

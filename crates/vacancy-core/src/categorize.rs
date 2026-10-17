@@ -231,7 +231,7 @@ impl Categories {
             let f = snapshot.file(file);
             rest_bytes = rest_bytes.saturating_sub(f.bytes);
             rest_files = rest_files.saturating_sub(1);
-            if self.file_rules.contains_key(&file) || self.taken_file(file) {
+            if self.taken_file(file) || self.file_rules.contains_key(&file) {
                 continue;
             }
             out.push(Item {
@@ -580,7 +580,14 @@ fn build_items(
                 files: 1,
                 last_used: f.last_used,
             };
-            if let Some(&category) = file_rules.get(&file) {
+            // A proposal's claim comes first, so its tile is always as big as the proposal says.
+            if let Some((c, _)) = carve
+                && let Some(&p) = c.files.get(&file)
+            {
+                own_sums.bytes = own_sums.bytes.saturating_sub(f.bytes);
+                own_sums.files = own_sums.files.saturating_sub(1);
+                taken[p as usize - 1].add(sums);
+            } else if let Some(&category) = file_rules.get(&file) {
                 own_sums.bytes = own_sums.bytes.saturating_sub(f.bytes);
                 own_sums.files = own_sums.files.saturating_sub(1);
                 items[category.index()].push(Item {
@@ -589,12 +596,6 @@ fn build_items(
                     files: 1,
                     last_used: f.last_used,
                 });
-            } else if let Some((c, _)) = carve
-                && let Some(&p) = c.files.get(&file)
-            {
-                own_sums.bytes = own_sums.bytes.saturating_sub(f.bytes);
-                own_sums.files = own_sums.files.saturating_sub(1);
-                taken[p as usize - 1].add(sums);
             }
         }
         if let Some((c, _)) = carve

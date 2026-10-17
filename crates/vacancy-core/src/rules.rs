@@ -3,11 +3,15 @@
 //!
 //! Each rule names its category, risk, whether what it removes comes back on its own, how it finds things (known
 //! places from the [`Env`], folder names, project folders, old files), what it leaves alone, and its action kind.
-//! Every target passes the [Guard](crate::Guard) twice over: the path on its own, and what the scan saw inside it (a
-//! target that holds a protected place, a link, or a folder the scanner didn't enter is dropped). Targets never
-//! overlap: a place one rule took is not offered by a later rule, and catalogs list the specific before the general.
+//! Every target passes the [Guard](crate::Guard) twice over: the path on its own, and what the scan saw in and
+//! around it. A target that is a link, or is, is inside or holds a protected place, or holds a folder the scanner
+//! couldn't read or found changed (its size is unknown) is dropped. A link deeper inside a target is kept, since
+//! pnpm's `node_modules` are full of them, and counted as nothing: the executor (ticket 04) deletes a link itself,
+//! never what it points at. Targets never overlap: a place one rule took is not offered by a later rule, and
+//! catalogs list the specific before the general.
 //!
-//! Sizes and counts come from the scan; nothing is estimated. Nothing here touches the disk.
+//! Sizes and counts come from the scan; nothing is estimated. Nothing here changes the disk; the only questions
+//! asked of it are the long forms of 8.3 short names.
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -71,7 +75,7 @@ pub enum ProposalAction {
 pub enum ActionKind {
     /// Deletes what is inside each place found, and keeps the place itself.
     DeleteContents,
-    /// Deletes each folder found, whole.
+    /// Deletes each place found, whole: a folder with everything in it, or a file.
     DeleteDirectory,
     /// Runs a tool. Ticket 06.
     Tool,
@@ -100,6 +104,9 @@ pub struct Proposal {
     /// Files it removes.
     #[ts(type = "number")]
     pub item_count: u64,
+    /// Places it removes them from: folders, files and folders' loose files.
+    #[ts(type = "number")]
+    pub place_count: u64,
     /// How careful to be.
     pub risk: Risk,
     /// Who proposed it.
@@ -210,7 +217,6 @@ pub(crate) fn propose_until(
         &env.home,
         &env.local_app_data,
         &env.app_data,
-        &k.downloads,
         &k.documents,
         &k.desktop,
         &k.pictures,
@@ -222,10 +228,16 @@ pub(crate) fn propose_until(
     let library = env.home.join("Library");
     personal.push(&app_data);
     personal.push(&library);
+    let mut personal: Vec<(PathKey, bool)> = personal
+        .into_iter()
+        .filter_map(PathKey::of)
+        .map(|k| (k, false))
+        .collect();
+    personal.extend(PathKey::of(&k.downloads).map(|k| (k, true)));
     let mut engine = Engine {
         snap: snapshot,
         guarded,
-        personal: personal.into_iter().filter_map(PathKey::of).collect(),
+        personal,
         claims: Claims::new(snapshot.dir_count()),
         moment,
         running: moment
@@ -281,8 +293,8 @@ struct Guarded<'a> {
     snap: &'a Snapshot,
     /// The folder is protected (the OS, a Photos library, a cloud-sync folder, an app bundle...), or is inside one.
     under: Vec<bool>,
-    /// The folder holds, somewhere below it, a folder whose protection reaches whatever holds it: everything but an
-    /// app bundle (see [`Guard::protected_os_name`]).
+    /// The folder holds, somewhere below it, a folder whose protection reaches whatever holds it (everything but an
+    /// app bundle, see [`Guard::protected_os_name`]), or a folder whose contents are unknown.
     holds: Vec<bool>,
 }
 
@@ -300,12 +312,16 @@ impl<'a> Guarded<'a> {
             if dir.index() % CHECK_EVERY == 0 && stop() {
                 return None;
             }
-            let by_scan =
-                cats.category_of(dir).protected() || snap.flags(dir).contains(DirFlags::CLOUD);
+            let flags = snap.flags(dir);
+            let by_scan = cats.category_of(dir).protected() || flags.contains(DirFlags::CLOUD);
             let by_name = snap
                 .parent(dir)
                 .and_then(|_| guard.protected_os_name(snap.name(dir)));
-            holding[dir.index()] = by_scan || by_name.is_some_and(|(_, reaches)| reaches);
+            // A folder the scanner couldn't read, found changed, or that is another volume: nobody knows what is
+            // in it, so nothing that holds it is offered. (A link is fine: deleting it never touches its target.)
+            let unknown = !flags.entered() && !flags.contains(DirFlags::LINK);
+            holding[dir.index()] =
+                by_scan || unknown || by_name.is_some_and(|(_, reaches)| reaches);
             under[dir.index()] =
                 by_scan || by_name.is_some() || snap.parent(dir).is_some_and(|p| under[p.index()]);
         }
@@ -432,8 +448,9 @@ impl Claims {
 struct Engine<'a> {
     snap: &'a Snapshot,
     guarded: Guarded<'a>,
-    /// Places no rule sweeps whole, nor anything holding them (see [`Engine::holds_personal`]).
-    personal: Vec<PathKey>,
+    /// Places no rule sweeps whole, nor anything holding them (see [`Engine::holds_personal`]), each marked if it
+    /// is the Downloads folder.
+    personal: Vec<(PathKey, bool)>,
     claims: Claims,
     moment: &'a Moment,
     /// Running apps, lowercased.
@@ -469,6 +486,7 @@ impl Engine<'_> {
         }
         let candidates = self.candidates(rule)?;
         for (at, label, owners_in) in candidates {
+            self.tick()?;
             if !self.wanted(rule, at, owners_in) || !self.guarded.allows(at) {
                 continue;
             }
@@ -555,7 +573,7 @@ impl Engine<'_> {
                 top_only,
             } => {
                 if let Some(base) = self.locate(under)
-                    && !self.holds_personal(base, PathKey::of(under).as_ref())
+                    && !self.holds_personal(base, true)
                 {
                     for f in self.files_below(base, anywhere, top_only)? {
                         direct.push((ItemRef::File(f), None, None));
@@ -566,7 +584,7 @@ impl Engine<'_> {
         for spot in spots {
             match rule.action {
                 ActionKind::DeleteContents => {
-                    if self.holds_personal(spot.dir, None) {
+                    if self.holds_personal(spot.dir, false) {
                         continue; // a temp folder pointed at the home folder empties nothing
                     }
                     for at in self.contents(spot.dir) {
@@ -619,15 +637,16 @@ impl Engine<'_> {
     }
 
     /// Whether `dir` is, or holds, one of the places a rule must never sweep: the drive, the users' folder, the
-    /// home folder, its known folders and app data. `except` is the one place the rule is about (Downloads).
-    fn holds_personal(&self, dir: DirId, except: Option<&PathKey>) -> bool {
+    /// home folder, its known folders and app data. With `downloads_ok`, the Downloads folder itself may be swept
+    /// (old installers), but not when it is also one of the others, as when it is redirected to a drive's root.
+    fn holds_personal(&self, dir: DirId, downloads_ok: bool) -> bool {
         let Some(key) = PathKey::of(&self.snap.path(dir)) else {
             return true;
         };
         self.personal
             .iter()
-            .filter(|p| Some(*p) != except)
-            .any(|p| p.starts_with(&key))
+            .filter(|(_, downloads)| !(downloads_ok && *downloads))
+            .any(|(p, _)| p.starts_with(&key))
     }
 
     /// Whether an app folder named `owner` (`com.spotify.client`, `Slack`, `Google`) belongs to a running app.
@@ -978,6 +997,7 @@ fn proposal(snap: &Snapshot, rule: &Rule, found: &Found) -> Proposal {
         why: fill(rule.text.why),
         bytes: found.bytes,
         item_count: found.files,
+        place_count: n,
         risk: rule.risk,
         source: ProposalSource::Rule,
         ai_note: None,

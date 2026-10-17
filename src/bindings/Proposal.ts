@@ -37,6 +37,10 @@ bytes: number,
  */
 itemCount: number, 
 /**
+ * Places it removes them from: folders, files and folders' loose files.
+ */
+placeCount: number, 
+/**
  * How careful to be.
  */
 risk: Risk, 

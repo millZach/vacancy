@@ -712,12 +712,44 @@ mod guard {
             get(&proposals, "w-temp").is_none(),
             "nothing in the home folder is temp"
         );
+        assert!(
+            get(&proposals, "w-installers").is_none(),
+            "nor an installer in it"
+        );
         for t in all_targets(&fx, &snap, &proposals) {
             assert!(
                 t.starts_with("Users/alex/code/"),
                 "only what's deep in a project: {t}"
             );
         }
+        // A %TEMP% inside the home folder that isn't a temp folder is not emptied either.
+        let fx = Fixture::new();
+        fx.file("Users/alex/Projects/thesis/draft.docx", MIB);
+        fx.file("Users/alex/Projects/old.zip", MIB);
+        age(&fx.path("Users/alex/Projects"), 30);
+        let mut env = win(&fx);
+        env.temp = vec![fx.path("Users/alex/Projects")];
+        let (_, proposals) = run(&fx, &env, &moment(&[]));
+        assert!(get(&proposals, "w-temp").is_none(), "Projects is not Temp");
+
+        // Downloads redirected to the drive's root doesn't open the whole drive to the installer rule.
+        let fx = Fixture::new();
+        fx.file("setup.exe", MIB);
+        fx.file("Tools/old/package.msi", MIB);
+        age(fx.root(), 60);
+        let mut env = win(&fx);
+        env.home = PathBuf::from(if cfg!(windows) {
+            r"Z:\Users\alex"
+        } else {
+            "/Volumes/Other/Users/alex"
+        });
+        env.known.downloads = fx.root().to_path_buf();
+        let (_, proposals) = run(&fx, &env, &moment(&[]));
+        assert!(
+            get(&proposals, "w-installers").is_none(),
+            "the drive itself is not Downloads"
+        );
+
         // Nor anything that holds a known folder.
         let fx = Fixture::new();
         fx.file("Users/alex/AppData/Local/Temp/x.tmp", MIB);
@@ -754,21 +786,36 @@ mod guard {
 
     #[test]
     fn outside_the_allowed_roots() {
-        // Windows: another user's home is never searched, and a %TEMP% pointed at a folder at the drive's root
-        // doesn't empty it. Only a project inside it is found, as in any folder people make there (`C:\Dev`).
+        // Windows: another user's home is never searched, nor are toolchains' folders at the drive's root
+        // (`C:\Tools`, `C:\Python312`), and a %TEMP% pointed at a folder there doesn't empty it. Only a project in
+        // a folder people made at the root (`C:\Dev`) is found.
         let fx = Fixture::new();
+        bait(&fx, "Dev");
         bait(&fx, "Tools");
+        bait(&fx, "Python312/Lib");
         bait(&fx, "Users/bob/code");
         bait(&fx, "Users/alex/code"); // the control
         let mut env = win(&fx);
-        env.temp = vec![fx.path("Tools")];
+        env.temp = vec![fx.path("Dev")];
         let (snap, proposals) = run(&fx, &env, &moment(&[]));
         assert_eq!(
             all_targets(&fx, &snap, &proposals),
             vec![
-                "Tools/proj/node_modules".to_owned(),
+                "Dev/proj/node_modules".to_owned(),
                 "Users/alex/code/proj/node_modules".to_owned(),
             ]
+        );
+
+        // Profiles kept somewhere other than `Users`: other users' homes are still off-limits.
+        let fx = Fixture::new();
+        bait(&fx, "Profiles/bob/code");
+        bait(&fx, "Profiles/alex/code");
+        let mut env = win(&fx);
+        env.home = fx.path("Profiles/alex");
+        let (snap, proposals) = run(&fx, &env, &moment(&[]));
+        assert_eq!(
+            all_targets(&fx, &snap, &proposals),
+            vec!["Profiles/alex/code/proj/node_modules".to_owned()]
         );
 
         // macOS: only the home folder.
@@ -841,6 +888,60 @@ mod real {
         assert!(fx.path("Users/alex/Documents/thesis.docx").exists());
     }
 
+    /// A folder holding something the scanner couldn't read has an unknown size and unknown contents: it is not
+    /// offered. A link deeper inside a folder is fine; it is counted as nothing and the executor deletes the link
+    /// itself.
+    #[test]
+    fn a_folder_holding_an_unread_folder_is_left_alone_and_a_nested_link_counts_as_nothing() {
+        let fx = Fixture::new();
+        let temp = "Users/alex/AppData/Local/Temp";
+        fx.file("Users/alex/Documents/thesis.docx", 2 * MIB);
+        fx.file(&format!("{temp}/locked-setup/readable.bin"), MIB);
+        fx.file(&format!("{temp}/locked-setup/private/secret.bin"), MIB);
+        fx.file(&format!("{temp}/old-setup/payload.cab"), MIB);
+        age(&fx.path(temp), 5);
+        let link = fx.path(&format!("{temp}/old-setup/docs"));
+        #[cfg(windows)]
+        support::win::junction(&link, &fx.path("Users/alex/Documents"));
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(fx.path("Users/alex/Documents"), &link).unwrap();
+        // Making the link touched its folder; it is old again.
+        age_dir_only(&fx.path(&format!("{temp}/old-setup")), 5);
+        let _locked = support::Unreadable::new(&fx.path(&format!("{temp}/locked-setup/private")));
+        let env = Env::windows(fx.root(), "alex");
+        let (snap, proposals) = run(&fx, &env, &moment(&[]));
+        assert_eq!(
+            targets(&fx, &snap, &proposals, "w-temp"),
+            vec![format!("{temp}/old-setup")],
+            "not the folder holding an unreadable one"
+        );
+        assert_eq!(
+            get(&proposals, "w-temp").unwrap().bytes,
+            MIB,
+            "not Documents through the link"
+        );
+    }
+
+    /// Sets one folder's own times, without following or touching anything inside it.
+    fn age_dir_only(path: &Path, days: u64) {
+        let when = SystemTime::now() - std::time::Duration::from_secs(days * 86_400);
+        let times = std::fs::FileTimes::new()
+            .set_modified(when)
+            .set_accessed(when);
+        #[cfg(windows)]
+        let f = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .access_mode(0x100) // FILE_WRITE_ATTRIBUTES
+                .custom_flags(0x0200_0000) // FILE_FLAG_BACKUP_SEMANTICS
+                .open(path)
+                .unwrap()
+        };
+        #[cfg(unix)]
+        let f = std::fs::File::open(path).unwrap();
+        f.set_times(times).unwrap();
+    }
+
     #[test]
     fn unicode_and_long_paths() {
         let fx = Fixture::new();
@@ -872,7 +973,10 @@ mod real {
     #[test]
     fn short_names_name_the_same_place() {
         let fx = Fixture::new();
-        fx.file("Users/alex/AppData/Local/A long temp folder/old.tmp", MIB);
+        fx.file(
+            "Users/alex/AppData/Local/Long Named Folder/Temp/old.tmp",
+            MIB,
+        );
         fx.file("Users/alex/Cloud Storage Folder/proj/package.json", 4 * KIB);
         fx.file(
             "Users/alex/Cloud Storage Folder/proj/package-lock.json",
@@ -885,7 +989,7 @@ mod real {
         age(&fx.path("Users"), 200);
         let short = |rel: &str| short_path(&fx.path(rel));
         let mut env = Env::windows(fx.root(), "alex");
-        env.temp = vec![short("Users/alex/AppData/Local/A long temp folder")];
+        env.temp = vec![short("Users/alex/AppData/Local/Long Named Folder/Temp")];
         env.cloud.push(CloudRoot {
             provider: "OneDrive".into(),
             path: short("Users/alex/Cloud Storage Folder"),
@@ -893,7 +997,7 @@ mod real {
         let (snap, proposals) = run(&fx, &env, &moment(&[]));
         assert_eq!(
             all_targets(&fx, &snap, &proposals),
-            vec!["Users/alex/AppData/Local/A long temp folder/old.tmp".to_owned()],
+            vec!["Users/alex/AppData/Local/Long Named Folder/Temp/old.tmp".to_owned()],
             "temp found through its short name; the cloud root protected through its short name"
         );
     }
