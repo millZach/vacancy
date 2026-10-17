@@ -202,6 +202,73 @@ fn fixture_advice_is_review_off_and_rejects_unknown_outside_root_and_path_tricks
 }
 
 #[test]
+fn fresh_summaries_do_not_reuse_proposal_ids_for_different_targets() {
+    for mac in [false, true] {
+        let (fx, env) = setup(mac);
+        let snap = fx.scan();
+        let cats = categorize(&snap, &env);
+        let cancel = CancelToken::new();
+        let mut proposals = Proposals::default();
+        let one_root = SummaryLimits {
+            max_roots: 1,
+            ..limits()
+        };
+        let first = summarize(&snap, &cats, &env, &proposals, one_root, &cancel).unwrap();
+        let first_root = &first.payload().roots[0];
+        let first_target = first
+            .payload()
+            .entries
+            .iter()
+            .find(|entry| entry.parent_id.as_ref() == Some(first_root))
+            .unwrap();
+        let first_reference = first_target.id.clone();
+        let first_result = apply_response(
+            &first,
+            &response(first_root, &[&first_target.id]),
+            AdvisorProvider::Fixture,
+            &cats,
+            &env,
+            &mut proposals,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(first_result.proposal_ids.len(), 1);
+
+        // Existing claims exclude the first root. This is a new request, rather than replay of its old input.
+        let second = summarize(&snap, &cats, &env, &proposals, one_root, &cancel).unwrap();
+        let second_root = &second.payload().roots[0];
+        let second_target = second
+            .payload()
+            .entries
+            .iter()
+            .find(|entry| entry.parent_id.as_ref() == Some(second_root))
+            .unwrap();
+        assert_eq!(
+            first_reference, second_target.id,
+            "request-local IDs really were reused"
+        );
+        let second_result = apply_response(
+            &second,
+            &response(second_root, &[&second_target.id]),
+            AdvisorProvider::Fixture,
+            &cats,
+            &env,
+            &mut proposals,
+            &cancel,
+        )
+        .unwrap();
+        assert_eq!(second_result.rejected.overlapping, 0);
+        assert_eq!(second_result.proposal_ids.len(), 1);
+        assert_ne!(first_result.proposal_ids[0], second_result.proposal_ids[0]);
+        assert_eq!(proposals.list().len(), 2);
+        assert_ne!(
+            proposals.list()[0].sample_paths,
+            proposals.list()[1].sample_paths
+        );
+    }
+}
+
+#[test]
 fn missing_and_replaced_entries_are_rejected_after_the_summary() {
     let (fx, env) = setup(false);
     let snap = fx.scan();
@@ -502,4 +569,56 @@ fn detecting_a_cli_does_not_run_it_or_enable_metadata_dispatch() {
         );
     }
     assert!(proposals.list().is_empty());
+}
+
+#[test]
+#[ignore = "diagnostic: creates 12000 empty fixture folders to measure a capped wide summary"]
+fn broad_summary_probe() {
+    let fx = Fixture::new();
+    let env = Env::windows(fx.root(), "alex");
+    fx.file("Users/alex/Wide/payload.bin", 512 * KIB);
+    for index in 0..12000 {
+        fx.dir(&format!("Users/alex/Wide/branch-{index:05}"));
+    }
+    let snap = fx.scan();
+    let cats = categorize(&snap, &env);
+    let proposals = Proposals::default();
+    let cap = SummaryLimits {
+        max_roots: 1,
+        ..limits()
+    };
+    let start = std::time::Instant::now();
+    let input = summarize(&snap, &cats, &env, &proposals, cap, &CancelToken::new()).unwrap();
+    let elapsed = start.elapsed();
+    let bytes = input.to_json().unwrap().len();
+    assert!(input.payload().entries.len() <= cap.max_entries);
+    assert!(bytes <= cap.max_json_bytes);
+    assert!(input.payload().truncated);
+    println!(
+        "wide-summary: folders=12000 entries={} json_bytes={bytes} elapsed_ms={:.3}",
+        input.payload().entries.len(),
+        elapsed.as_secs_f64() * 1000.0
+    );
+
+    let cancel = CancelToken::new();
+    let cancel_worker = cancel.clone();
+    let worker = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(2));
+        cancel_worker.cancel();
+    });
+    let start = std::time::Instant::now();
+    let cancelled = summarize(&snap, &cats, &env, &proposals, cap, &cancel);
+    let elapsed = start.elapsed();
+    worker.join().unwrap();
+    match cancelled {
+        Err(AdvisorError::Cancelled) => println!(
+            "wide-summary cancel: cancelled elapsed_ms={:.3}",
+            elapsed.as_secs_f64() * 1000.0
+        ),
+        Ok(_) => println!(
+            "wide-summary cancel: completed before cancellation elapsed_ms={:.3}",
+            elapsed.as_secs_f64() * 1000.0
+        ),
+        other => panic!("unexpected cancellation result: {other:?}"),
+    }
 }

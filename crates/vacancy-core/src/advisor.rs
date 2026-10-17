@@ -370,8 +370,18 @@ pub fn summarize<'a>(
             if let ItemRef::Dir(d) = at {
                 if depth < limits.max_depth.min(3) {
                     // Depth-first in scanner order; no file content reads and no joins from external strings.
-                    let mut children: Vec<_> = snapshot.children(d).map(ItemRef::Dir).collect();
-                    children.extend(snapshot.files(d).map(ItemRef::File));
+                    // Never materialize a wide directory in full for a capped request. Unvisited siblings
+                    // are reported as truncation even if some of the bounded candidates are later refused.
+                    let remaining = max_entries.saturating_sub(input.bindings.len());
+                    if snapshot.children(d).len() + snapshot.files(d).len() > remaining {
+                        input.payload.truncated = true;
+                    }
+                    let children: Vec<_> = snapshot
+                        .children(d)
+                        .map(ItemRef::Dir)
+                        .chain(snapshot.files(d).map(ItemRef::File))
+                        .take(remaining)
+                        .collect();
                     for child in children.into_iter().rev() {
                         stack.push((child, Some(id.clone()), depth + 1));
                     }
@@ -705,6 +715,13 @@ fn apply_with_check(
             }
             claims.take(snap, target);
             let entry = &input.payload.entries[index];
+            // Entry IDs are request-local: a fresh capped summary can reuse e1 for a different file. Proposal
+            // IDs live for the scan, so use the scan inventory and distinguish file and directory arenas.
+            let target_id = match target {
+                ItemRef::Dir(dir) => format!("d{}", dir.index()),
+                ItemRef::File(file) => format!("f{}", file.index()),
+                _ => unreachable!(),
+            };
             let id = format!(
                 "ai-{}-{}",
                 match provider {
@@ -712,7 +729,7 @@ fn apply_with_check(
                     AdvisorProvider::Codex => "codex",
                     AdvisorProvider::Fixture => "fixture",
                 },
-                entry.id
+                target_id
             );
             // Repeated requests cannot append a duplicate ID, even if the original target became ineligible.
             if proposals.position(&id).is_some() {
