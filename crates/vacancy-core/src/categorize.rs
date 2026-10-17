@@ -468,8 +468,9 @@ fn apply(node: &mut Node, ctx: &mut Ctx, rule: &catalog::Rule) {
     ctx.sealed |= rule.seal;
 }
 
-/// Rules that go by a folder's name rather than its place. They only apply in places that hold people's own
-/// things (Other, personal files, Downloads), never inside apps, the OS or caches.
+/// Rules that go by a folder's name rather than its place. A Photos library is protected anywhere outside an
+/// already protected place, and a Steam library is games anywhere; the rest only apply in places that hold
+/// people's own things (Other, personal files, Downloads), never inside apps, the OS or caches.
 fn name_rule(
     env: &Env,
     snapshot: &Snapshot,
@@ -482,6 +483,13 @@ fn name_rule(
     // Called for most folders, so it compares without allocating.
     let name = name.to_str()?;
     let is = |other: &str| name.eq_ignore_ascii_case(other);
+    // A Photos library is protected wherever it is: in the Trash, inside an app, among developer files.
+    if env.platform == Platform::MacOs
+        && ends_with_ignore_case(name, ".photoslibrary")
+        && !inherited.protected()
+    {
+        return Some(CategoryId::Photos);
+    }
     // A Steam library anywhere is games.
     if is("steamapps") || (is("common") && snapshot.name(parent).eq_ignore_ascii_case("steamapps"))
     {
@@ -492,9 +500,6 @@ fn name_rule(
         CategoryId::Other | CategoryId::Media | CategoryId::Downloads
     ) {
         return None;
-    }
-    if env.platform == Platform::MacOs && ends_with_ignore_case(name, ".photoslibrary") {
-        return Some(CategoryId::Photos);
     }
     let markers = snapshot.markers(dir);
     let dev = is("node_modules")

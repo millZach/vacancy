@@ -350,3 +350,40 @@ fn categorizes_a_scan_preview() {
         "the last preview is the whole scan"
     );
 }
+
+#[test]
+fn a_photos_library_is_protected_wherever_it_is() {
+    let fx = Fixture::new();
+    fx.file(
+        "Users/alex/.Trash/Old Photos.photoslibrary/originals/IMG_1.heic",
+        MIB,
+    );
+    fx.file(
+        "Applications/Demo.app/Contents/Resources/Sample.photoslibrary/originals/IMG_2.heic",
+        512 * KIB,
+    );
+    fx.file(
+        "Users/alex/Library/Developer/Fixtures.photoslibrary/originals/IMG_3.heic",
+        256 * KIB,
+    );
+    fx.file(
+        "Users/alex/Pictures/Photos Library.photoslibrary/originals/IMG_4.heic",
+        2 * MIB,
+    );
+    let snap = fx.scan();
+    let cats = categorize(&snap, &Env::macos(fx.root(), "alex"));
+
+    let photos = cats.get(CategoryId::Photos);
+    assert!(photos.protected);
+    assert_eq!(
+        photos.bytes,
+        MIB + 512 * KIB + 256 * KIB + 2 * MIB,
+        "in the Trash, inside an app and among developer files too"
+    );
+    assert_eq!(cats.get(CategoryId::Caches).bytes, 0);
+    assert_eq!(cats.get(CategoryId::Dev).bytes, 0);
+    let trash = snap
+        .find(&fx.path("Users/alex/.Trash/Old Photos.photoslibrary"))
+        .unwrap();
+    assert_eq!(cats.category_of(trash), CategoryId::Photos);
+}
