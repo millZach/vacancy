@@ -29,8 +29,8 @@ export interface MockOptions {
   /** How many kept runs the history says it couldn't read. Default: none. */
   unreadableRuns?: number;
   /**
-   * Runs also report the fixture's reorganizations as done, to preview the finish's Moved slide before
-   * reorganizations arrive (ticket 08).
+   * Cleanup runs also report the fixture's reorganizations as done, to preview the finish's Moved slide before
+   * reorganizations arrive (ticket 08). Reminder-only runs never inject moves.
    */
   moves?: boolean;
   /** Start with the fixture's past runs in the history. Default: yes. */
@@ -177,7 +177,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
       const totalMs = options.runMs ?? STEP_MS * plan.steps.length;
       return new Promise<RunReport>((resolve) => {
         setTimeout(() => {
-          const moves = options.moves ? structuredClone(fixture.moves) : [];
+          const moves = options.moves && plan.steps.length > 0 ? structuredClone(fixture.moves) : [];
           const playback = play({ id: `run-${++made}`, plan, volume, totalMs, moves }, onEvent);
           playing = playback;
           void playback.done.then((report) => {

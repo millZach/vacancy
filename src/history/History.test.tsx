@@ -7,6 +7,7 @@ import { DrivesProvider } from '../drives/DrivesProvider';
 import { NBSP } from '../format';
 import { formatWhen } from '../summary/when';
 import { HistoryMenu } from './HistoryMenu';
+import { moveAdviceReport } from '../test/run';
 
 const plain = (s: string | null | undefined) => (s ?? '').replaceAll(NBSP, ' ');
 const header = () => screen.getByRole('banner');
@@ -34,6 +35,21 @@ beforeEach(() => {
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(
     DOMRect.fromRect({ x: 0, y: 0, width: 1200, height: 700 }),
   );
+});
+
+it('reopens a saved move-only run with legacy advice without claiming no files moved', async () => {
+  const bridge = renderApp({ pastRuns: false });
+  const r = moveAdviceReport;
+  vi.spyOn(bridge, 'listRuns').mockResolvedValue({ unreadable: 0, runs: [{
+    id: r.id, mountPoint: r.mountPoint, volumeName: r.volumeName, volumeId: r.map.volume.id,
+    startedAt: r.startedAt, freedBytes: 0, deletedItems: 0, movedItems: 4, cancelled: false,
+  }] });
+  vi.spyOn(bridge, 'openRun').mockResolvedValue(r);
+  await openHistory();
+  await userEvent.click(within(menu()).getByRole('menuitem'));
+  expect(await screen.findByRole('complementary', { name: 'What Vacancy did' })).not.toHaveTextContent('No files were deleted or moved.');
+  expect(screen.getByText('files moved').nextElementSibling).toHaveTextContent('4');
+  expect(screen.getByText(r.leftForYou[0]!.why)).toBeInTheDocument();
 });
 
 describe('past runs', () => {

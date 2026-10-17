@@ -9,7 +9,7 @@ import { useSize } from '../map/useSize';
 import { tileOf } from '../plan/totals';
 import { HintActionButton } from '../plan/HintActionButton';
 import { asSentence, neverReached } from '../run/progress';
-import { biggestWin, categoryOf, count, keptOf } from '../wrapped/deck';
+import { biggestWin, categoryOf, count, keptOf, remindersOnly } from '../wrapped/deck';
 import { tokenMs } from '../wrapped/motion';
 import { HeroNumber } from './HeroNumber';
 import { formatWhen } from './when';
@@ -259,7 +259,7 @@ export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onCl
             <HeroNumber bytes={r.freedBytes} />
           </h1>
           <p className="summary-sub">
-            {r.steps.length === 0 && r.leftForYou.length > 0
+            {remindersOnly(r)
               ? `${r.leftForYou.length} ${r.leftForYou.length === 1 ? 'reminder' : 'reminders'} saved for you. No files were deleted or moved.`
               : `back on ${r.volumeName}.`}
             {known &&

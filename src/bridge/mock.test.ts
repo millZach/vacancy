@@ -6,6 +6,23 @@ afterEach(() => {
 });
 
 describe('the mock bridge', () => {
+  it.each(['windows', 'macos'] as const)('keeps %s reminder runs free of synthetic moves while preserving mixed previews', async (name) => {
+    const fixture = fixtures[name];
+    const bridge = createMockBridge(fixture, { scanMs: 0, runMs: 0, moves: true });
+    const mount = fixture.volumes[0]!.mountPoint;
+    const hint = fixture.proposals.find((p) => p.action === 'hint')!;
+    await bridge.scan(mount, () => {});
+    const reminders = await bridge.buildPlan(mount, [hint.id]);
+    const saved = await bridge.runPlan(mount, reminders.id, () => {});
+    expect(saved).toMatchObject({ steps: [], freedBytes: 0, deletedItems: 0, movedItems: 0, reorganized: [] });
+    await bridge.scan(mount, () => {});
+    const cleanup = fixture.proposals.find((p) => p.action === 'delete')!;
+    const mixed = await bridge.buildPlan(mount, [hint.id, cleanup.id]);
+    const changed = await bridge.runPlan(mount, mixed.id, () => {});
+    expect(changed.reorganized).toEqual(fixture.moves);
+    expect(changed.movedItems).toBe(fixture.moves.reduce((sum, move) => sum + move.movedItems, 0));
+    expect(changed.leftForYou).toHaveLength(1);
+  });
   it('replays a scan: counts climb, categories are found one by one, then the map', async () => {
     vi.useFakeTimers();
     const bridge = createMockBridge(fixtures.windows, { scanMs: 1000 });

@@ -16,7 +16,7 @@ describe.each(['windows', 'macos'] as const)('%s advice reminders', (platform) =
   const mount = fixture.volumes[0]!.mountPoint;
 
   async function openPlan() {
-    const bridge = createMockBridge(fixture, { scanMs: 0, runMs: 0, fullDiskAccess: 'granted', pastRuns: false });
+    const bridge = createMockBridge(fixture, { scanMs: 0, runMs: 0, fullDiskAccess: 'granted', pastRuns: false, moves: true });
     const run = vi.spyOn(bridge, 'runPlan');
     render(<BridgeProvider bridge={bridge}><DrivesProvider><App /></DrivesProvider></BridgeProvider>);
     await userEvent.click(await screen.findByRole('button', { name: `Scan ${fixture.volumes[0]!.name}` }));

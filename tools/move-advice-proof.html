@@ -1,0 +1,24 @@
+<!doctype html>
+<!-- Read-only proof fixture: the real App reopens a saved move-only report with legacy advice. Never a production entry. -->
+<html lang="en"><head><meta charset="UTF-8"><title>PROOF FIXTURE — saved moves and advice</title></head>
+<body><div id="root" data-proof="saved-move-advice"></div><script type="module">
+import '../src/design/fonts';
+import '../src/design/tokens.css';
+import '../src/design/base.css';
+import '../src/design/controls.css';
+import { createElement as h } from 'react';
+import { createRoot } from 'react-dom/client';
+import { App } from '../src/App';
+import { BridgeProvider, createMockBridge, fixtures } from '../src/bridge';
+import { DrivesProvider } from '../src/drives/DrivesProvider';
+import { moveAdviceReport } from '../src/test/run';
+const fixture = fixtures[new URLSearchParams(location.search).get('fixture') === 'macos' ? 'macos' : 'windows'];
+const volume = fixture.volumes[0];
+const report = { ...moveAdviceReport, mountPoint: volume.mountPoint, volumeName: volume.name, map: fixture.overview,
+  totalBytes: volume.totalBytes, usedBefore: volume.usedBytes, usedAfter: volume.usedBytes, freeBefore: volume.freeBytes, freeAfter: volume.freeBytes };
+const bridge = createMockBridge(fixture, { pastRuns: false });
+bridge.listRuns = async () => ({ unreadable: 0, runs: [{ id: report.id, mountPoint: report.mountPoint, volumeName: report.volumeName,
+  volumeId: volume.id, startedAt: report.startedAt, freedBytes: 0, deletedItems: 0, movedItems: 4, cancelled: false }] });
+bridge.openRun = async id => { if (id !== report.id) throw new Error('No such proof fixture report'); return structuredClone(report); };
+createRoot(document.getElementById('root')).render(h(BridgeProvider, { bridge }, h(DrivesProvider, null, h(App))));
+</script></body></html>

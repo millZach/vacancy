@@ -4,6 +4,7 @@ import type { PlanRun } from '../drives/session';
 import { formatBytes, formatCount } from '../format';
 import { tileOf } from '../plan/totals';
 import { neverReached, type StepView } from './progress';
+import { count, remindersOnly } from '../wrapped/deck';
 import './run.css';
 
 /** A run on the run panel: going, ended, or failed. */
@@ -54,8 +55,8 @@ export function RunPanel({ run, hot, onHot, onStop, onSeeChanges, onBack, onScan
   const share = plan.bytes > 0 ? Math.min(1, view.freedBytes / plan.bytes) : run.phase === 'running' ? 0 : 1;
   const current = view.steps[view.current];
   const reminders = plan.leftForYou.length;
-  const adviceOnly = n === 0 && reminders > 0;
   const report = run.phase === 'ended' ? run.report : null;
+  const adviceOnly = report ? remindersOnly(report) : n === 0 && plan.moves === 0 && reminders > 0;
   const ran = report ? report.steps.filter((s) => !neverReached(s.deletedItems, s.skipped)).length : 0;
   const somethingRan = view.steps.some((s) => s.status !== 'pending');
 
@@ -65,7 +66,7 @@ export function RunPanel({ run, hot, onHot, onStop, onSeeChanges, onBack, onScan
         <div>
           <h2>
             {run.phase === 'running'
-              ? adviceOnly ? 'Saving reminders' : 'Freeing space'
+              ? adviceOnly ? 'Saving reminders' : n === 0 && plan.moves > 0 ? 'Moving files' : 'Freeing space'
               : run.phase === 'failed'
                 ? 'The run stopped'
                 : report?.cancelled
@@ -80,13 +81,13 @@ export function RunPanel({ run, hot, onHot, onStop, onSeeChanges, onBack, onScan
             <p aria-live="polite">
               {run.phase === 'running'
                 ? run.stopping
-                  ? 'Stopping after the file being deleted'
+                  ? n === 0 && plan.moves > 0 ? 'Stopping after the current move' : 'Stopping after the file being deleted'
                   : current
                     ? `Step ${view.current + 1} of ${n}: ${current.title}`
-                    : adviceOnly ? 'Saving advice to this run’s history. No files will be deleted.' : 'Starting'
+                    : adviceOnly ? 'Saving advice to this run’s history. No files will be deleted.' : plan.moves > 0 ? `Moving ${count(plan.moves, 'file')}. Every move is recorded.` : 'Starting'
                 : report?.cancelled
                   ? `You stopped the run. ${ran} of ${n} ${n === 1 ? 'step' : 'steps'} ran.`
-                  : adviceOnly ? 'No files were deleted or moved.' : n === 1
+                  : adviceOnly ? 'No files were deleted or moved.' : n === 0 ? report && report.movedItems > 0 ? `${count(report.movedItems, 'file')} moved.` : 'The run finished.' : n === 1
                     ? 'The step finished.'
                     : `All ${n} steps finished.`}
             </p>
@@ -117,7 +118,7 @@ export function RunPanel({ run, hot, onHot, onStop, onSeeChanges, onBack, onScan
 
       <div className="run-log" ref={log} role="log" aria-label="Log" aria-live="off">
         {view.log.length === 0 && run.phase === 'running' && (
-          <div className="run-log-line is-sum">{adviceOnly ? 'Saving the selected reminders…' : 'Checking every place again before it goes…'}</div>
+          <div className="run-log-line is-sum">{adviceOnly ? 'Saving the selected reminders…' : plan.moves > 0 && n === 0 ? 'Running the selected folder moves…' : 'Checking every place again before it goes…'}</div>
         )}
         {view.log.slice(-LOG_SHOWN).map((l) => (
           <div key={l.id} className={`run-log-line is-${l.kind}`}>
@@ -130,7 +131,7 @@ export function RunPanel({ run, hot, onHot, onStop, onSeeChanges, onBack, onScan
         {run.phase === 'running' && (
           <div className="run-going">
             <p>
-              {adviceOnly ? 'No apps are opened and no files are changed.' : `${view.skips > 0 ? `${formatCount(view.skips)} skipped so far. ` : ''}Keep using your computer; anything open is skipped.`}
+              {adviceOnly ? 'No apps are opened and no files are changed.' : n === 0 && plan.moves > 0 ? 'The folder moves are running. Every move is recorded.' : `${view.skips > 0 ? `${formatCount(view.skips)} skipped so far. ` : ''}Keep using your computer; anything open is skipped.`}
             </p>
             <button type="button" className="btn" onClick={onStop} disabled={run.stopping}>
               {run.stopping ? 'Stopping' : 'Stop'}
