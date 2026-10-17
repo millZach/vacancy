@@ -130,8 +130,11 @@ pub struct Profile {
     /// The folder that must survive whole, and the link to it inside a cache.
     pub documents: PathBuf,
     pub link_to_documents: PathBuf,
-    /// A file for a test to hold open during the run (inside a cache folder that is deleted whole).
+    /// A cache folder deleted whole, and a file in it for a test to hold open during the run.
+    pub cache: PathBuf,
     pub held_open: PathBuf,
+    /// A loose file: one of a folder's small files, which the plan takes as that folder's loose files.
+    pub loose: PathBuf,
     /// A file in a target of its own, for a test to modify after the scan.
     pub modified_later: PathBuf,
     /// A read-only file inside an approved cache folder.
@@ -217,54 +220,61 @@ pub fn build(root: &Path) -> io::Result<Profile> {
         OLD,
     );
 
-    let (cache_a, cache_b, npm, store, extra): (&str, &str, &str, &str, Vec<(&str, usize, u64)>) =
-        if windows {
-            (
-                "AppData/Local/Google/Chrome/User Data/Default/Cache/Cache_Data",
-                "AppData/Local/Google/Chrome/User Data/Profile 1/Cache/Cache_Data",
-                "AppData/Local/npm-cache/_cacache",
-                "AppData/Local/pnpm/store/v3/files/5e",
-                vec![
-                    ("Downloads/old-setup.exe", 220 * KIB, 60),
-                    (
-                        "AppData/Local/Temp/vacancy-old-install/setup.cab",
-                        120 * KIB,
-                        3,
-                    ),
-                    (
-                        "AppData/Local/Temp/vacancy-old-install/setup.log",
-                        4 * KIB,
-                        3,
-                    ),
-                    ("AppData/Local/Temp/old-1.tmp", 24 * KIB, 3),
-                    ("AppData/Local/Temp/old-2.log", 9 * KIB, 3),
-                    ("AppData/Local/CrashDumps/app.exe.4410.dmp", 1536 * KIB, 20),
-                    ("AppData/Local/CrashDumps/tool.exe.112.dmp", 12 * KIB, 20),
-                    (
-                        "AppData/Local/npm-cache/_update-notifier-last-checked",
-                        1,
-                        20,
-                    ),
-                ],
-            )
-        } else {
-            (
-                "Library/Caches/com.example.fixtureapp/fsCachedData",
-                "Library/Caches/com.example.otherapp/fsCachedData",
-                ".npm/_cacache",
-                "Library/pnpm/store/v3/files/5e",
-                vec![
-                    ("Downloads/old-installer.dmg", 220 * KIB, 60),
-                    (
-                        "Library/Caches/com.example.fixtureapp/Cache.db",
-                        40 * KIB,
-                        20,
-                    ),
-                    ("Library/Logs/fixtureapp/old.log", 30 * KIB, 20),
-                    (".Trash/old-archive.zip", 70 * KIB, 20),
-                ],
-            )
-        };
+    // The two cache folders deleted whole, the npm cache, the package store, and the files only this OS has.
+    type Layout<'a> = (
+        &'a str,
+        &'a str,
+        &'a str,
+        &'a str,
+        Vec<(&'a str, usize, u64)>,
+    );
+    let (cache_a, cache_b, npm, store, extra): Layout<'_> = if windows {
+        (
+            "AppData/Local/Google/Chrome/User Data/Default/Cache/Cache_Data",
+            "AppData/Local/Google/Chrome/User Data/Profile 1/Cache/Cache_Data",
+            "AppData/Local/npm-cache/_cacache",
+            "AppData/Local/pnpm/store/v3/files/5e",
+            vec![
+                ("Downloads/old-setup.exe", 220 * KIB, 60),
+                (
+                    "AppData/Local/Temp/vacancy-old-install/setup.cab",
+                    120 * KIB,
+                    3,
+                ),
+                (
+                    "AppData/Local/Temp/vacancy-old-install/setup.log",
+                    4 * KIB,
+                    3,
+                ),
+                ("AppData/Local/Temp/old-1.tmp", 24 * KIB, 3),
+                ("AppData/Local/Temp/old-2.log", 9 * KIB, 3),
+                ("AppData/Local/CrashDumps/app.exe.4410.dmp", 1536 * KIB, 20),
+                ("AppData/Local/CrashDumps/tool.exe.112.dmp", 12 * KIB, 20),
+                (
+                    "AppData/Local/npm-cache/_update-notifier-last-checked",
+                    1,
+                    20,
+                ),
+            ],
+        )
+    } else {
+        (
+            "Library/Caches/com.example.fixtureapp/fsCachedData",
+            "Library/Caches/com.example.otherapp/fsCachedData",
+            ".npm/_cacache",
+            "Library/pnpm/store/v3/files/5e",
+            vec![
+                ("Downloads/old-installer.dmg", 220 * KIB, 60),
+                (
+                    "Library/Caches/com.example.fixtureapp/Cache.db",
+                    40 * KIB,
+                    20,
+                ),
+                ("Library/Logs/fixtureapp/old.log", 30 * KIB, 20),
+                (".Trash/old-archive.zip", 70 * KIB, 20),
+            ],
+        )
+    };
     for (rel, len, days) in extra {
         file(rel, len, days);
     }
@@ -387,7 +397,16 @@ pub fn build(root: &Path) -> io::Result<Profile> {
         root: root.to_path_buf(),
         documents,
         link_to_documents,
+        cache: sub(&home, cache_a),
         held_open: sub(&home, &format!("{cache_a}/held-open.bin")),
+        loose: sub(
+            &home,
+            if windows {
+                "AppData/Local/Temp/old-1.tmp"
+            } else {
+                "Library/Caches/com.example.fixtureapp/Cache.db"
+            },
+        ),
         modified_later: sub(&home, &format!("{cache_b}/modified-later.bin")),
         read_only,
         long_path: sub(&home, &long_rel),

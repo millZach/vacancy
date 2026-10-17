@@ -187,6 +187,12 @@ pub(crate) struct Entry {
     pub(crate) changed: i128,
     /// Its hard links, when the listing says (Unix).
     pub(crate) links: Option<u64>,
+    /// The scanner counts it as a file (so a target's size includes it): regular files, and on Windows every
+    /// entry that isn't a folder or a link (a socket or a cloud placeholder too).
+    pub(crate) counts: bool,
+    /// A Windows mount-point reparse point: a junction, or a folder where a volume is mounted, which
+    /// `sys::mounts_volume` tells apart.
+    pub(crate) junction: bool,
 }
 
 impl Entry {
@@ -224,6 +230,7 @@ pub(crate) enum Fail {
     /// A folder that still holds something.
     NotEmpty,
     /// The file system can't say what a thing is (no file ids): nothing is deleted there.
+    #[cfg_attr(unix, allow(dead_code, reason = "every Unix file system has inodes"))]
     Unsupported,
     /// Anything else, with what the OS said.
     Failed(String),
@@ -644,9 +651,21 @@ impl Run<'_, '_> {
             if e.changed >= self.threshold {
                 return Err(changed_inside(path, &at));
             }
+            if e.counts {
+                measure.add(&e);
+            }
             match e.kind {
-                Kind::File => measure.add(&e),
-                Kind::Link | Kind::Special(_) => {}
+                Kind::File | Kind::Special(_) => {}
+                Kind::Link => {
+                    let parent = dir.as_ref().unwrap_or(root);
+                    let inside = |f: Fail| Whole::of(&format!("{} inside it", at.display()), f);
+                    if e.junction && sys::mounts_volume(parent, &e).map_err(inside)? {
+                        return Err(Whole::new(
+                            SkipKind::OtherVolume,
+                            format!("Another volume is mounted inside it, at {}", at.display()),
+                        ));
+                    }
+                }
                 Kind::Dir => {
                     let inside = |f: Fail| Whole::of(&format!("{} inside it", at.display()), f);
                     let parent = dir.as_ref().unwrap_or(root);
@@ -718,8 +737,10 @@ impl Run<'_, '_> {
                 // stays, explained by what it holds. After a cancel nothing more is removed.
                 let frame = stack.pop().expect("a frame was on the stack");
                 if !stopped {
+                    // The target's own folder is removed from its parent, which is not the target's to change.
+                    let inside_target = !stack.is_empty();
                     let above = stack.last().map_or(parent, |f| &f.dir);
-                    match sys::remove_dir(above, frame.dir, &frame.step) {
+                    match sys::remove_dir(above, frame.dir, &frame.step, inside_target) {
                         Ok(()) | Err(Fail::NotEmpty | Fail::Gone) => {}
                         Err(fail) => tally.fail(&fail, &frame.path, 0, 0),
                     }
@@ -1126,5 +1147,227 @@ fn report(
         biggest_win,
         left_for_you: plan.left_for_you().to_vec(),
         steps,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Changes made in the middle of a run, through the executor's hooks: between a target's checks and its
+    //! delete, and right before a file in it goes. The fixture profile and the rest of the run are tested in
+    //! `tests/run.rs`.
+
+    use std::cell::Cell;
+    use std::path::Path;
+
+    use super::*;
+    use crate::fixture::{self, Profile};
+    use crate::map::{ScannedVolume, scan_for_map_with};
+    use crate::rules::Moment;
+
+    struct Fx {
+        _dir: tempfile::TempDir,
+        profile: Profile,
+        env: Env,
+        scanned: ScannedVolume,
+    }
+
+    impl Fx {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let root = if cfg!(windows) {
+                dir.path().to_path_buf()
+            } else {
+                dir.path().canonicalize().unwrap()
+            }
+            .join("fixture");
+            let profile = fixture::build(&root).unwrap();
+            let env = fixture::env(&root);
+            let moment = Moment {
+                now: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64,
+                running_apps: Some(Vec::new()),
+                installed_apps: Vec::new(),
+            };
+            let figures_root = root.clone();
+            let scanned = scan_for_map_with(
+                &root,
+                &env,
+                &moment,
+                &move |snap| Some(fixture::volume(&figures_root, 1 << 30, snap)),
+                &mut |_| {},
+                &CancelToken::new(),
+            )
+            .unwrap();
+            Self {
+                _dir: dir,
+                profile,
+                env,
+                scanned,
+            }
+        }
+
+        fn run(&self, id: &str, hooks: &Hooks<'_>, cancel: &CancelToken) -> RunReport {
+            let plan = crate::plan::plan(&self.scanned, &self.env, &[id.to_owned()]).unwrap();
+            execute_inner(&plan, &self.env, &|| None, &mut |_| {}, cancel, hooks)
+        }
+
+        fn documents(&self) -> Vec<String> {
+            fixture::inventory(&self.profile.documents).unwrap()
+        }
+    }
+
+    fn node() -> &'static str {
+        if cfg!(windows) { "w-node" } else { "m-node" }
+    }
+
+    fn cache() -> &'static str {
+        if cfg!(windows) {
+            "w-browser"
+        } else {
+            "m-caches"
+        }
+    }
+
+    fn link_dir(link: &Path, to: &Path) {
+        #[cfg(windows)]
+        assert!(
+            std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(to)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(to, link).unwrap();
+    }
+
+    fn skips(report: &RunReport) -> Vec<&Skip> {
+        report.steps.iter().flat_map(|s| &s.skipped).collect()
+    }
+
+    /// After `node_modules` passed its checks and before anything in it is deleted, its `.pnpm` folder is moved
+    /// aside and a link to Documents put in its place. The delete never goes through the link: the link is new, so
+    /// it is left (changed since the scan), Documents is untouched, and so is the folder moved aside.
+    #[test]
+    fn a_folder_swapped_for_a_link_after_the_checks_is_never_followed() {
+        let fx = Fx::new();
+        let docs = fx.documents();
+        let pnpm = fx.profile.node_modules.join(".pnpm");
+        let aside = fx.profile.node_modules.join(".pnpm-aside");
+        let swapped = Cell::new(false);
+        let swap = |_: &Path| {
+            std::fs::rename(&pnpm, &aside).unwrap();
+            link_dir(&pnpm, &fx.profile.documents);
+            swapped.set(true);
+        };
+        let report = fx.run(
+            node(),
+            &Hooks {
+                before_delete: Some(&swap),
+                ..Hooks::default()
+            },
+            &CancelToken::new(),
+        );
+        assert!(swapped.get(), "the hook ran");
+        assert_eq!(fx.documents(), docs, "Documents is untouched");
+        assert!(
+            aside.exists(),
+            "the folder moved aside stays: it is new there"
+        );
+        assert!(
+            std::fs::symlink_metadata(&pnpm)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the new link stays"
+        );
+        assert!(
+            skips(&report).iter().any(|k| k.kind == SkipKind::Changed),
+            "{:#?}",
+            report.steps
+        );
+    }
+
+    /// Right before a file in a cache folder goes, it is replaced by a link to Documents. The file opened is not the
+    /// file listed, so nothing is deleted through it.
+    #[test]
+    fn a_file_swapped_for_a_link_just_before_its_delete_is_left() {
+        let fx = Fx::new();
+        let docs = fx.documents();
+        let victim = fx.profile.cache.join("f_000001");
+        let swapped = Cell::new(false);
+        let swap = |at: &Path| {
+            if at == victim && !swapped.get() {
+                std::fs::remove_file(&victim).unwrap();
+                link_dir(&victim, &fx.profile.documents);
+                swapped.set(true);
+            }
+        };
+        let report = fx.run(
+            cache(),
+            &Hooks {
+                before_file: Some(&swap),
+                ..Hooks::default()
+            },
+            &CancelToken::new(),
+        );
+        assert!(swapped.get(), "the hook ran");
+        assert_eq!(fx.documents(), docs, "Documents is untouched");
+        assert!(std::fs::symlink_metadata(&victim).is_ok(), "the link stays");
+        assert!(
+            skips(&report)
+                .iter()
+                .any(|k| k.kind == SkipKind::Changed && Path::new(&k.path) == victim),
+            "{:#?}",
+            report.steps
+        );
+    }
+
+    /// A cancel inside a folder being deleted stops after the file being deleted: the files before it are gone,
+    /// the rest are there, the folder stays, and the report counts exactly the files that went.
+    #[test]
+    fn a_cancel_inside_a_folder_stops_after_the_current_file() {
+        let fx = Fx::new();
+        let cancel = CancelToken::new();
+        let seen = Cell::new(0u32);
+        let count = |_: &Path| {
+            seen.set(seen.get() + 1);
+            if seen.get() == 3 {
+                cancel.cancel();
+            }
+        };
+        let report = fx.run(
+            cache(),
+            &Hooks {
+                before_file: Some(&count),
+                ..Hooks::default()
+            },
+            &cancel,
+        );
+        assert!(report.cancelled);
+        let left = std::fs::read_dir(&fx.profile.cache).unwrap().count() as u64;
+        let step = &report.steps[0];
+        assert_eq!(step.deleted_items, 3, "{step:#?}");
+        assert!(left > 0, "the rest of the folder stays");
+        let cancelled: u64 = step
+            .skipped
+            .iter()
+            .filter(|k| k.kind == SkipKind::Cancelled)
+            .map(|k| k.items)
+            .sum();
+        assert!(cancelled >= left, "every file left is counted: {step:#?}");
+        assert!(fx.profile.cache.exists());
+    }
+
+    #[test]
+    fn the_threshold_is_the_scan_start_to_the_second_less_the_margin() {
+        let at = UNIX_EPOCH + Duration::from_millis(10_700);
+        assert_eq!(threshold(at), 8_000_000_000);
+        assert_eq!(threshold(UNIX_EPOCH), 0);
     }
 }

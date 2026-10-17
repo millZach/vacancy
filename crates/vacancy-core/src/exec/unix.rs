@@ -204,6 +204,9 @@ fn to_entry(name: &OsStr, st: &libc::stat) -> Entry {
         changed: changed_of(st),
         #[allow(clippy::unnecessary_cast)]
         links: Some(st.st_nlink as u64),
+        // As the scanner counts: regular files.
+        counts: kind == Kind::File,
+        junction: false,
     }
 }
 
@@ -367,8 +370,19 @@ pub(crate) fn delete_link(dir: &Dir, e: &Entry, threshold: i128) -> Result<(), F
     unlink(dir, &c, 0, true)
 }
 
-/// Removes the emptied folder `step` names in `parent`, if the name still leads to it.
-pub(crate) fn remove_dir(parent: &Dir, dir: Dir, step: &Step) -> Result<(), Fail> {
+/// A mount on macOS shows as another device, which the folder checks catch; there are no junctions.
+pub(crate) fn mounts_volume(_dir: &Dir, _e: &Entry) -> Result<bool, Fail> {
+    Ok(false)
+}
+
+/// Removes the emptied folder `step` names in `parent`, if the name still leads to it. With `inside_target`,
+/// `parent` is being deleted too and may be made writable for this.
+pub(crate) fn remove_dir(
+    parent: &Dir,
+    dir: Dir,
+    step: &Step,
+    inside_target: bool,
+) -> Result<(), Fail> {
     let c = c_name(&step.name)?;
     let st = fstatat(parent, &c)?;
     let (dev, ino) = dev_ino(&st);
@@ -377,7 +391,7 @@ pub(crate) fn remove_dir(parent: &Dir, dir: Dir, step: &Step) -> Result<(), Fail
         return Err(Fail::Changed);
     }
     drop(dir);
-    unlink(parent, &c, libc::AT_REMOVEDIR, true)
+    unlink(parent, &c, libc::AT_REMOVEDIR, inside_target)
 }
 
 /// `unlinkat`, and once more after making `dir` writable when it refused for want of that and `may_chmod` says the
@@ -414,10 +428,8 @@ fn unlink(dir: &Dir, c: &CString, flags: libc::c_int, may_chmod: bool) -> Result
 fn locked(st: &libc::stat) -> bool {
     #[cfg(target_os = "macos")]
     {
-        const LOCKS: u32 = libc::UF_IMMUTABLE as u32
-            | libc::UF_APPEND as u32
-            | libc::SF_IMMUTABLE as u32
-            | libc::SF_APPEND as u32;
+        const LOCKS: u32 =
+            libc::UF_IMMUTABLE | libc::UF_APPEND | libc::SF_IMMUTABLE | libc::SF_APPEND;
         st.st_flags & LOCKS != 0
     }
     #[cfg(not(target_os = "macos"))]

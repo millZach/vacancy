@@ -37,13 +37,16 @@ use windows_sys::Win32::Storage::FileSystem::{
     FileIdExtdDirectoryRestartInfo, FileIdInfo, FileStandardInfo, GetFileInformationByHandleEx,
     OPEN_EXISTING, SYNCHRONIZE, SetFileInformationByHandle,
 };
-use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK};
+use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
 
 use super::{Entry, Fail, Kind};
 use crate::fsid::{Identity, Step};
 
 /// Reparse points that name somewhere else (symlinks, junctions, mount points) have this bit.
 const NAME_SURROGATE: u32 = 0x2000_0000;
+/// Junctions and volume mount points.
+const TAG_MOUNT_POINT: u32 = 0xA000_0003;
 /// Files the Windows Overlay Filter compressed (CompactOS, `compact /exe`) and files deduplicated by Data
 /// Deduplication: ordinary files for Vacancy, deleted like any other.
 const TAG_WOF: u32 = 0x8000_0017;
@@ -346,11 +349,84 @@ pub(crate) fn delete_link(dir: &Dir, e: &Entry, threshold: i128) -> Result<(), F
     if nanos(times.LastWriteTime.max(times.ChangeTime)) >= threshold {
         return Err(Fail::Changed);
     }
+    // A volume mounted in a folder is left mounted: deleting the mount point would take the volume away from
+    // wherever it is used.
+    if tag == TAG_MOUNT_POINT && is_volume(&handle) {
+        return Err(Fail::OtherVolume);
+    }
     dispose(&handle, times.FileAttributes)
 }
 
+/// Whether the mount-point reparse point `e` in `dir` is where a volume is mounted, rather than a junction to a
+/// folder. Read from the reparse point itself, opened without following it.
+pub(crate) fn mounts_volume(dir: &Dir, e: &Entry) -> Result<bool, Fail> {
+    if !e.junction {
+        return Ok(false);
+    }
+    let wide = name_of(&e.name)?;
+    let handle = nt_open(
+        &dir.handle,
+        &wide,
+        FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        0,
+    )
+    .map_err(open_fail)?;
+    match identity(&handle) {
+        Some((_, file)) if file == e.id => Ok(is_volume(&handle)),
+        _ => Err(Fail::Changed),
+    }
+}
+
+/// Whether an open mount-point reparse point names a volume (`\??\Volume{...}\`): its substitute name, from
+/// `FSCTL_GET_REPARSE_POINT`. One that can't be read counts as a volume, which leaves it alone.
+fn is_volume(handle: &Handle) -> bool {
+    const MAX: usize = 16 * 1024;
+    let mut buf = vec![0u8; MAX];
+    let mut got = 0u32;
+    // SAFETY: `buf` is MAX writable bytes; the handle is open; there is no input buffer.
+    let ok = unsafe {
+        DeviceIoControl(
+            handle.0,
+            FSCTL_GET_REPARSE_POINT,
+            ptr::null(),
+            0,
+            buf.as_mut_ptr().cast(),
+            MAX as u32,
+            &mut got,
+            ptr::null_mut(),
+        )
+    };
+    if ok == 0 || (got as usize) < 16 {
+        return true;
+    }
+    let tag = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    if tag != TAG_MOUNT_POINT {
+        return false;
+    }
+    // MountPointReparseBuffer: SubstituteNameOffset and SubstituteNameLength at bytes 8 and 10, the path buffer
+    // from byte 16.
+    let u16_at = |at: usize| usize::from(u16::from_le_bytes([buf[at], buf[at + 1]]));
+    let start = 16 + u16_at(8);
+    let Some(bytes) = buf.get(start..start + u16_at(10)) else {
+        return true;
+    };
+    let name: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    String::from_utf16_lossy(&name)
+        .to_ascii_lowercase()
+        .starts_with(r"\??\volume{")
+}
+
 /// Removes an emptied folder through the handle it was opened with for deleting.
-pub(crate) fn remove_dir(_parent: &Dir, dir: Dir, _step: &Step) -> Result<(), Fail> {
+pub(crate) fn remove_dir(
+    _parent: &Dir,
+    dir: Dir,
+    _step: &Step,
+    _inside_target: bool,
+) -> Result<(), Fail> {
     let attributes = basic(&dir.handle).map_or(0, |b| b.FileAttributes);
     dispose(&dir.handle, attributes)
 }
@@ -654,5 +730,8 @@ fn to_entry(dir: &Dir, e: &FILE_ID_EXTD_DIR_INFO, name: &[u16]) -> Entry {
         alloc,
         changed: nanos(e.LastWriteTime.max(e.ChangeTime)),
         links: None,
+        // As the scanner counts: everything that isn't a folder or a link.
+        counts: !is_dir && kind != Kind::Link,
+        junction: tag == TAG_MOUNT_POINT,
     }
 }

@@ -60,6 +60,15 @@ pub(crate) fn delete_link(_dir: &Dir, _e: &Entry, _threshold: i128) -> Result<()
     Err(Fail::Unsupported)
 }
 
-pub(crate) fn remove_dir(_parent: &Dir, _dir: Dir, _step: &Step) -> Result<(), Fail> {
+pub(crate) fn remove_dir(
+    _parent: &Dir,
+    _dir: Dir,
+    _step: &Step,
+    _inside_target: bool,
+) -> Result<(), Fail> {
+    Err(Fail::Unsupported)
+}
+
+pub(crate) fn mounts_volume(_dir: &Dir, _e: &Entry) -> Result<bool, Fail> {
     Err(Fail::Unsupported)
 }

@@ -375,11 +375,327 @@ fn a_run_deletes_exactly_what_was_approved() {
         "the pseudo-drive's free space grew by exactly what was freed"
     );
     assert!(!report.cancelled);
-    assert_eq!(report.biggest_win.as_deref().is_some(), true);
+    let biggest = report.steps.iter().max_by_key(|s| s.freed_bytes).unwrap();
+    assert_eq!(report.biggest_win.as_deref(), Some(biggest.id.as_str()));
+    let by_category: u64 = report.freed_by_category.iter().map(|c| c.bytes).sum();
+    assert_eq!(by_category, report.freed_bytes);
     let started = events
         .iter()
         .filter(|e| matches!(e, RunEvent::StepStarted(_)))
         .count();
     assert_eq!(started, plan.summary().steps.len());
     assert!(events.iter().any(|e| matches!(e, RunEvent::Skipped(_))));
+}
+
+/// The step whose cache folder holds the file to hold open, for tests that run part of the plan.
+fn cache_step() -> &'static str {
+    if cfg!(windows) {
+        "w-browser"
+    } else {
+        "m-caches"
+    }
+}
+
+/// Every skip in a report.
+fn skips(report: &RunReport) -> Vec<&vacancy_core::Skip> {
+    report.steps.iter().flat_map(|s| &s.skipped).collect()
+}
+
+/// Puts a folder link at `link` to `to`: a junction on Windows, a symlink elsewhere.
+fn link_dir(link: &Path, to: &Path) {
+    #[cfg(windows)]
+    {
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(to)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "mklink /J {}", link.display());
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(to, link).unwrap();
+}
+
+/// A cancel that lands right after the first place is deleted stops the run there: that place is gone, every
+/// other planned place is still there, whole, and the report says exactly that.
+#[test]
+fn cancelling_mid_run_leaves_a_consistent_report() {
+    let fx = Fx::new();
+    let ids = fx.all_ids();
+    let plan = fx.plan(&ids);
+    let before = fx.inventory();
+    let cancel = CancelToken::new();
+    let stop = cancel.clone();
+    let mut events = Vec::new();
+    let root = fx.root.clone();
+    let figures = move || {
+        let snap = support::scan_with(&root, 1 << 20);
+        Some(fixture::volume(&root, 1 << 30, &snap))
+    };
+    let report = execute(
+        &plan,
+        &fx.env,
+        &figures,
+        &mut |e| {
+            if matches!(e, RunEvent::Deleted(_)) {
+                stop.cancel();
+            }
+            events.push(e);
+        },
+        &cancel,
+    );
+    let after = fx.inventory();
+    let (gone, added) = diff(&before, &after);
+    assert!(report.cancelled);
+    assert!(added.is_empty(), "{added:#?}");
+
+    let deleted: Vec<&vacancy_core::Deleted> = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Deleted(d) => Some(d),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        deleted.len(),
+        1,
+        "stopped after the first place: {deleted:#?}"
+    );
+    let first = fx.rel(Path::new(&deleted[0].path));
+    for line in &gone {
+        let rel = path_of(line);
+        assert!(
+            rel == first || rel.starts_with(&format!("{first}/")),
+            "only the first place went, but {line} went too"
+        );
+    }
+    assert!(!gone.is_empty(), "the first place went");
+
+    // Every other place is reported as left because of the cancel, and is still there.
+    let cancelled: Vec<_> = skips(&report)
+        .into_iter()
+        .filter(|k| k.kind == SkipKind::Cancelled)
+        .collect();
+    let places: u64 = report.steps.iter().map(|s| s.places).sum();
+    assert_eq!(
+        cancelled.len() as u64,
+        places - 1,
+        "every place after the first: {:#?}",
+        report.steps
+    );
+    for k in &cancelled {
+        let rel = fx.rel(Path::new(&k.path));
+        assert!(
+            after.iter().any(|l| path_of(l) == rel),
+            "{rel} is still there"
+        );
+    }
+    assert_eq!(report.deleted_items, deleted[0].items);
+    assert_eq!(report.freed_bytes, deleted[0].bytes);
+    assert_eq!(report.free_change, report.freed_bytes as i64);
+}
+
+/// A cache folder swapped for a link to Documents between the plan and the run is skipped as a link: the walk to
+/// it refuses the link, Documents is untouched, and so is the folder that was moved aside.
+#[test]
+fn a_target_swapped_for_a_link_before_the_run_is_skipped() {
+    let fx = Fx::new();
+    let ids = vec![cache_step().to_owned()];
+    let plan = fx.plan(&ids);
+    let cache = &fx.profile.cache;
+    let aside = cache.with_extension("aside");
+    std::fs::rename(cache, &aside).unwrap();
+    link_dir(cache, &fx.profile.documents);
+    let before = fx.inventory();
+
+    let (report, _) = fx.run(&plan, &CancelToken::new());
+    let after = fx.inventory();
+    let (gone, _) = diff(&before, &after);
+    let docs = fx.rel(&fx.profile.documents);
+    let aside_rel = fx.rel(&aside);
+    for line in &gone {
+        let rel = path_of(line);
+        assert!(
+            !rel.starts_with(&docs) && !rel.starts_with(&aside_rel),
+            "{line} went"
+        );
+    }
+    let skip = skips(&report)
+        .into_iter()
+        .find(|k| Path::new(&k.path) == cache)
+        .expect("the swapped target is reported");
+    assert_eq!(skip.kind, SkipKind::Link, "{skip:?}");
+    assert!(
+        after.iter().any(|l| path_of(l) == fx.rel(cache)),
+        "the link stays"
+    );
+}
+
+/// The executor acts only on the plan, whatever the Guard is told at run time: with its roots widened to the whole
+/// fixture it still deletes nothing outside the plan, and with them narrowed to Documents it deletes nothing.
+#[test]
+fn a_run_never_deletes_outside_the_plan_whatever_the_guard_allows() {
+    let fx = Fx::new();
+    let ids = vec![cache_step().to_owned()];
+    let plan = fx.plan(&ids);
+    let planned = fx.planned(&ids);
+
+    let mut wide = fx.env.clone();
+    wide.home = fx.root.clone();
+    wide.confined_to = None;
+    let before = fx.inventory();
+    let report = execute(&plan, &wide, &|| None, &mut |_| {}, &CancelToken::new());
+    let after = fx.inventory();
+    let (gone, added) = diff(&before, &after);
+    assert!(added.is_empty());
+    assert!(!gone.is_empty(), "{:#?}", report.steps);
+    for line in &gone {
+        assert!(
+            planned.iter().any(|t| t.covers(path_of(line), line)),
+            "{line} was not in the plan"
+        );
+    }
+
+    // A second plan, run with the Guard confined to Documents: nothing may go.
+    let fx = Fx::new();
+    let plan = fx.plan(&fx.all_ids());
+    let mut narrow = fx.env.clone();
+    narrow.confined_to = Some(fx.profile.documents.clone());
+    let before = fx.inventory();
+    let report = execute(&plan, &narrow, &|| None, &mut |_| {}, &CancelToken::new());
+    assert_eq!(before, fx.inventory(), "nothing changed");
+    assert_eq!(report.freed_bytes, 0);
+    assert_eq!(report.deleted_items, 0);
+    assert!(
+        skips(&report)
+            .iter()
+            .all(|k| matches!(k.kind, SkipKind::Outside | SkipKind::Protected)),
+        "{:#?}",
+        report.steps
+    );
+}
+
+/// A folder's loose files: one modified after the scan stays, one made after the scan was never approved and
+/// stays, the rest go, and the folder itself stays.
+#[test]
+fn loose_files_new_or_changed_since_the_scan_stay() {
+    let fx = Fx::new();
+    let loose = &fx.profile.loose;
+    let folder = loose.parent().unwrap().to_path_buf();
+    let id =
+        fx.scanned
+            .proposals
+            .list()
+            .iter()
+            .enumerate()
+            .find(|(i, _)| {
+                fx.scanned.proposals.targets(*i).iter().any(
+                    |t| matches!(t, ItemRef::FilesIn(d) if fx.scanned.snapshot.path(*d) == folder),
+                )
+            })
+            .map(|(_, p)| p.id.clone())
+            .expect("a proposal takes the folder's loose files");
+    let plan = fx.plan(&[id]);
+    std::fs::write(loose, b"changed after the scan").unwrap();
+    let new = folder.join("made-after-the-scan.tmp");
+    std::fs::write(&new, b"new").unwrap();
+
+    let (report, _) = fx.run(&plan, &CancelToken::new());
+    assert!(loose.exists(), "the changed file stays");
+    assert!(new.exists(), "the new file stays");
+    assert!(folder.exists(), "the folder stays");
+    let changed: Vec<_> = skips(&report)
+        .into_iter()
+        .filter(|k| k.kind == SkipKind::Changed)
+        .collect();
+    assert_eq!(changed.len(), 1, "{:#?}", report.steps);
+    assert_eq!(changed[0].items, 1);
+    let others: Vec<_> = std::fs::read_dir(&folder)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_type().unwrap().is_file())
+        .map(|e| e.file_name())
+        .collect();
+    assert_eq!(
+        others.len(),
+        2,
+        "only the changed and the new file are left: {others:?}"
+    );
+}
+
+/// A target replaced since the scan (another folder made under its name) is refused while planning, left out of
+/// the numbers the confirm dialog shows, and reported as skipped when the plan runs.
+#[test]
+fn a_target_replaced_before_planning_is_refused() {
+    let fx = Fx::new();
+    let cache = &fx.profile.cache;
+    std::fs::rename(cache, cache.with_extension("old")).unwrap();
+    std::fs::create_dir(cache).unwrap();
+    std::fs::write(cache.join("someone-else.bin"), b"not what the scan saw").unwrap();
+    let plan = fx.plan(&[cache_step().to_owned()]);
+    let summary = plan.summary();
+    let refused: Vec<_> = summary
+        .refused
+        .iter()
+        .filter(|k| Path::new(&k.path) == cache)
+        .collect();
+    assert_eq!(refused.len(), 1, "{:#?}", summary.refused);
+    assert_eq!(refused[0].kind, SkipKind::Changed);
+    let (report, _) = fx.run(&plan, &CancelToken::new());
+    assert!(cache.join("someone-else.bin").exists());
+    assert!(
+        skips(&report)
+            .iter()
+            .any(|k| Path::new(&k.path) == cache && k.kind == SkipKind::Changed)
+    );
+}
+
+/// Fixture mode only ever narrows: its root must be a real folder (no link on the way), not a drive's root, and
+/// neither inside nor holding the real home folder.
+#[test]
+fn fixture_mode_refuses_roots_that_could_widen_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = support::real_path(dir.path());
+    let home = base.join("home").join("me");
+    let ok = base.join("fixtures").join("one");
+    for p in [&home, &ok] {
+        std::fs::create_dir_all(p).unwrap();
+    }
+    assert_eq!(fixture::check_root(&ok, &home), Ok(ok.clone()));
+    let file = base.join("a-file");
+    std::fs::write(&file, b"x").unwrap();
+    let link = base.join("linked");
+    link_dir(&link, &ok);
+    let drive = if cfg!(windows) {
+        PathBuf::from(format!(
+            "{}\\",
+            base.components()
+                .next()
+                .unwrap()
+                .as_os_str()
+                .to_string_lossy()
+        ))
+    } else {
+        PathBuf::from("/")
+    };
+    let cases = [
+        (PathBuf::from("relative"), "relative"),
+        (base.join("missing"), "missing"),
+        (file, "a file"),
+        (link.clone(), "a link"),
+        (link.join("inside"), "through a link"),
+        (drive, "a drive's root"),
+        (home.join("Fixture"), "inside the home"),
+        (home.clone(), "the home itself"),
+        (base.join("home"), "holding the home"),
+    ];
+    std::fs::create_dir_all(home.join("Fixture")).unwrap();
+    for (root, what) in cases {
+        assert!(
+            fixture::check_root(&root, &home).is_err(),
+            "{what}: {}",
+            root.display()
+        );
+    }
 }
