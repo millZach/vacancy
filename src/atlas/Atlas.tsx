@@ -56,8 +56,15 @@ export function Atlas({ drives, selected, onSelect, scan, agent }: Props) {
     setSeen(overview);
     setLevels([]);
     setHot(null);
+    setOpening(null);
     setBrowseError(null);
   }
+  // Which folder opening is still wanted. Any move on the map, or a new map, makes a pending one stale, so a
+  // folder that arrives late never pulls the map back to where the user was.
+  const request = useRef(0);
+  useEffect(() => {
+    request.current++;
+  }, [overview]);
 
   const top = useMemo(() => (overview ? overviewModel(overview) : null), [overview]);
   const level = levels.at(-1);
@@ -76,17 +83,28 @@ export function Atlas({ drives, selected, onSelect, scan, agent }: Props) {
     ? Math.min(ALMOST, (scanning.update?.bytes ?? 0) / Math.max(1, scanning.volume.usedBytes))
     : 0;
 
+  const navigate = useCallback((next: Level[] | ((levels: Level[]) => Level[])) => {
+    request.current++;
+    setOpening(null);
+    setBrowseError(null);
+    setHot(null);
+    setLevels(next);
+  }, []);
+
   const open = useCallback(
     (leaf: Leaf) => {
+      const id = ++request.current;
       setOpening(leaf.id);
       setBrowseError(null);
       bridge.browse(leaf.id).then(
         (folder) => {
+          if (request.current !== id) return;
           setOpening(null);
           setHot(null);
           setLevels((ls) => [...ls, { kind: 'folder', folder }]);
         },
         (error: unknown) => {
+          if (request.current !== id) return;
           setOpening(null);
           setBrowseError(errorMessage(error));
         },
@@ -95,10 +113,7 @@ export function Atlas({ drives, selected, onSelect, scan, agent }: Props) {
     [bridge],
   );
 
-  const up = useCallback(() => {
-    setHot(null);
-    setLevels((ls) => ls.slice(0, -1));
-  }, []);
+  const up = useCallback(() => navigate((ls) => ls.slice(0, -1)), [navigate]);
   useEffect(() => {
     if (!overview) return;
     const onKey = (e: KeyboardEvent) => {
@@ -109,16 +124,12 @@ export function Atlas({ drives, selected, onSelect, scan, agent }: Props) {
   }, [overview, up]);
 
   const onLeaf = (leaf: Leaf) => {
-    if (levels.length === 0) {
-      setHot(null);
-      setLevels([{ kind: 'category', id: leaf.regionId as CategoryId }]);
-    } else if (leaf.browsable) open(leaf);
+    if (levels.length === 0) navigate([{ kind: 'category', id: leaf.regionId as CategoryId }]);
+    else if (leaf.browsable) open(leaf);
   };
   const onRegion = (region: Region) => {
-    if (levels.length === 0 && region.category) {
-      setHot(null);
-      setLevels([{ kind: 'category', id: region.category }]);
-    } else up();
+    if (levels.length === 0 && region.category) navigate([{ kind: 'category', id: region.category }]);
+    else up();
   };
   const clickable = (leaf: Leaf) => (levels.length === 0 ? leaf.kind !== 'free' : leaf.browsable);
   const leafAction = (leaf: Leaf) =>
@@ -147,7 +158,7 @@ export function Atlas({ drives, selected, onSelect, scan, agent }: Props) {
               {(overview?.volume ?? scanning?.volume ?? selected).name}
             </span>
           ) : (
-            <button type="button" className="crumb" onClick={() => setLevels([])}>
+            <button type="button" className="crumb" onClick={() => navigate([])}>
               {overview.volume.name}
             </button>
           )}
@@ -166,7 +177,7 @@ export function Atlas({ drives, selected, onSelect, scan, agent }: Props) {
                       {name}
                     </span>
                   ) : (
-                    <button type="button" className="crumb" onClick={() => setLevels(levels.slice(0, i + 1))}>
+                    <button type="button" className="crumb" onClick={() => navigate(levels.slice(0, i + 1))}>
                       {name}
                     </button>
                   )}

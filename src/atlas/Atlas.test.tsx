@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../App';
-import { BridgeProvider, createMockBridge, fixtures, type Bridge, type MockOptions } from '../bridge';
+import { BridgeProvider, createMockBridge, fixtures, type Bridge, type MapFolder, type MockOptions } from '../bridge';
 
 const plain = (s: string | null | undefined) => (s ?? '').replace(/\u00a0/g, ' ');
 
@@ -241,6 +241,34 @@ describe('the map', () => {
 
     await userEvent.keyboard('{Escape}');
     expect(within(crumbs()).queryByText('Apps & games')).toBeNull();
+    expect(tile(container, 'Developer').closest('.map-region')).toHaveStyle({ opacity: '1' });
+  });
+
+  it('drops a folder that arrives after the user has moved on', async () => {
+    const bridge = windows();
+    let arrive: (folder: MapFolder) => void = () => {};
+    vi.spyOn(bridge, 'browse').mockImplementation(
+      () =>
+        new Promise<MapFolder>((resolve) => {
+          arrive = resolve;
+        }),
+    );
+    const { container } = renderApp(bridge);
+    await scanToMap();
+    const crumbs = () => screen.getByRole('navigation', { name: 'Map location' });
+
+    await userEvent.click(tile(container, 'Apps & games'));
+    await userEvent.click(tile(container, 'Adobe'));
+    expect(screen.getByLabelText('Opening')).toBeInTheDocument();
+    await userEvent.keyboard('{Escape}');
+    await act(async () => {
+      arrive(fixtures.windows.folders['fx-apps-2']!);
+      await Promise.resolve();
+    });
+
+    expect(within(crumbs()).queryByText('Adobe')).toBeNull();
+    expect(within(crumbs()).queryByText('Apps & games')).toBeNull();
+    expect(screen.queryByLabelText('Opening')).toBeNull();
     expect(tile(container, 'Developer').closest('.map-region')).toHaveStyle({ opacity: '1' });
   });
 
