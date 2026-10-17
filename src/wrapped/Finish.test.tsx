@@ -72,6 +72,26 @@ afterEach(() => {
 });
 
 describe('the highlight slides', () => {
+  it('keeps disclosure Space and Enter native while retaining slide navigation', async () => {
+    const guides = fixtures.windows.proposals.filter(p => p.id.startsWith('hint-'));
+    renderFinish({ ...fullReport, leftForYou: guides.map(p => ({
+      id: p.id, title: p.title, summary: p.summary, why: p.why, bytes: 0, hintAction: p.hintAction ?? null,
+    })) });
+    await userEvent.click(screen.getByRole('button', { name: /Slide .*Skipped and left for you/ }));
+    await settle();
+    const summary = within(slide()).getAllByText('Instructions and reference')[0]!;
+    summary.focus();
+    for (const key of [' ', 'Enter']) {
+      const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+      expect(summary.dispatchEvent(event)).toBe(true);
+      expect(event.defaultPrevented).toBe(false);
+      expect(screen.getByRole('button', { name: 'Pause the slides' })).toBeInTheDocument();
+    }
+    expect(slide()).toHaveClass('slide--kept');
+    expect(slide()).toHaveAttribute('tabindex', '0');
+    await key('ArrowRight');
+    expect(slide()).toHaveAccessibleName('7 of 7: Checkout');
+  });
   it('keeps actual deletions visible when hard-link names free zero bytes', async () => {
     const r: RunReport = {
       ...report, freedBytes: 0, deletedItems: 1, biggestWin: null, freedByCategory: [],

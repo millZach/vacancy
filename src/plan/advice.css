@@ -6,3 +6,4 @@
 .guide-details { margin-top: var(--space-2); }
 .guide-details > summary { color: var(--color-text-2); cursor: pointer; font: 500 var(--text-sm) / 1.5 var(--font-sans); }
 .guide-details > summary:focus-visible { outline: 2px solid var(--color-neon); outline-offset: 3px; }
+.guide-text .hint-action, .guide-text .hint-action-error { display: block; overflow: visible; -webkit-line-clamp: unset; }

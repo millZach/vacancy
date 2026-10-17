@@ -53,6 +53,27 @@ try {
       await confirm.screenshot({ path: join(out, `${name}-confirm.png`) });
       await confirm.getByRole('button', { name: mixed ? /permanently$/ : 'Save reminders' }).click();
       await page.getByRole('button', { name: 'See what changed' }).click();
+      await page.getByRole('button', { name: 'Pause the slides' }).click();
+      await page.getByRole('button', { name: /Slide .*Skipped and left for you/ }).click();
+      const kept = page.locator('.slide--kept');
+      await kept.waitFor();
+      await page.setViewportSize({ width: 1100, height: 620 });
+      for (const disclosure of await kept.locator('summary').all()) {
+        await disclosure.focus();
+        await page.keyboard.press('Space');
+        if (!await disclosure.locator('..').getAttribute('open').then(value => value !== null)) throw new Error('Space did not open guide');
+        await page.keyboard.press('Enter');
+        if (await disclosure.locator('..').getAttribute('open') !== null) throw new Error('Enter did not close guide');
+        await page.keyboard.press('Space');
+        await page.keyboard.press('Tab');
+        const focused = await page.evaluate(() => ({ label: document.activeElement?.textContent, rect: document.activeElement?.getBoundingClientRect().toJSON() }));
+        if (!focused.label?.includes('↗') || focused.rect.top < 0 || focused.rect.bottom > 620) throw new Error(`Keyboard reference not reachable: ${JSON.stringify(focused)}`);
+      }
+      if (await kept.locator('ol > li').count() !== 12) throw new Error('Highlights lost instructions');
+      const scroll = await kept.evaluate(el => ({ height: el.clientHeight, content: el.scrollHeight, overflow: getComputedStyle(el).overflowY }));
+      if (scroll.overflow !== 'auto' || scroll.content <= scroll.height) throw new Error('Short highlights have no reading scroll boundary');
+      await page.screenshot({ path: join(out, `${name}-short-highlights.png`) });
+      await page.setViewportSize({ width: 1280, height: 820 });
       await page.getByRole('button', { name: 'Skip to recap' }).click();
       for (const toggle of await page.getByText('Instructions and reference', { exact: true }).all()) await toggle.click();
       const summary = page.getByRole('complementary', { name: 'What Vacancy did' });
@@ -65,7 +86,7 @@ try {
       await page.getByRole('menuitem').click();
       if (await page.getByText('Instructions and reference', { exact: true }).count() !== 4) throw new Error('History lost guides');
       await page.screenshot({ path: join(out, `${name}-history.png`) });
-      observations.journeys.push({ platform, mixed, guides: names, summaryText, orderedSteps: 12, fixtureReferencesRefused: 4 });
+      observations.journeys.push({ platform, mixed, guides: names, summaryText, orderedSteps: 12, fixtureReferencesRefused: 4, shortHighlights: scroll, keyboardReferencesReached: 4 });
       await page.close();
     }
   }

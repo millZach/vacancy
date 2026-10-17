@@ -66,6 +66,13 @@
   width: min(1060px, calc(100% - 140px));
   max-height: 100%;
 }
+.slide--kept {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding-right: var(--space-3);
+}
+.slide--kept:focus-visible { outline: 2px solid var(--color-neon); outline-offset: 4px; }
 
 /* ---------- the controls ---------- */
 .wrap-nav {
