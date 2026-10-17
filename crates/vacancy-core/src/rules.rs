@@ -958,7 +958,8 @@ impl Engine<'_> {
         })
     }
 
-    /// The identity of the configured place `path`, resolved once.
+    /// The identity of the configured place `path`, resolved once and without following links: a configured place
+    /// that is a link, or is reached through one, names nothing a rule may use.
     fn identity_of_place(&self, path: &Path) -> Option<Identity> {
         *self
             .identities

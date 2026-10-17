@@ -97,10 +97,13 @@ impl Guard {
     /// resolve those places' identities.
     pub fn new(env: &Env, volume_root: &Path) -> Self {
         let mut g = Builder::default();
+        // What grants anything is resolved without following links (see `fsid::identity`): the volume root, whether
+        // the home folder is on it, the allowed roots and the folder of user accounts.
         let root = fsid::identity(volume_root);
-        let home_here = match fsid::resolve(&env.home) {
+        let home_here = match fsid::chain(&env.home) {
             Some(home) => root.is_some_and(|r| home.iter().any(|s| s.id == r)),
-            // A home folder that can't be found is taken to be here, which allows less than another drive would.
+            // A home folder that can't be walked without a link, or isn't there, is taken to be here, which allows
+            // less than another drive would.
             None => true,
         };
         let mut drive_folders = None;
@@ -124,11 +127,13 @@ impl Guard {
                     g.allow(t);
                 }
             }
+            // Folders at the drive's root are allowed only when the folder of user accounts can be told apart from
+            // them.
             if env.platform == Platform::Windows
                 && let Some(root) = root
+                && let Some(users) = env.home.parent().and_then(fsid::identity)
             {
-                let users = env.home.parent().and_then(fsid::identity);
-                drive_folders = Some((root, users));
+                drive_folders = Some((root, Some(users)));
             }
         } else {
             g.allow(volume_root);
@@ -316,6 +321,9 @@ struct Builder {
 }
 
 impl Builder {
+    /// Allows what is inside `path`, if `path` is a real folder reached without a link: a root that is a link, or
+    /// has one among the folders above it, is not allowed at all, so a cache folder linked to some other folder
+    /// never opens that folder up.
     fn allow(&mut self, path: &Path) {
         if let Some(id) = fsid::identity(path) {
             self.allowed.push(id);
@@ -341,7 +349,7 @@ impl Builder {
             });
         }
         // A place that isn't there has no identity: nothing on disk is it, inside it or holding it. Its name still
-        // denies.
+        // denies. A place to protect is followed through links (`fsid::resolve`): that only protects more.
         let Some(chain) = fsid::resolve(path) else {
             return;
         };
@@ -756,6 +764,39 @@ mod tests {
             g.check(&fx.at("Users/me/Sync Area")),
             Err(Denied::Protected("Box".into())),
             "and what holds it"
+        );
+    }
+
+    /// An allowed root reached through a link allows nothing: here `$TMPDIR` names a Temp folder through a link
+    /// (a junction on Windows, a symlink on macOS) in the home folder to a folder outside it, which must not open
+    /// that folder up.
+    #[test]
+    fn an_allowed_root_behind_a_link_allows_nothing() {
+        let fx = Fx::new();
+        let real = fx.at("Elsewhere");
+        let old = fx.at("Elsewhere/Temp/old");
+        let link = sub(&fx.root, "Users/me/Linked");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(&real)
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "mklink /J");
+        }
+        let mut env = Env::macos(&fx.root, "me");
+        env.temp = vec![link.join("Temp")];
+        let g = fx.guard(&env);
+        assert_eq!(g.check(&old), Err(Denied::OutsideAllowedRoots));
+        assert_eq!(
+            g.check(&fx.at("Users/me/code/node_modules")),
+            Ok(()),
+            "the control"
         );
     }
 

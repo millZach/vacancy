@@ -164,16 +164,21 @@ impl Kept {
     }
 }
 
-/// The chain of the place `path` leads to with links followed: where a configured place (a known folder, a cloud
-/// root, a temp folder) really is. `None` if it isn't there or can't be opened.
+/// The chain of the place `path` leads to with links followed: where a configured place really is. Only for
+/// places to *protect* (a cloud root reached through a link protects the folder it leads to): following a link
+/// there only ever denies more. Never for a place that grants anything; see [`identity`]. `None` if it isn't there
+/// or can't be opened.
 pub(crate) fn resolve(path: &Path) -> Option<Vec<Step>> {
     let real = std::fs::canonicalize(path).ok()?;
     chain(&real)
 }
 
-/// The identity of the place `path` leads to (see [`resolve`]).
+/// The identity of the place at `path` itself, reached without following any link: `None` if `path` is a link
+/// (symlink, junction or other reparse point that names somewhere else), passes through one, or isn't there. What
+/// allows anything (an allowed root, the volume root, a place a rule empties) is resolved this way: a cache folder
+/// linked to some other folder must not open that folder up.
 pub(crate) fn identity(path: &Path) -> Option<Identity> {
-    resolve(path)?.last().map(|s| s.id)
+    chain(path)?.last().map(|s| s.id)
 }
 
 #[cfg(windows)]
@@ -799,9 +804,15 @@ mod tests {
         assert!(chain(&link.join("inside")).is_none(), "through the link");
         assert!(chain(&link).is_none(), "the link itself");
         assert_eq!(
-            identity(&link.join("inside")),
+            resolve(&link.join("inside")).and_then(|c| c.last().map(|s| s.id)),
             identity(&real.join("inside")),
-            "resolving a configured place follows it"
+            "resolving a place to protect follows the link"
         );
+        assert_eq!(
+            identity(&link.join("inside")),
+            None,
+            "an identity never does"
+        );
+        assert_eq!(identity(&link), None);
     }
 }

@@ -1146,6 +1146,44 @@ mod guard {
         );
     }
 
+    /// The reviewer's case: with Google Drive's mirrors unknown, the package cache `~/.npm/_cacache` is a junction
+    /// (Windows) or symlink (macOS) to `~/Work`, an unmarked mirror, and `%TEMP%` is `~/Work/Temp`. The linked cache
+    /// folder is not an allowed root, so nothing in `Work` is proposed: not its old temp files, not its idle project.
+    #[test]
+    fn a_linked_cache_folder_never_opens_up_what_it_links_to() {
+        let fx = Fixture::new();
+        bait(&fx, "Users/alex/Work");
+        fx.file("Users/alex/Work/Temp/old.tmp", MIB);
+        age(&fx.path("Users/alex/Work"), 200);
+        let cache = fx.dir("Users/alex/.npm").join("_cacache");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(fx.path("Users/alex/Work"), &cache).unwrap();
+        #[cfg(windows)]
+        assert!(
+            std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&cache)
+                .arg(fx.path("Users/alex/Work"))
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "mklink /J"
+        );
+        for windows in [true, false] {
+            let mut env = if windows { win(&fx) } else { mac(&fx) };
+            env.temp = vec![fx.path("Users/alex/Work/Temp")];
+            env.unknown_clouds = vec!["Google Drive".to_owned()];
+            let (snap, proposals) = run(&fx, &env, &moment(&[]));
+            let found = all_targets(&fx, &snap, &proposals);
+            assert!(
+                found.iter().all(|t| !t.starts_with("Users/alex/Work/")),
+                "{:?}: {found:?}",
+                env.platform
+            );
+        }
+    }
+
     #[test]
     fn os_folders() {
         let fx = Fixture::new();
@@ -1474,12 +1512,10 @@ fn another_drive_is_searched_for_projects() {
     fx.file("$Recycle.Bin/S-1-5/app/package-lock.json", 4 * KIB);
     fx.file("$Recycle.Bin/S-1-5/app/node_modules/y/y.js", MIB);
     age(fx.root(), 200);
+    // The home folder is somewhere this drive's root isn't above: another fixture stands for the other drive.
+    let other = Fixture::new();
     let mut env = Env::windows(fx.root(), "alex");
-    env.home = PathBuf::from(if cfg!(windows) {
-        r"Z:\Users\alex"
-    } else {
-        "/Volumes/Other/Users/alex"
-    });
+    env.home = other.dir("Users/alex");
     let (snap, proposals) = run(&fx, &env, &moment(&[]));
     assert_eq!(
         all_targets(&fx, &snap, &proposals),
