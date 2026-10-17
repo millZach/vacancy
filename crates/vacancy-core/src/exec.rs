@@ -717,6 +717,10 @@ impl Run<'_, '_> {
     /// takes back from the freed count every file deleted since that an app still has open: its space comes back
     /// only when the app lets go of it.
     fn look_at_open_files(&mut self, sr: &mut StepRun<'_>, force: bool) {
+        if cfg!(unix) {
+            sr.unlinked.clear();
+            return; // TEMP: the fix disabled, to show its tests fail
+        }
         let every = if force { Duration::ZERO } else { BUSY_EVERY };
         if sr.unlinked.is_empty() && force {
             return;
@@ -1175,6 +1179,9 @@ const MOVED: &str = "It was moved during the run, so the rest of it was left whe
 /// same mount). A folder renamed or moved since (into a cloud-sync folder, say), or one whose folders above were,
 /// isn't, and nothing more in it goes.
 fn in_place(chain: &[Step], path: &Path) -> bool {
+    if cfg!(unix) {
+        return true; // TEMP: the fix disabled, to show its test fails
+    }
     let Some(name) = path.file_name() else {
         return false;
     };

@@ -131,7 +131,7 @@ fn mount_of(fd: &Fd) -> Result<Option<OsString>, Fail> {
     #[cfg(target_os = "macos")]
     {
         if crate::fsid::test_hooks::fail_mount() {
-            return Err(Fail::Failed("which volume it is on can't be read".into()));
+            return Ok(None); // TEMP: the fix disabled, to show its test fails
         }
         // SAFETY: an all-zero statfs is a valid value of a plain C struct.
         let mut fs: libc::statfs = unsafe { std::mem::zeroed() };

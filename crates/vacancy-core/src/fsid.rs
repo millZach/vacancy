@@ -615,7 +615,7 @@ mod sys {
         {
             use std::os::unix::ffi::OsStringExt;
             if super::test_hooks::fail_mount() {
-                return Err(());
+                return Ok(None); // TEMP: the fix disabled, to show its test fails
             }
             // SAFETY: an all-zero statfs is a valid value of a plain C struct.
             let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
