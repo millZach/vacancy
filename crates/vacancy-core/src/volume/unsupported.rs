@@ -11,3 +11,7 @@ pub(super) fn volume_info(_path: &Path) -> Result<VolumeInfo, VolumeError> {
 pub(super) fn system_volume() -> Result<VolumeInfo, VolumeError> {
     Err(VolumeError::Unsupported)
 }
+
+pub(super) fn list_volumes() -> Vec<VolumeInfo> {
+    Vec::new()
+}

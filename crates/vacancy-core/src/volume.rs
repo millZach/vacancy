@@ -66,3 +66,18 @@ pub fn volume_info(path: &Path) -> Result<VolumeInfo, VolumeError> {
 pub fn system_volume() -> Result<VolumeInfo, VolumeError> {
     imp::system_volume()
 }
+
+/// The local volumes a scan can be pointed at, the system volume first. Network shares and cloud services'
+/// virtual drives are left out. Read-only, like [`volume_info`].
+pub fn list_volumes() -> Vec<VolumeInfo> {
+    let mut volumes = imp::list_volumes();
+    let system = system_volume().ok().map(|v| v.mount_point);
+    volumes.sort_by_key(|v| {
+        (
+            Some(&v.mount_point) != system.as_ref(),
+            v.mount_point.clone(),
+        )
+    });
+    volumes.dedup_by(|a, b| a.mount_point == b.mount_point);
+    volumes
+}

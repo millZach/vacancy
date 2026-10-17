@@ -5,7 +5,7 @@
 //
 // Look and feel are ported unchanged from the prototype's variant D.
 
-import { clamp, isCalm, makeRipple, rippleFrame, TAU, type DropKind, type Ripple } from './ripple';
+import { clamp, isCalm, makeRipple, rippleFrame, smooth, TAU, type DropKind, type Ripple } from './ripple';
 
 export interface Rect {
   left: number;
@@ -43,6 +43,12 @@ export interface DotField {
    */
   setCalm(area: Rect | null): void;
   setReducedMotion(reduce: boolean): void;
+  /**
+   * How far a scan has got, 0 to 1, or `null` when none is running. While scanning, a bright band sweeps across
+   * the field with the progress, dropping small droplets as it "finds" folders, and the quiet pool around the
+   * plate fades out (the plate has gone).
+   */
+  setScan(progress: number | null): void;
   /** Stops the loop for good. */
   destroy(): void;
 }
@@ -58,6 +64,10 @@ const POOL_RX = 330;
 const LIGHT_X = -0.5;
 const LIGHT_Y = -0.86;
 const MAX_GLOW = 1200;
+/** Milliseconds between the scan sweep's droplets. */
+const DRIP_EVERY = 260;
+/** How fast the drawn sweep catches up with the scan's progress, per second. */
+const SWEEP_CATCH_UP = 2.5;
 
 export const browserEnv: FieldEnv = {
   now: () => performance.now(),
@@ -115,6 +125,13 @@ export function createDotField(
   let scheduled = false;
   let dirty = true;
   let dead = false;
+
+  // The scan sweep: where the scan is, where the band is drawn (easing toward it), when it began, the last drip.
+  let scanTarget: number | null = null;
+  let sweep = 0;
+  let scanStartMs = 0;
+  let lastDrip = 0;
+  let lastFrameMs = 0;
 
   const currentDpr = () => Math.min(3, env.devicePixelRatio());
 
@@ -179,11 +196,29 @@ export function createDotField(
       dirty = true; // draw the calm field once, even if frames paused past the ripple's end
     }
 
+    // The scan sweep follows the scan's progress smoothly, dropping droplets as it goes (not with reduced motion).
+    const dt = lastFrameMs ? Math.min(0.1, (nowMs - lastFrameMs) / 1000) : 0;
+    lastFrameMs = nowMs;
+    const scanning = scanTarget !== null;
+    if (scanTarget !== null) {
+      sweep += (scanTarget - sweep) * Math.min(1, dt * SWEEP_CATCH_UP);
+      if (!reduce && sweep < 0.92 && nowMs - lastDrip > DRIP_EVERY) {
+        lastDrip = nowMs;
+        const xs = -60 + (W + 120) * smooth(0, 1, sweep);
+        ripples.push(makeRipple(clamp(xs + (Math.random() - 0.3) * 90, 0, W), Math.random() * H, t, 'drip', false));
+        if (ripples.length > MAX_RIPPLES) ripples.shift();
+      }
+    }
+
     // Reduced motion with nothing fading: stay idle until the next drop.
     if (reduce && ripples.length === 0 && !dirty) return;
 
     const rs = ripples.map((r) => rippleFrame(r, t));
     const base = Math.max(1.05, Math.min(1.35, W / 1100));
+    // The pool around the plate fades once a scan starts; the band's position on the field.
+    const poolK = scanning ? Math.max(0, 1 - (nowMs - scanStartMs) / 500) : 1;
+    const xs = scanning && !reduce ? -60 + (W + 120) * smooth(0, 1, sweep) : -1e4;
+    const band = scanning ? 1 - smooth(0.85, 1.05, sweep) : 0;
 
     counts.fill(0);
     glowN = 0;
@@ -247,7 +282,14 @@ export function createDotField(
         }
       }
 
-      const pd = Math.exp(-(((x0 - pool.x) / pool.rx) ** 2) - ((y0 - pool.y) / pool.ry) ** 2);
+      let lit2 = 0;
+      if (xs > -1e3) {
+        const off = x0 - xs - 22 * Math.sin(y0 * 0.011 + t * 1.6);
+        lit2 = Math.exp(-(off * off) / 2600) * band;
+        if (off < 0) lit2 += 0.035;
+      }
+
+      const pd = poolK * Math.exp(-(((x0 - pool.x) / pool.rx) ** 2) - ((y0 - pool.y) / pool.ry) ** 2);
       const quiet = 1 - 0.55 * pd;
       const crest = clamp(h, -1, 1.3);
       const lit = clamp(shade, -1, 1);
@@ -256,12 +298,14 @@ export function createDotField(
         (0.08 + 0.1 * amb) * quiet * Math.max(0, 1 + 1.1 * Math.min(0, crest) + 0.5 * Math.min(0, lit)) +
           0.62 * Math.max(0, crest) +
           0.42 * Math.max(0, lit) +
+          0.3 * lit2 +
           0.5 * lift +
           0.3 * neon,
         0,
         1,
       );
-      const rad = base * (0.78 + 0.42 * amb) * (1 + 0.85 * crest + 0.25 * lit + 0.6 * lift) + 0.4 * neon;
+      const rad =
+        base * (0.78 + 0.42 * amb) * (1 + 0.85 * crest + 0.25 * lit + 0.5 * lit2 + 0.6 * lift) + 0.4 * neon;
 
       px[i] = x0 + dx;
       py[i] = y0 + dy;
@@ -349,6 +393,19 @@ export function createDotField(
     },
     setReducedMotion(next) {
       reduce = next;
+      wake();
+    },
+    setScan(progress) {
+      if (progress === null) {
+        scanTarget = null;
+        sweep = 0;
+      } else {
+        if (scanTarget === null) {
+          scanStartMs = env.now();
+          sweep = 0;
+        }
+        scanTarget = clamp(progress, 0, 1);
+      }
       wake();
     },
     destroy() {

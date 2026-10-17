@@ -49,6 +49,49 @@ pub(super) fn system_volume() -> Result<VolumeInfo, VolumeError> {
     super::volume_info(Path::new("/"))
 }
 
+/// File systems of local disks. Anything else (network shares, cloud services' FUSE mounts) is not offered.
+const LOCAL_FILE_SYSTEMS: [&str; 6] = ["apfs", "hfs", "exfat", "msdos", "ntfs", "ufs"];
+
+/// Local volumes Finder shows: mounted locally, browsable (which leaves out the system's own volumes under
+/// `/System/Volumes`), with a disk file system.
+pub(super) fn list_volumes() -> Vec<VolumeInfo> {
+    // SAFETY: a null buffer asks only for the number of mounts.
+    let n = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+    if n <= 0 {
+        return Vec::new();
+    }
+    let cap = n as usize + 8;
+    let mut buf: Vec<libc::statfs> = Vec::with_capacity(cap);
+    let bytes = (cap * mem::size_of::<libc::statfs>()) as libc::c_int;
+    // SAFETY: `buf` has room for `cap` statfs records, `bytes` long; getfsstat writes at most that many.
+    let got = unsafe { libc::getfsstat(buf.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
+    if got <= 0 {
+        return Vec::new();
+    }
+    // SAFETY: getfsstat filled the first `got` records.
+    unsafe { buf.set_len((got as usize).min(cap)) };
+    let mut out = Vec::new();
+    for st in &buf {
+        let flags = st.f_flags as u64;
+        if flags & libc::MNT_LOCAL as u64 == 0 || flags & libc::MNT_DONTBROWSE as u64 != 0 {
+            continue;
+        }
+        // SAFETY: the kernel NUL-terminates both names within their arrays.
+        let fs = unsafe { CStr::from_ptr(st.f_fstypename.as_ptr()) }.to_string_lossy();
+        if !LOCAL_FILE_SYSTEMS.contains(&fs.as_ref()) {
+            continue;
+        }
+        // SAFETY: as above.
+        let mount = unsafe { CStr::from_ptr(st.f_mntonname.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
+        if let Ok(v) = super::volume_info(Path::new(&mount)) {
+            out.push(v);
+        }
+    }
+    out
+}
+
 const NAME_BUF_LEN: usize = 4 + 8 + 1024;
 
 /// The buffer `getattrlist` fills: a `u32` total length, an `attrreference_t` (offset, length), then the name.

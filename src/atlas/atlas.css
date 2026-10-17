@@ -1,0 +1,131 @@
+/* The map screen: a toolbar (breadcrumb, notes, key) over the stage, where the plate, the scanning HUD and the map
+   live. Before and during a scan the dot field shows through the stage. */
+
+.atlas {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 var(--gutter) var(--gutter);
+  cursor: default;
+}
+
+.atlas-toolbar {
+  position: relative;
+  z-index: 1;
+  flex: none;
+  height: var(--toolbar-h);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-ui);
+  color: var(--color-text-3);
+}
+.crumb-step {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.crumb {
+  padding: 3px 0;
+  border: 0;
+  background: none;
+  font: 600 var(--text-ui) var(--font-sans);
+  color: var(--color-text-2);
+  white-space: nowrap;
+}
+button.crumb {
+  cursor: pointer;
+}
+button.crumb:hover {
+  color: var(--color-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.crumb.is-here {
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.crumb-blurb {
+  margin-left: var(--space-3);
+  color: var(--color-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.crumb-spin {
+  flex: none;
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.crumb-error {
+  color: var(--color-careful);
+  white-space: nowrap;
+}
+
+.scan-notes {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  font-size: var(--text-xs);
+  color: var(--color-text-3);
+  white-space: nowrap;
+}
+.scan-notes + .legend {
+  margin-left: 0;
+}
+.scan-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.scan-note.is-action {
+  padding: 3px 8px 2px;
+  border: 1px solid var(--color-line-2);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--color-review);
+  font: 600 var(--text-xs) var(--font-sans);
+  cursor: pointer;
+}
+
+.atlas-stage {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-height: 0;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.atlas.is-map .atlas-stage {
+  background: var(--color-bg);
+}
+/* Before and during a scan the map takes no pointers: clicks fall through to the dot field, except on the plate's
+   controls and the HUD. */
+.atlas.is-scan .map,
+.atlas.is-scan .plate {
+  pointer-events: none;
+}
+.atlas.is-scan .hud,
+.atlas.is-scan .plate-content .cta,
+.atlas.is-scan .plate-content .agent-note,
+.atlas.is-scan .plate-content .drive-picker {
+  pointer-events: auto;
+}

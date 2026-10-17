@@ -26,6 +26,48 @@
   --color-meter: #7d8796; /* used-space bars */
   --color-meter-track: #232a35;
 
+  /* ---------- the map ---------- */
+  /* Each category's hue (oklch degrees); regions and tiles mix it with the lightness and chroma below. */
+  --hue-apps: 265;
+  --hue-dev: 190;
+  --hue-media: 330;
+  --hue-photos: 300;
+  --hue-system: 220;
+  --hue-downloads: 40;
+  --hue-caches: 150;
+  --hue-cloud: 205;
+  --hue-other: 0;
+  --map-region-l: 0.215;
+  --map-region-c: 0.022;
+  --map-tile-l: 0.3; /* the darkest of three neighbouring shades */
+  --map-tile-step: 0.028; /* lightness between neighbouring shades */
+  --map-tile-c: 0.05;
+  --map-tile-c-locked: 0.02;
+  --map-head-l: 0.86;
+  --map-head-c: 0.06;
+  --map-head-locked-l: 0.72;
+  --map-head-locked-c: 0.02;
+  --map-size-l: 0.68;
+  --map-size-c: 0.04;
+  --map-chip-l: 0.62; /* the category swatch in the hover card */
+  --map-chip-c: 0.1;
+  --color-tile-text: rgba(238, 242, 247, 0.93);
+  --color-tile-size: rgba(222, 228, 236, 0.6);
+  --color-tile-hot: rgba(255, 255, 255, 0.9);
+  --color-tip: rgba(21, 26, 33, 0.96);
+  --color-hud: rgba(16, 20, 26, 0.9);
+  --color-hud-track: #262d38;
+  --color-key-scale: #5b6574;
+  --color-key-scale-fill: rgba(255, 255, 255, 0.04);
+  --color-key-locked: #2b3139;
+  --color-chip-on: #2a323e; /* a picked drive chip */
+  --color-raise-hover: #232a35;
+  --color-line-hover: #3b4554;
+  --shadow-float: 0 14px 36px rgba(0, 0, 0, 0.5);
+  --shadow-hud: 0 18px 44px rgba(0, 0, 0, 0.5);
+  /* Tiles glide to their new places when the map zooms or fills in. */
+  --map-move: 0.52s cubic-bezier(0.22, 0.8, 0.26, 1);
+
   /* ---------- surfaces ---------- */
   --ground: radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.085) 1px, transparent 1.5px) 0 0 / 9px 9px,
     var(--color-head);

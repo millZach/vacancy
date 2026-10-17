@@ -1,7 +1,7 @@
 // Ripple physics for the dot field. Pure functions of time, so they can be reasoned about (and tested) apart from the
 // canvas. Ported unchanged from the prototype's variant D: changing a constant here changes how the water feels.
 
-export type DropKind = 'tap' | 'splash';
+export type DropKind = 'tap' | 'splash' | 'drip';
 
 export interface Ripple {
   /** Impact point, canvas-local CSS px. */
@@ -22,14 +22,16 @@ export interface Ripple {
   soft: boolean;
 }
 
-/** A tap is a background click; a splash is the Scan button's big drop. */
+/** A tap is a background click; a splash is the Scan button's big drop; a drip is the scan finding folders. */
 const PRESETS: Record<DropKind, Pick<Ripple, 'amp' | 'v' | 'lam' | 'life' | 'push'>> = {
   tap: { amp: 1.35, v: 300, lam: 60, life: 2.3, push: 6.5 },
   splash: { amp: 1.6, v: 470, lam: 80, life: 2.9, push: 9 },
+  drip: { amp: 0.42, v: 230, lam: 46, life: 1.5, push: 4 },
 };
 const SOFT_PRESETS: Record<DropKind, Pick<Ripple, 'amp' | 'lam' | 'life'>> = {
   tap: { amp: 0.75, lam: 120, life: 0.9 },
   splash: { amp: 0.9, lam: 190, life: 1.3 },
+  drip: { amp: 0.75, lam: 120, life: 0.9 },
 };
 
 export const TAU = Math.PI * 2;

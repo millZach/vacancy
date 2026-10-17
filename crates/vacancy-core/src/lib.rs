@@ -4,8 +4,27 @@
 //! Types the UI sees derive [`ts_rs::TS`]. `cargo test` writes their TypeScript to `src/bindings/` at the repo
 //! root, and CI fails if the checked-in copy is stale.
 
+mod categorize;
 mod machine;
+mod map;
+pub mod permissions;
+mod scan;
+mod snapshot;
+mod text;
 mod volume;
 
+pub use categorize::{
+    Categories, Category, CategoryId, CloudRoot, Env, Item, ItemRef, KnownFolders, Platform,
+    categorize,
+};
 pub use machine::machine_name;
-pub use volume::{VolumeError, VolumeInfo, system_volume, volume_info};
+pub use map::{
+    CategoryTotal, ItemKind, MapCategory, MapError, MapFolder, MapItem, Overview, ScanOutcome,
+    ScanSummary, ScanUpdate, ScannedVolume, browse, overview, scan_for_map, scan_update,
+};
+pub use scan::{CancelToken, ScanError, ScanOptions, ScanProgress, scan};
+pub use snapshot::{
+    DirFlags, DirId, FileId, FileInfo, Markers, Root, RootKind, ScanStats, Snapshot, Totals,
+    UnixTime,
+};
+pub use volume::{VolumeError, VolumeInfo, list_volumes, system_volume, volume_info};

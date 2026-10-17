@@ -14,6 +14,10 @@ interface Props {
   ref?: Ref<DotFieldHandle>;
   /** The element the field stays quiet around: the plate's content. */
   calm?: HTMLElement | null;
+  /** How far a running scan has got (0 to 1), or null when none is running. */
+  scan?: number | null;
+  /** Fades the field out: the map has covered it. */
+  out?: boolean;
 }
 
 /** Pointer-downs on these never ripple: controls, and anything marked `data-no-ripple`. */
@@ -25,7 +29,7 @@ const NO_RIPPLE = 'button, a, input, select, textarea, label, [role="button"], [
  * frame never touches React state. It stops when unmounted, follows the reduced-motion setting live, and redraws
  * sharply when the window moves to a screen with a different pixel ratio.
  */
-export function DotField({ ref, calm = null }: Props) {
+export function DotField({ ref, calm = null, scan = null, out = false }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fieldRef = useRef<Field | null>(null);
   const calmRef = useRef<HTMLElement | null>(calm);
@@ -97,7 +101,11 @@ export function DotField({ ref, calm = null }: Props) {
     return () => sized.disconnect();
   }, [calm]);
 
-  return <canvas ref={canvasRef} className="dot-field" aria-hidden />;
+  useEffect(() => {
+    fieldRef.current?.setScan(scan);
+  }, [scan]);
+
+  return <canvas ref={canvasRef} className={out ? 'dot-field is-out' : 'dot-field'} aria-hidden />;
 }
 
 /** The field's colours, from the design tokens in `tokens.css`. */
