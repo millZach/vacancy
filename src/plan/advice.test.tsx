@@ -95,7 +95,7 @@ describe.each(['windows', 'macos'] as const)('%s advice reminders', (platform) =
       const box = within(tray).getByRole('checkbox', { name: `Remind me: ${guide.title}` });
       expect(box).toHaveAttribute('aria-checked', 'false');
       await userEvent.click(within(tray).getByRole('button', { name: guide.title }));
-      const row = box.closest('.tray-row')! as HTMLElement;
+      const row = box.closest<HTMLElement>('.tray-row')!;
       expect(row.querySelectorAll('ol > li')).toHaveLength(3);
       const reference = within(row).getByRole('button', { name: /↗/ });
       await userEvent.click(reference);
