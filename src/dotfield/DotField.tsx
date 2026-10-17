@@ -1,5 +1,5 @@
 import { useEffect, useImperativeHandle, useRef, type Ref } from 'react';
-import { createDotField, type DotField as Field } from './field';
+import { createDotField, type DotField as Field, type Palette, type Rgb } from './field';
 import type { DropKind } from './ripple';
 import './dotfield.css';
 
@@ -48,9 +48,14 @@ export function DotField({ ref, calm = null }: Props) {
     const host = canvas?.parentElement;
     const ctx = canvas?.getContext('2d');
     if (!canvas || !host || !ctx) return; // no 2D canvas (a test DOM): the field simply isn't drawn
+    const palette = readPalette(canvas);
+    if (!palette) {
+      console.error('DotField: the --dot-rgb and --neon-rgb design tokens are missing, so the field is not drawn.');
+      return;
+    }
 
     const motion = matchMedia('(prefers-reduced-motion: reduce)');
-    const field = createDotField(canvas, ctx, { reducedMotion: motion.matches });
+    const field = createDotField(canvas, ctx, { reducedMotion: motion.matches, palette });
     fieldRef.current = field;
 
     const sized = new ResizeObserver(() => {
@@ -93,6 +98,21 @@ export function DotField({ ref, calm = null }: Props) {
   }, [calm]);
 
   return <canvas ref={canvasRef} className="dot-field" aria-hidden />;
+}
+
+/** The field's colours, from the design tokens in `tokens.css`. */
+function readPalette(el: Element): Palette | null {
+  const css = getComputedStyle(el);
+  const dot = parseRgb(css.getPropertyValue('--dot-rgb'));
+  const neon = parseRgb(css.getPropertyValue('--neon-rgb'));
+  return dot && neon ? { dot, neon } : null;
+}
+
+/** "255, 79, 179" to [255, 79, 179]; null unless it is exactly three channels. */
+function parseRgb(value: string): Rgb | null {
+  const channels = value.split(',').map((c) => Number(c.trim()));
+  if (channels.length !== 3 || channels.some((c) => !Number.isFinite(c) || c < 0 || c > 255)) return null;
+  return [channels[0]!, channels[1]!, channels[2]!];
 }
 
 function measureCalm(canvas: HTMLCanvasElement, calm: HTMLElement | null, field: Field) {

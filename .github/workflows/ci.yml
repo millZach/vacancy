@@ -68,15 +68,18 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # From an empty src/bindings, so a type removed in Rust shows up below as a deleted binding.
       - name: Core tests
-        run: cargo test --workspace --locked
+        run: |
+          rm -rf src/bindings
+          cargo test --workspace --locked
 
       - name: Generated TypeScript types are up to date
         run: |
           git diff --exit-code -- src/bindings
           untracked=$(git status --porcelain -- src/bindings)
           if [ -n "$untracked" ]; then
-            echo "::error::src/bindings is stale. Run cargo test and commit src/bindings."
+            echo "::error::src/bindings is stale. Delete src/bindings, run cargo test and commit src/bindings."
             echo "$untracked"
             exit 1
           fi

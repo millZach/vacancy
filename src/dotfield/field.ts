@@ -23,6 +23,15 @@ export interface FieldEnv {
   devicePixelRatio(): number;
 }
 
+/** Red, green and blue channels, 0 to 255. */
+export type Rgb = readonly [number, number, number];
+
+/** The field's two colours, from the design tokens (`--dot-rgb` and `--neon-rgb`). */
+export interface Palette {
+  dot: Rgb;
+  neon: Rgb;
+}
+
 export interface DotField {
   /** Re-reads the canvas size and pixel ratio and rebuilds the grid. Call when the canvas resizes. */
   resize(): void;
@@ -43,8 +52,6 @@ const MIN_SPACING = 15;
 const MAX_RIPPLES = 12;
 const ALPHA_LEVELS = 28;
 const NEON_LEVELS = 7;
-const DOT_RGB = [196, 205, 219] as const;
-const NEON_RGB = [255, 79, 179] as const;
 /** Half-width of the quiet pool around the plate, px. */
 const POOL_RX = 330;
 /** Light from the upper left, so each ring has a lit flank and a shaded one. */
@@ -60,11 +67,11 @@ export const browserEnv: FieldEnv = {
 };
 
 /** One fill style per (neon level, alpha level) bucket, so a frame is at most 196 fills however many dots move. */
-function bucketFills(): string[] {
+function bucketFills({ dot, neon }: Palette): string[] {
   const fills: string[] = [];
   for (let k = 0; k < NEON_LEVELS; k++) {
     const m = k / (NEON_LEVELS - 1);
-    const rgb = DOT_RGB.map((c, i) => Math.round(c + ((NEON_RGB[i] ?? c) - c) * m));
+    const rgb = dot.map((c, i) => Math.round(c + (neon[i]! - c) * m));
     for (let a = 0; a < ALPHA_LEVELS; a++) {
       const alpha = Math.pow(a / (ALPHA_LEVELS - 1), 2);
       fills.push(`rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha.toFixed(3)})`);
@@ -76,7 +83,7 @@ function bucketFills(): string[] {
 export function createDotField(
   canvas: HTMLCanvasElement,
   ctx: CanvasRenderingContext2D,
-  options: { reducedMotion: boolean; env?: FieldEnv },
+  options: { reducedMotion: boolean; palette: Palette; env?: FieldEnv },
 ): DotField {
   const env = options.env ?? browserEnv;
   let reduce = options.reducedMotion;
@@ -95,7 +102,8 @@ export function createDotField(
   let order = new Int32Array(0);
   const counts = new Int32Array(ALPHA_LEVELS * NEON_LEVELS);
   const starts = new Int32Array(ALPHA_LEVELS * NEON_LEVELS);
-  const fills = bucketFills();
+  const fills = bucketFills(options.palette);
+  const bloom = `rgba(${options.palette.neon.join(',')},0.045)`;
   const glow = new Int32Array(MAX_GLOW);
   let glowN = 0;
 
@@ -165,7 +173,11 @@ export function createDotField(
     const t = nowMs / 1000;
     if (currentDpr() !== dpr) build();
 
-    for (let k = ripples.length - 1; k >= 0; k--) if (isCalm(ripples[k]!, t)) ripples.splice(k, 1);
+    for (let k = ripples.length - 1; k >= 0; k--) {
+      if (!isCalm(ripples[k]!, t)) continue;
+      ripples.splice(k, 1);
+      dirty = true; // draw the calm field once, even if frames paused past the ripple's end
+    }
 
     // Reduced motion with nothing fading: stay idle until the next drop.
     if (reduce && ripples.length === 0 && !dirty) return;
@@ -273,7 +285,7 @@ export function createDotField(
 
     // A soft neon bloom under the wavefront dots.
     if (glowN) {
-      ctx.fillStyle = 'rgba(255,79,179,0.045)';
+      ctx.fillStyle = bloom;
       ctx.beginPath();
       for (let g = 0; g < glowN; g++) {
         const i = glow[g]!;

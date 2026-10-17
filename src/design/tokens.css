@@ -15,6 +15,7 @@
   --color-text-3: #6e7988;
   --color-neon: #ff4fb3; /* the sign: the only thing that glows */
   --neon-rgb: 255, 79, 179; /* --color-neon as channels, for rgba() */
+  --dot-rgb: 196, 205, 219; /* the dot field's resting dots, as channels */
   --color-neon-ink: #ffe4f3; /* text lit by neon */
   --color-on-neon: #2a0619; /* text on a neon fill */
   --color-ai: #cfc4e6; /* AI agent accents */

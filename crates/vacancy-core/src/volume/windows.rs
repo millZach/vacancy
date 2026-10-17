@@ -29,12 +29,15 @@ pub(super) fn volume_info(path: &Path) -> Result<VolumeInfo, VolumeError> {
     let root = volume_root(path).map_err(fail)?;
     let root_w = to_wide(OsStr::new(&root));
 
+    // Total and free from the same point of view: what this user can use. Without disk quotas that is the whole
+    // volume; with quotas both are the user's share, as in Explorer. The volume-wide free figure (the last out
+    // parameter) ignores quotas, so subtracting it from a quota-limited total would misreport the used space.
     let mut total = 0u64;
     let mut free = 0u64;
     // SAFETY: `root_w` is NUL-terminated and outlives the call; the two out pointers are valid `u64`s and the
-    // per-user quota pointer may be null.
+    // volume-wide free pointer may be null.
     let ok =
-        unsafe { GetDiskFreeSpaceExW(root_w.as_ptr(), ptr::null_mut(), &mut total, &mut free) };
+        unsafe { GetDiskFreeSpaceExW(root_w.as_ptr(), &mut free, &mut total, ptr::null_mut()) };
     if ok == 0 {
         return Err(fail(io::Error::last_os_error()));
     }

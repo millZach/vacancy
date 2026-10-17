@@ -2,17 +2,33 @@ import { fireEvent, render } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DotField } from './DotField';
 
-/** A 2D context that accepts every call and counts the dots drawn. */
+/** A 2D context that accepts every call, counts the dots drawn and keeps every fill colour set. */
 function fakeContext() {
   const calls = { arc: 0 };
+  const fills = new Set<string>();
   const ctx = new Proxy(
     {},
     {
       get: (_target, key) => (key === 'arc' ? () => void calls.arc++ : () => {}),
-      set: () => true,
+      set: (_target, key, value) => {
+        if (key === 'fillStyle') fills.add(String(value));
+        return true;
+      },
     },
   ) as CanvasRenderingContext2D;
-  return { ctx, calls };
+  return { ctx, calls, fills };
+}
+
+const realComputedStyle = window.getComputedStyle.bind(window);
+
+/** The design tokens the field reads its colours from (the test DOM doesn't load tokens.css). */
+function designTokens(tokens: Record<string, string>) {
+  vi.spyOn(window, 'getComputedStyle').mockImplementation((el, pseudo) => {
+    const style = realComputedStyle(el, pseudo);
+    const read = style.getPropertyValue.bind(style);
+    style.getPropertyValue = (name: string) => tokens[name] ?? read(name);
+    return style;
+  });
 }
 
 /** Animation frames held until the test runs them, on the performance clock the field uses. */
@@ -67,6 +83,7 @@ describe('the dot field', () => {
   beforeEach(() => {
     drawn = fakeContext();
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(drawn.ctx);
+    designTokens({ '--dot-rgb': '196, 205, 219', '--neon-rgb': '255, 79, 179' });
   });
 
   it('keeps animating while mounted and stops when unmounted', () => {
@@ -98,7 +115,46 @@ describe('the dot field', () => {
     frames.run(16);
     expect(frames.waiting).toBe(1); // still fading
     frames.run(1500);
+    frames.run(1516);
     expect(frames.waiting).toBe(0); // calm again
+  });
+
+  it('with reduced motion, redraws the calm field when frames resume after a fade has ended', () => {
+    prefersReducedMotion(true);
+    const frames = manualFrames();
+    const { getByTestId } = renderField();
+    frames.run();
+    frames.run();
+
+    fireEvent.pointerDown(getByTestId('water'), { button: 0, clientX: 200, clientY: 200 });
+    frames.run(200); // mid-fade, then frames pause (a hidden window) until well after the fade's end
+    const lit = drawn.calls.arc;
+    frames.run(1500);
+    expect(drawn.calls.arc).toBeGreaterThan(lit); // the lit frame is replaced by the calm one
+    frames.run(1516);
+    expect(frames.waiting).toBe(0);
+  });
+
+  it('paints with the colours from the design tokens', () => {
+    designTokens({ '--dot-rgb': '10, 20, 30', '--neon-rgb': '255, 79, 179' });
+    prefersReducedMotion(true);
+    const frames = manualFrames();
+    renderField();
+    frames.run(); // a still frame: every dot is the resting colour
+
+    expect(drawn.fills.size).toBeGreaterThan(0);
+    for (const fill of drawn.fills) expect(fill).toMatch(/^rgba\(10,20,30,/);
+  });
+
+  it('is not drawn when the design tokens are missing', () => {
+    designTokens({ '--dot-rgb': '', '--neon-rgb': '' });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    prefersReducedMotion(true);
+    const frames = manualFrames();
+    renderField();
+
+    expect(frames.waiting).toBe(0);
+    expect(console.error).toHaveBeenCalled();
   });
 
   it('does not ripple for clicks on controls or other mouse buttons', () => {
