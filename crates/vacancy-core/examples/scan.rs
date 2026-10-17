@@ -1,23 +1,28 @@
-//! Scans a folder or volume and prints what the scanner found, how long it took and the process's peak memory.
-//! Read-only. Used to measure the scanner on a real drive:
+//! Scans a folder or volume and prints what the scanner found, how long it took, the categories, the cleanups the
+//! rules propose and the process's peak memory. Read-only: nothing is deleted. Used to measure the scanner on a real drive:
 //!
 //! ```text
-//! cargo run --release -p vacancy-core --example scan -- C:\ [--threads N]
+//! cargo run --release -p vacancy-core --example scan -- C:\ [--threads N] [--list <folder>]...
 //! ```
 
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use vacancy_core::{CancelToken, Env, ItemRef, ScanOptions, categorize, scan, volume_info};
+use vacancy_core::{
+    CancelToken, Env, ItemRef, Moment, ScanOptions, categorize, propose, scan, volume_info,
+};
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut path = PathBuf::from(".");
     let mut options = ScanOptions::default();
+    let mut list: Vec<PathBuf> = Vec::new();
     while let Some(arg) = args.next() {
         if arg == "--threads" {
             options.threads = args.next().and_then(|n| n.parse::<NonZeroUsize>().ok());
+        } else if arg == "--list" {
+            list.extend(args.next().map(PathBuf::from));
         } else {
             path = PathBuf::from(arg);
         }
@@ -69,12 +74,38 @@ fn main() {
     for p in unreadable.iter().take(25) {
         println!("  unreadable    {}", p.display());
     }
+    let env = Env::detect(&path);
+    for c in &env.cloud {
+        println!("cloud root      {} ({})", c.path.display(), c.provider);
+    }
     let started = std::time::Instant::now();
-    let cats = categorize(&snapshot, &Env::detect(&path));
+    let cats = categorize(&snapshot, &env);
     println!(
         "categorized in {:.0} ms",
         started.elapsed().as_secs_f64() * 1000.0
     );
+    let started = std::time::Instant::now();
+    let proposals = propose(&snapshot, &cats, &env, &Moment::detect());
+    println!(
+        "proposed in {:.0} ms: {:.2} GB to reclaim",
+        started.elapsed().as_secs_f64() * 1000.0,
+        proposals.reclaimable_bytes() as f64 / 1e9
+    );
+    for p in proposals.list() {
+        println!(
+            "  {:>9.2} GB  {:<8} {:<7} {}  ({} files, {})",
+            p.bytes as f64 / 1e9,
+            p.id,
+            format!("{:?}", p.risk).to_lowercase(),
+            p.title,
+            p.item_count,
+            if p.default_on { "on" } else { "off" }
+        );
+        println!("               {}", p.summary);
+        for s in &p.sample_paths {
+            println!("               - {s}");
+        }
+    }
     for cat in cats.list().iter().filter(|c| c.bytes > 0) {
         println!(
             "{:<28} {:>9.2} GB  {:>6} items{}",
@@ -88,9 +119,40 @@ fn main() {
                 ItemRef::Dir(d) => snapshot.path(d).display().to_string(),
                 ItemRef::File(f) => snapshot.file_path(f).display().to_string(),
                 ItemRef::FilesIn(d) => format!("files in {}", snapshot.path(d).display()),
+                ItemRef::Proposal(p) => format!("proposal {p}"),
             };
             println!("    {:>9.2} GB  {name}", item.bytes as f64 / 1e9);
         }
+    }
+    // `--list <folder>`: what the folder holds, biggest first, and how long ago each was last used.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    for folder in &list {
+        let Some(dir) = snapshot.find(folder) else {
+            println!("not in the scan: {}", folder.display());
+            continue;
+        };
+        let mut children: Vec<_> = snapshot.children(dir).collect();
+        children.sort_by_key(|&c| std::cmp::Reverse(snapshot.tree(c).bytes));
+        println!("{}", folder.display());
+        for c in children.into_iter().take(25) {
+            let t = snapshot.tree(c);
+            println!(
+                "  {:>9.2} GB  {:>6.1} days  {}",
+                t.bytes as f64 / 1e9,
+                (now - t.last_used) as f64 / 86_400.0,
+                snapshot.name(c).to_string_lossy()
+            );
+        }
+        let own = snapshot.own(dir);
+        println!(
+            "  {:>9.2} GB  {:>6.1} days  ({} files directly in it)",
+            own.bytes as f64 / 1e9,
+            (now - own.last_used) as f64 / 86_400.0,
+            own.files
+        );
     }
     peak_memory();
 }

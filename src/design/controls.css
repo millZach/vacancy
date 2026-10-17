@@ -104,3 +104,27 @@
   text-underline-offset: 3px;
   cursor: pointer;
 }
+
+/* A small call to action, in the header. */
+.cta--sm {
+  padding: 6px 12px 5px;
+  font-size: var(--text-ui);
+}
+
+/* A square button with only an icon. */
+.icon-btn {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-2);
+  cursor: pointer;
+}
+.icon-btn:hover {
+  background: var(--color-raise);
+  color: var(--color-text);
+}

@@ -1,5 +1,5 @@
 // Screenshots the map's screens in Edge: the scan plate, scanning (the HUD over the map filling in), the overview,
-// a hover card, a category zoomed in, and a folder opened from it.
+// a hover card, a category zoomed in, a folder opened from it, and the plan tray beside the map with its tiles lit.
 //
 //   npm run dev                       (the UI on the mock bridge, http://localhost:1420)
 //   npm run map-shots -- [options]
@@ -15,8 +15,9 @@
 //                        app started with WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333
 //                        and --cdp http://127.0.0.1:9333 (the window keeps its own size; --viewport is ignored)
 //
-// Writes <name>-1-plate.png, -2-scanning.png, -3-map.png, -4-hover.png, -5-category.png, -6-folder.png. Fails if
-// the page logs an error.
+// Writes <name>-1-plate.png, -2-scanning.png, -3-map.png, -4-hover.png, -5-category.png, -6-folder.png,
+// -7-plan.png (the tray open, a reclaimable tile's hover card) and -8-plan-why.png (the biggest proposal's why and
+// sample paths). Fails if the page logs an error.
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -87,7 +88,8 @@ try {
     await settle(page);
     await page.mouse.move(2, 2);
     await shot(page, '5-category');
-    const folder = await biggest('.map-tile.is-clickable');
+    // Reclaimable tiles are clickable too, but go in the plan rather than open.
+    const folder = await biggest('.map-tile.is-clickable:not(.map-tile--proposal)');
     if (folder) {
       const crumbs = await page.locator('.crumb').count();
       await page.mouse.click(folder.x, folder.y);
@@ -98,6 +100,25 @@ try {
       await settle(page, 300);
       await shot(page, '6-folder');
     }
+  }
+
+  // Back to the whole disk, then the plan: the tray beside the map, reclaimable tiles pinned.
+  await page.mouse.move(2, 2);
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Escape');
+  const build = page.getByRole('button', { name: 'Build a plan' });
+  if (await build.count()) {
+    await build.click();
+    await page.locator('.tray').waitFor({ timeout: 10_000 });
+    await settle(page);
+    const reclaim = await biggest('.map-tile--proposal');
+    if (reclaim) await page.mouse.move(reclaim.x, reclaim.y);
+    await settle(page, 300);
+    await shot(page, '7-plan');
+    await page.mouse.move(2, 2);
+    await page.locator('.tray-row-title').first().click();
+    await settle(page, 400);
+    await shot(page, '8-plan-why');
   }
 } finally {
   await browser?.close();

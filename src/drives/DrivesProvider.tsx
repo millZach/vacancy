@@ -171,6 +171,7 @@ function drivesValue(
       dispatch({ type: 'scanCancelled', mountPoint: session.current });
       void bridge.cancelScan();
     },
+    setInPlan: (id, on) => dispatch({ type: 'plan', mountPoint: session.current, id, on }),
     setRunning: (running) => dispatch({ type: 'lock', locked: running }),
     dismissGone: () => dispatch({ type: 'dismissGone' }),
   };

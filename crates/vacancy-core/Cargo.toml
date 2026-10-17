@@ -8,9 +8,12 @@ publish.workspace = true
 
 [dependencies]
 rayon = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde.workspace = true
+serde_json = "1"
 thiserror.workspace = true
 ts-rs.workspace = true
+unicode-normalization = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
@@ -24,6 +27,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_Storage_FileSystem",
   "Win32_System_Com",
   "Win32_System_Diagnostics_Debug",
+  "Win32_System_Registry",
   "Win32_System_SystemInformation",
   "Win32_System_WindowsProgramming",
   "Win32_UI_Shell",

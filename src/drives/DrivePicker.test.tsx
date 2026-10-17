@@ -39,8 +39,8 @@ function renderApp(bridge: MockBridge, extra?: ReactNode) {
 
 const windows = (options: MockOptions = {}) => createMockBridge(fixtures.windows, { scanMs: 0, ...options });
 const header = () => screen.getByRole('banner');
-/** The header's drive plate, which opens the drive menu. */
-const plate = () => within(header()).getByRole('button');
+/** The header's drive plate, which opens the drive menu. (On a map the header also has "Build a plan".) */
+const plate = () => within(header()).getByRole('button', { name: /used/ });
 const crumbs = () => screen.getByRole('navigation', { name: 'Map location' });
 const cardNames = () =>
   within(screen.getByRole('radiogroup', { name: 'Drives' }))
@@ -192,6 +192,43 @@ describe('the header’s drive menu', () => {
     await waitFor(() => expect(within(crumbs()).getByText('D:\\Program Files\\Adobe')).toBeInTheDocument());
     expect(browse).toHaveBeenLastCalledWith('D:\\', 'fx-apps-2');
     expect(scan).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps each drive’s plan apart, and says how much each drive could reclaim', async () => {
+    renderApp(windows());
+    await scanToMap('Local Disk (C:)');
+    await userEvent.click(within(header()).getByRole('button', { name: 'Build a plan' }));
+    const tray = () => screen.getByRole('complementary', { name: 'Plan' });
+    const node = () => within(tray()).getByRole('checkbox', { name: 'Include node_modules in 61 idle projects' });
+    await userEvent.click(node());
+    expect(node()).toHaveAttribute('aria-checked', 'false');
+
+    // D: has its own proposals and its own plan, starting from the defaults. The tray closes on the way.
+    await choose('Data (D:)');
+    expect(screen.queryByRole('complementary', { name: 'Plan' })).toBeNull();
+    await scanToMap('Data (D:)');
+    expect(screen.queryByRole('complementary', { name: 'Plan' })).toBeNull();
+    await userEvent.click(within(header()).getByRole('button', { name: 'Build a plan' }));
+    expect(node()).toHaveAttribute('aria-checked', 'true');
+    expect(within(header()).getByText(/reclaimable/)).toHaveTextContent(/^122\.3\sGB reclaimable$/);
+
+    await userEvent.click(plate());
+    expect(screen.getByRole('menuitemradio', { name: 'Local Disk (C:)' })).toHaveAccessibleDescription(
+      /Scanned just now, 75\sGB to reclaim$/,
+    );
+    expect(screen.getByRole('menuitemradio', { name: 'Data (D:)' })).toHaveAccessibleDescription(
+      /Scanned just now, 122\sGB to reclaim$/,
+    );
+    await userEvent.click(screen.getByRole('menuitemradio', { name: 'Local Disk (C:)' }));
+    await userEvent.click(within(header()).getByRole('button', { name: 'Build a plan' }));
+    expect(node()).toHaveAttribute('aria-checked', 'false');
+    expect(within(header()).getByText(/reclaimable/)).toHaveTextContent(/^75\.3\sGB reclaimable$/);
+
+    // The scan screen's cards say the same, with each drive's reclaimable share lit on its bar.
+    await userEvent.click(screen.getByRole('button', { name: 'Scan again' }));
+    expect(screen.getByRole('radio', { name: 'Local Disk (C:)' })).toHaveTextContent(/Scanned just now, 75\sGB to reclaim/);
+    expect(screen.getByRole('radio', { name: 'Local Disk (C:)' }).querySelector('.usage > b')).not.toBeNull();
+    expect(screen.getByRole('radio', { name: 'SanDisk (E:)' }).querySelector('.usage > b')).toBeNull();
   });
 
   it('stops a scan when switching to another drive part way', async () => {

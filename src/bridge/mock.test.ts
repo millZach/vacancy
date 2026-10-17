@@ -33,6 +33,21 @@ describe('the mock bridge', () => {
     expect(total).toBeCloseTo(outcome.overview.volume.usedBytes, -3);
   });
 
+  it('answers with each drive’s own proposals, the way the core carves them into the map', async () => {
+    const bridge = createMockBridge(fixtures.windows, { scanMs: 0 });
+    const c = await bridge.scan('C:\\', () => {});
+    const d = await bridge.scan('D:\\', () => {});
+    if (c.status !== 'done' || d.status !== 'done') throw new Error('expected maps');
+    expect(c.proposals.map((p) => p.id)).toEqual(fixtures.windows.proposals.map((p) => p.id));
+    const tiles = c.overview.categories.flatMap((cat) => cat.items.filter((i) => i.kind === 'proposal'));
+    expect(tiles.map((t) => t.proposal).sort()).toEqual(c.proposals.map((p) => p.id).sort());
+    for (const t of tiles) expect(t.bytes).toBe(c.proposals.find((p) => p.id === t.proposal)!.bytes);
+
+    const node = d.proposals.find((p) => p.id === 'w-node')!;
+    expect(node.bytes).toBeCloseTo((21e9 * 700) / 431, -3);
+    expect(node.samplePaths.every((s) => s.startsWith('D:\\'))).toBe(true);
+  });
+
   it('stops when cancelled', async () => {
     const bridge = createMockBridge(fixtures.windows, { scanMs: 60_000 });
     const outcome = bridge.scan('C:\\', () => {});

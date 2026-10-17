@@ -15,18 +15,19 @@ pub const MIB: u64 = 1024 * 1024;
 
 /// A fixture tree in a temp dir, deleted when dropped.
 pub struct Fixture {
-    dir: tempfile::TempDir,
+    _dir: tempfile::TempDir,
+    root: PathBuf,
 }
 
 impl Fixture {
     pub fn new() -> Self {
-        Self {
-            dir: tempfile::tempdir().expect("temp dir"),
-        }
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = real_path(dir.path());
+        Self { _dir: dir, root }
     }
 
     pub fn root(&self) -> &Path {
-        self.dir.path()
+        &self.root
     }
 
     pub fn path(&self, rel: &str) -> PathBuf {
@@ -84,6 +85,84 @@ pub fn write_file(p: &Path, len: u64) {
         left -= n as u64;
     }
     f.sync_all().expect("sync");
+}
+
+/// `path` as the file system has it, links resolved. A Mac's temp folder is under `/var`, a link to `/private/var`;
+/// what a scan reports is never reached through a link, so fixtures are built at the real path. (Windows' temp folder
+/// has no links on the way; its path is kept as it is, 8.3 names and all.)
+pub fn real_path(path: &Path) -> PathBuf {
+    if cfg!(windows) {
+        path.to_path_buf()
+    } else {
+        path.canonicalize().expect("canonicalize")
+    }
+}
+
+/// Makes the empty folder `dir` case-sensitive (`fsutil file setCaseSensitiveInfo`, as WSL does), or says why it
+/// can't and returns false, for tests to skip.
+#[cfg(windows)]
+pub fn make_case_sensitive(dir: &Path) -> bool {
+    let out = std::process::Command::new("fsutil")
+        .args(["file", "setCaseSensitiveInfo"])
+        .arg(dir)
+        .arg("enable")
+        .output();
+    match out {
+        Ok(out) if out.status.success() => true,
+        Ok(out) => {
+            eprintln!(
+                "skipped: this system doesn't allow case-sensitive folders: {}",
+                String::from_utf8_lossy(&out.stdout).trim()
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("skipped: fsutil didn't run: {e}");
+            false
+        }
+    }
+}
+
+/// Makes everything at and below `path` look last used `days` ago: the modified and accessed times of every file
+/// and folder. Call it once the tree is built: creating anything inside afterwards makes its folder new again.
+pub fn age(path: &Path, days: u64) {
+    let when = std::time::SystemTime::now() - Duration::from_secs(days * 86_400);
+    let times = fs::FileTimes::new().set_modified(when).set_accessed(when);
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        let dir = fs::symlink_metadata(&p).expect("stat").is_dir();
+        if dir {
+            for entry in fs::read_dir(&p).expect("list") {
+                stack.push(entry.expect("entry").path());
+            }
+        }
+        open_for_times(&p, dir)
+            .set_times(times)
+            .unwrap_or_else(|e| panic!("set times on {}: {e}", p.display()));
+    }
+}
+
+#[cfg(windows)]
+fn open_for_times(path: &Path, _dir: bool) -> fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
+    };
+    fs::OpenOptions::new()
+        .access_mode(FILE_WRITE_ATTRIBUTES)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .expect("open for its times")
+}
+
+#[cfg(unix)]
+fn open_for_times(path: &Path, dir: bool) -> fs::File {
+    if dir {
+        fs::File::open(path)
+    } else {
+        fs::OpenOptions::new().write(true).open(path)
+    }
+    .expect("open for its times")
 }
 
 pub fn scan_with(root: &Path, keep_files_from: u64) -> Snapshot {

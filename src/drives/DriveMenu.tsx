@@ -3,6 +3,7 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import { formatBytes } from '../format';
 import { DriveIcon, DriveStatus, DriveTags, LOCK_NOTE, UsageBar } from './bits';
 import type { ReadyDrives } from './context';
+import { reclaimableOf } from './session';
 import { useNow } from './useNow';
 
 /**
@@ -76,7 +77,7 @@ export function DriveMenu({ drives }: { drives: ReadyDrives }) {
       >
         <DriveIcon kind={v.kind} />
         <span className="head-disk-name">{v.name}</span>
-        <UsageBar volume={v} className="usage--head" />
+        <UsageBar volume={v} reclaim={reclaimableOf(current.scan)} className="usage--head" />
         <span className="head-disk-nums">
           {formatBytes(v.usedBytes, 0)} of {formatBytes(v.totalBytes, 0)} used
         </span>
@@ -117,7 +118,7 @@ export function DriveMenu({ drives }: { drives: ReadyDrives }) {
                   <b>{d.volume.name}</b>
                   <DriveTags volume={d.volume} system={false} id={`${ids}-${i}-tags`} />
                 </span>
-                <UsageBar volume={d.volume} />
+                <UsageBar volume={d.volume} reclaim={reclaimableOf(d.scan)} />
                 <span className="drive-row-nums" id={`${ids}-${i}-nums`}>
                   {formatBytes(d.volume.usedBytes, 0)} of {formatBytes(d.volume.totalBytes, 0)} used,{' '}
                   <b>{formatBytes(d.volume.freeBytes, 0)} free</b>

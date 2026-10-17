@@ -11,7 +11,8 @@ use tauri::State;
 use tauri::ipc::Channel;
 use vacancy_core::permissions::{self, FullDiskAccess};
 use vacancy_core::{
-    CancelToken, Env, MapFolder, ScanError, ScanOutcome, ScanUpdate, ScannedVolume, VolumeInfo,
+    CancelToken, Env, MapFolder, Moment, ScanError, ScanOutcome, ScanUpdate, ScannedVolume,
+    VolumeInfo,
 };
 
 /// What the app remembers between commands: each drive's last finished scan, which its map's drill-down reads.
@@ -193,9 +194,9 @@ async fn open_full_disk_access_settings() -> Result<(), String> {
     permissions::open_full_disk_access_settings().map_err(|e| e.to_string())
 }
 
-/// Scans a volume, read-only, streaming the HUD's numbers to `on_update`, and returns the overview map (or
-/// "cancelled"). The map is kept as this drive's, beside other drives' maps. A scan already running, on any drive,
-/// is cancelled first.
+/// Scans a volume, read-only, streaming the HUD's numbers to `on_update`, and returns the overview map with the
+/// cleanups proposed for it (or "cancelled"). The map and the proposals' targets are kept as this drive's, beside
+/// other drives'. A scan already running, on any drive, is cancelled first.
 #[tauri::command]
 async fn scan_volume(
     mount_point: String,
@@ -206,9 +207,12 @@ async fn scan_volume(
     let root = PathBuf::from(&mount_point);
     let scanned = tauri::async_runtime::spawn_blocking(move || {
         let env = Env::detect(&root);
+        // Which apps run is read as the scan starts; the executor skips anything busy when the plan runs.
+        let moment = Moment::detect();
         vacancy_core::scan_for_map(
             &root,
             &env,
+            &moment,
             &mut |update| {
                 // The UI may have gone away mid-scan; the scan finishes either way.
                 let _ = on_update.send(update);
@@ -220,8 +224,12 @@ async fn scan_volume(
     match scanned {
         Ok(Ok(scanned)) => {
             let overview = Box::new(scanned.overview.clone());
+            let proposals = scanned.proposals.list().to_vec();
             if session.scans.finish(&mount_point, generation, scanned) {
-                Ok(ScanOutcome::Done { overview })
+                Ok(ScanOutcome::Done {
+                    overview,
+                    proposals,
+                })
             } else {
                 Ok(ScanOutcome::Cancelled)
             }

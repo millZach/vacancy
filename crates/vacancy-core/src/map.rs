@@ -15,6 +15,7 @@ use ts_rs::TS;
 use crate::categorize::{
     CHECK_EVERY, Categories, CategoryId, Env, Item, ItemRef, Platform, categorize_until,
 };
+use crate::rules::{Moment, Proposal, Proposals, propose_until};
 use crate::scan::{CancelToken, ScanError, ScanOptions, ScanProgress, scan};
 use crate::snapshot::{DirFlags, RootKind, Snapshot, UnixTime};
 use crate::text::group_digits;
@@ -114,6 +115,8 @@ pub enum ItemKind {
     More,
     /// Used space the scan could not see.
     Hidden,
+    /// What a cleanup proposal would remove, gathered from wherever it is.
+    Proposal,
 }
 
 /// One tile on the map.
@@ -145,6 +148,8 @@ pub struct MapItem {
     pub browsable: bool,
     /// An explanation the hover card shows, for tiles that need one.
     pub note: Option<String>,
+    /// The id of the cleanup proposal the tile is, for proposal tiles.
+    pub proposal: Option<String>,
 }
 
 /// A folder opened on the map.
@@ -211,6 +216,8 @@ pub enum ScanOutcome {
     Done {
         /// The map.
         overview: Box<Overview>,
+        /// The cleanups the rules propose, biggest first. Their tiles are on the map.
+        proposals: Vec<Proposal>,
     },
     /// It was cancelled; there is no map.
     Cancelled,
@@ -224,19 +231,23 @@ pub enum MapError {
     NoSuchFolder(String),
 }
 
-/// A volume scanned for the map: the snapshot and its categories (kept for drill-down) and the overview.
+/// A volume scanned for the map: the snapshot, its categories (kept for drill-down), the cleanups proposed for it
+/// (with their targets, for the plan) and the overview.
 #[derive(Debug)]
 pub struct ScannedVolume {
     /// What the scan found.
     pub snapshot: Snapshot,
-    /// How it sorts into categories.
+    /// How it sorts into categories, with each proposal's targets carved out into a tile of its own.
     pub categories: Categories,
+    /// The cleanups proposed.
+    pub proposals: Proposals,
     /// The overview map.
     pub overview: Overview,
 }
 
-/// Scans a volume for the map: [`scan`], then [`categorize`] with `env`, then [`overview`] against the volume's
-/// own numbers, read when the scan finishes.
+/// Scans a volume for the map: [`scan`], then [`categorize`](crate::categorize) with `env`, then the rules'
+/// [proposals](crate::propose) as of `moment`, then [`overview`] against the volume's own numbers, read when the
+/// scan finishes.
 ///
 /// `on_update` gets the HUD's numbers about ten times a second, and now and then a preview of the categories so
 /// the map can fill in. A preview holds the scan's workers while it is taken, so previews come less often as the
@@ -244,6 +255,7 @@ pub struct ScannedVolume {
 pub fn scan_for_map(
     volume: &Path,
     env: &Env,
+    moment: &Moment,
     on_update: &mut dyn FnMut(ScanUpdate),
     cancel: &CancelToken,
 ) -> Result<ScannedVolume, ScanError> {
@@ -265,30 +277,42 @@ pub fn scan_for_map(
         cancel,
     )?;
     // Building the map takes a moment on a big drive; a cancel during it stops it and means no map.
-    let (categories, overview) =
-        build_map(&snapshot, env, volume, &|| cancel.is_cancelled()).ok_or(ScanError::Cancelled)?;
+    let (categories, proposals, overview) =
+        build_map(&snapshot, env, moment, volume, &|| cancel.is_cancelled())
+            .ok_or(ScanError::Cancelled)?;
     if cancel.is_cancelled() {
         return Err(ScanError::Cancelled);
     }
     Ok(ScannedVolume {
         snapshot,
         categories,
+        proposals,
         overview,
     })
 }
 
-/// Categorizes a finished scan and builds its overview against the volume's own numbers, read now. Gives up
-/// (`None`) as soon as `stop` says so; it is asked all along the way, not only between the steps.
+/// Categorizes a finished scan, proposes cleanups, carves their tiles out of the categories and builds the overview
+/// against the volume's own numbers, read now. Gives up (`None`) as soon as `stop` says so; it is asked all along
+/// the way, not only between the steps.
 pub(crate) fn build_map(
     snapshot: &Snapshot,
     env: &Env,
+    moment: &Moment,
     volume: &Path,
     stop: &dyn Fn() -> bool,
-) -> Option<(Categories, Overview)> {
+) -> Option<(Categories, Proposals, Overview)> {
     if stop() {
         return None;
     }
     let categories = categorize_until(snapshot, env, stop)?;
+    let proposals = propose_until(snapshot, &categories, env, moment, stop)?;
+    let claims: Vec<(CategoryId, &[ItemRef])> = proposals
+        .list()
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.category, proposals.targets(i)))
+        .collect();
+    let categories = categories.carve(snapshot, &claims, stop)?;
     let scanned = snapshot.stats().bytes;
     let info = volume_info(volume).unwrap_or_else(|_| VolumeInfo {
         name: volume.display().to_string(),
@@ -300,17 +324,23 @@ pub(crate) fn build_map(
         used_bytes: scanned,
         free_bytes: 0,
     });
-    let overview = overview_until(snapshot, &categories, info, stop)?;
+    let overview = overview_until(snapshot, &categories, &proposals, info, stop)?;
     // A cancel that came during the last step still means no map.
     if stop() {
         return None;
     }
-    Some((categories, overview))
+    Some((categories, proposals, overview))
 }
 
 /// The overview map of a finished scan. `volume` is the OS's view of the volume, read when the scan finished.
-pub fn overview(snapshot: &Snapshot, categories: &Categories, volume: VolumeInfo) -> Overview {
-    overview_until(snapshot, categories, volume, &|| false)
+/// `proposals` names the proposal tiles of categories carved with them (none for uncarved categories).
+pub fn overview(
+    snapshot: &Snapshot,
+    categories: &Categories,
+    proposals: &Proposals,
+    volume: VolumeInfo,
+) -> Overview {
+    overview_until(snapshot, categories, proposals, volume, &|| false)
         .expect("an overview that is never stopped finishes")
 }
 
@@ -318,6 +348,7 @@ pub fn overview(snapshot: &Snapshot, categories: &Categories, volume: VolumeInfo
 fn overview_until(
     snapshot: &Snapshot,
     categories: &Categories,
+    proposals: &Proposals,
     volume: VolumeInfo,
     stop: &dyn Fn() -> bool,
 ) -> Option<Overview> {
@@ -343,6 +374,7 @@ fn overview_until(
         let mut items = fold(
             snapshot,
             categories,
+            proposals,
             &cat.items,
             CATEGORY_ITEMS,
             &format!("more:{:?}", cat.id).to_ascii_lowercase(),
@@ -403,6 +435,7 @@ pub fn browse(
     let children = fold(
         snapshot,
         categories,
+        &Proposals::default(),
         &categories.contents(snapshot, dir),
         FOLDER_ITEMS,
         &format!("more:{id}"),
@@ -410,8 +443,10 @@ pub fn browse(
     )
     .unwrap_or_default();
     Ok(MapFolder {
-        item: map_item(snapshot, categories, &item, &|| false)
-            .ok_or_else(|| MapError::NoSuchFolder(id.to_owned()))?,
+        item: map_item(snapshot, categories, &Proposals::default(), &item, &|| {
+            false
+        })
+        .ok_or_else(|| MapError::NoSuchFolder(id.to_owned()))?,
         category: categories.category_of(dir),
         children,
     })
@@ -442,28 +477,40 @@ pub fn scan_update(progress: &ScanProgress<'_>, preview: Option<&Categories>) ->
 }
 
 /// Keeps the biggest `keep` items (sorted biggest first) and folds the rest into one tile, unless only one would
-/// be folded. Only the kept items are mapped; the folded ones are just summed. `None` if `stop` says so.
+/// be folded. Proposal tiles are never folded: each one can be added to a plan. Only the kept items are mapped;
+/// the folded ones are just summed. `None` if `stop` says so.
 fn fold(
     snapshot: &Snapshot,
     categories: &Categories,
+    proposals: &Proposals,
     items: &[Item],
     keep: usize,
     more_id: &str,
     stop: &dyn Fn() -> bool,
 ) -> Option<Vec<MapItem>> {
-    let shown: Vec<&Item> = items.iter().filter(|i| i.bytes > 0).collect();
+    let is_proposal = |i: &Item| matches!(i.at, ItemRef::Proposal(_));
+    let pinned: Vec<&Item> = items
+        .iter()
+        .filter(|i| i.bytes > 0 && is_proposal(i))
+        .collect();
+    let shown: Vec<&Item> = items
+        .iter()
+        .filter(|i| i.bytes > 0 && !is_proposal(i))
+        .collect();
+    let keep = keep.saturating_sub(pinned.len());
     let cut = if shown.len() <= keep + 1 {
         shown.len()
     } else {
         keep
     };
-    let mut out = Vec::with_capacity(cut + 1);
-    for item in &shown[..cut] {
+    let mut out = Vec::with_capacity(pinned.len() + cut + 1);
+    for item in pinned.iter().chain(&shown[..cut]) {
         if stop() {
             return None;
         }
-        out.push(map_item(snapshot, categories, item, stop)?);
+        out.push(map_item(snapshot, categories, proposals, item, stop)?);
     }
+    out.sort_by_key(|i| std::cmp::Reverse(i.bytes));
     let rest = &shown[cut..];
     if !rest.is_empty() {
         out.push(MapItem {
@@ -477,15 +524,18 @@ fn fold(
             kind: ItemKind::More,
             browsable: false,
             note: None,
+            proposal: None,
         });
     }
     Some(out)
 }
 
-/// One item as a map tile, or `None` if `stop` says so while looking into its folder.
+/// One item as a map tile, or `None` if `stop` says so while looking into its folder (or the item is a proposal
+/// `proposals` doesn't have).
 fn map_item(
     snapshot: &Snapshot,
     categories: &Categories,
+    proposals: &Proposals,
     item: &Item,
     stop: &dyn Fn() -> bool,
 ) -> Option<MapItem> {
@@ -510,6 +560,7 @@ fn map_item(
                 kind: ItemKind::Folder,
                 browsable,
                 note: None,
+                proposal: None,
             }
         }
         ItemRef::File(file) => MapItem {
@@ -523,6 +574,7 @@ fn map_item(
             kind: ItemKind::File,
             browsable: false,
             note: None,
+            proposal: None,
         },
         ItemRef::FilesIn(dir) => {
             let name = snapshot.name(dir).to_string_lossy().into_owned();
@@ -537,6 +589,30 @@ fn map_item(
                 kind: ItemKind::Files,
                 browsable: false,
                 note: None,
+                proposal: None,
+            }
+        }
+        ItemRef::Proposal(p) => {
+            let proposal = proposals.list().get(p)?;
+            let targets = proposals.targets(p);
+            // One place has a path; a proposal gathered from many has none.
+            let path = match targets {
+                [ItemRef::Dir(d)] => snapshot.path(*d).display().to_string(),
+                [ItemRef::File(f)] => snapshot.file_path(*f).display().to_string(),
+                _ => String::new(),
+            };
+            MapItem {
+                id: format!("p:{}", proposal.id),
+                name: proposal.title.clone(),
+                path,
+                bytes: item.bytes,
+                files: item.files,
+                count: targets.len() as u64,
+                last_used,
+                kind: ItemKind::Proposal,
+                browsable: false,
+                note: None,
+                proposal: Some(proposal.id.clone()),
             }
         }
     })
@@ -584,6 +660,7 @@ fn hidden_item(bytes: u64, unreadable: u64, samples: &[String], mac: bool) -> Ma
         kind: ItemKind::Hidden,
         browsable: false,
         note: Some(note),
+        proposal: None,
     }
 }
 
@@ -662,8 +739,15 @@ mod tests {
             free_bytes: (1 << 40) - snapshot.stats().bytes,
         };
         let checks = Cell::new(0);
-        let map = overview_until(&snapshot, &categories, volume(), &stopper(&checks, 0))
-            .expect("the overview");
+        let none = Proposals::default();
+        let map = overview_until(
+            &snapshot,
+            &categories,
+            &none,
+            volume(),
+            &stopper(&checks, 0),
+        )
+        .expect("the overview");
         let tiles = map.categories.iter().map(|c| c.items.len()).sum::<usize>() as u32;
         let all = checks.get();
         assert!(tiles >= 40, "the fixture maps many tiles: {tiles}");
@@ -674,7 +758,14 @@ mod tests {
         for at in [1, all / 2, all] {
             checks.set(0);
             assert!(
-                overview_until(&snapshot, &categories, volume(), &stopper(&checks, at)).is_none()
+                overview_until(
+                    &snapshot,
+                    &categories,
+                    &none,
+                    volume(),
+                    &stopper(&checks, at)
+                )
+                .is_none()
             );
             assert_eq!(checks.get(), at, "nothing more was mapped after the cancel");
         }
@@ -685,23 +776,40 @@ mod tests {
     fn a_cancel_during_the_last_step_still_means_no_map() {
         let (fx, snapshot) = tree(200);
         let env = Env::windows(fx.path(), "alex");
+        let moment = Moment::default();
         let checks = Cell::new(0);
         let categories =
             categorize_until(&snapshot, &env, &stopper(&checks, 0)).expect("categories");
         let in_categorize = checks.get();
         checks.set(0);
+        let proposals = propose_until(&snapshot, &categories, &env, &moment, &stopper(&checks, 0))
+            .expect("proposals");
+        let in_propose = checks.get();
+        checks.set(0);
+        let categories = categories
+            .carve(&snapshot, &[], &stopper(&checks, 0))
+            .expect("carved");
+        let in_carve = checks.get();
+        checks.set(0);
         let info = volume_info(fx.path()).expect("volume");
-        overview_until(&snapshot, &categories, info, &stopper(&checks, 0)).expect("the overview");
+        overview_until(
+            &snapshot,
+            &categories,
+            &proposals,
+            info,
+            &stopper(&checks, 0),
+        )
+        .expect("the overview");
         let in_overview = checks.get();
 
         // One check before categorizing, the steps' own, and one after the last step.
-        let all = 1 + in_categorize + in_overview + 1;
+        let all = 1 + in_categorize + in_propose + in_carve + in_overview + 1;
         checks.set(0);
-        build_map(&snapshot, &env, fx.path(), &stopper(&checks, 0)).expect("the map");
+        build_map(&snapshot, &env, &moment, fx.path(), &stopper(&checks, 0)).expect("the map");
         assert_eq!(checks.get(), all, "a final check after the overview");
         checks.set(0);
         assert!(
-            build_map(&snapshot, &env, fx.path(), &stopper(&checks, all)).is_none(),
+            build_map(&snapshot, &env, &moment, fx.path(), &stopper(&checks, all)).is_none(),
             "a cancel after the overview's last check still means no map"
         );
     }

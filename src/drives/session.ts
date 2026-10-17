@@ -1,9 +1,9 @@
-import type { CategoryTotal, Overview, ScanOutcome, ScanUpdate, VolumeInfo } from '../bridge';
+import type { CategoryTotal, Overview, Proposal, ScanOutcome, ScanUpdate, VolumeInfo } from '../bridge';
 
 /**
- * The drives for this session, one at a time on screen, each with its own scan and map (and, as later tickets add
- * them, its own plan and summary), so switching never mixes two drives' data. This file is the pure part: the state
- * and how each event changes it. `DrivesProvider` wires it to the bridge.
+ * The drives for this session, one at a time on screen, each with its own scan, map, proposals and plan (and, as
+ * later tickets add it, its own summary), so switching never mixes two drives' data. This file is the pure part: the
+ * state and how each event changes it. `DrivesProvider` wires it to the bridge.
  */
 export interface Session {
   /** The drives to offer, the system drive first, from the latest listing. */
@@ -32,7 +32,16 @@ export type DriveScan =
       /** The categories so far, from the last update that carried a preview. */
       preview: CategoryTotal[];
     }
-  | { phase: 'done'; overview: Overview; /** When it finished, in ms since the epoch. */ at: number }
+  | {
+      phase: 'done';
+      overview: Overview;
+      /** The cleanups proposed for this drive, biggest first. */
+      proposals: Proposal[];
+      /** The ids of the proposals in this drive's plan. A new scan starts with the ones on by default. */
+      plan: string[];
+      /** When it finished, in ms since the epoch. */
+      at: number;
+    }
   | { phase: 'failed'; message: string };
 
 /** A drive that went away while it was on screen, and what went with it. */
@@ -58,6 +67,8 @@ export type Action =
   | { type: 'scanFailed'; mountPoint: string; run: number; message: string }
   /** The user stopped the scan of this drive. */
   | { type: 'scanCancelled'; mountPoint: string }
+  /** Puts a proposal in this drive's plan, or takes it out. */
+  | { type: 'plan'; mountPoint: string; id: string; on: boolean }
   | { type: 'lock'; locked: boolean }
   | { type: 'dismissGone' };
 
@@ -77,6 +88,16 @@ export function scanOf(s: Session, mountPoint: string): DriveScan {
  */
 export function sameDrive(a: VolumeInfo, b: VolumeInfo): boolean {
   return a.mountPoint === b.mountPoint && a.id === b.id;
+}
+
+/** What a drive's delete proposals would free together: its reclaimable space. */
+export function reclaimableBytes(proposals: readonly Proposal[]): number {
+  return proposals.filter((p) => p.action === 'delete').reduce((sum, p) => sum + p.bytes, 0);
+}
+
+/** A drive's reclaimable space once it has a map; zero until then. */
+export function reclaimableOf(scan: DriveScan): number {
+  return scan.phase === 'done' ? reclaimableBytes(scan.proposals) : 0;
 }
 
 /** The figures to show for a drive: those its map was drawn against once it has one, so they agree with the map. */
@@ -139,7 +160,15 @@ export function reduce(s: Session, a: Action): Session {
       }));
     case 'scanEnded': {
       const next = onRun(s, a.mountPoint, a.run, () =>
-        a.outcome.status === 'done' ? { phase: 'done', overview: a.outcome.overview, at: a.at } : IDLE,
+        a.outcome.status === 'done'
+          ? {
+              phase: 'done',
+              overview: a.outcome.overview,
+              proposals: a.outcome.proposals,
+              plan: a.outcome.proposals.filter((p) => p.defaultOn).map((p) => p.id),
+              at: a.at,
+            }
+          : IDLE,
       );
       return next !== s && a.mountPoint === s.current && a.outcome.status === 'done' ? { ...next, screen: 'map' } : next;
     }
@@ -150,6 +179,13 @@ export function reduce(s: Session, a: Action): Session {
       const scans = { ...s.scans };
       delete scans[a.mountPoint];
       return { ...s, scans };
+    }
+    case 'plan': {
+      const scan = scanOf(s, a.mountPoint);
+      if (scan.phase !== 'done' || !scan.proposals.some((p) => p.id === a.id)) return s;
+      if (scan.plan.includes(a.id) === a.on) return s;
+      const plan = a.on ? [...scan.plan, a.id] : scan.plan.filter((id) => id !== a.id);
+      return { ...s, scans: { ...s.scans, [a.mountPoint]: { ...scan, plan } } };
     }
     case 'lock':
       return a.locked === s.locked ? s : { ...s, locked: a.locked };

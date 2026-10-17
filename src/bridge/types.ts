@@ -7,6 +7,10 @@ import type { MapCategory } from '../bindings/MapCategory';
 import type { MapFolder } from '../bindings/MapFolder';
 import type { MapItem } from '../bindings/MapItem';
 import type { Overview } from '../bindings/Overview';
+import type { Proposal } from '../bindings/Proposal';
+import type { ProposalAction } from '../bindings/ProposalAction';
+import type { ProposalSource } from '../bindings/ProposalSource';
+import type { Risk } from '../bindings/Risk';
 import type { ScanOutcome } from '../bindings/ScanOutcome';
 import type { ScanSummary } from '../bindings/ScanSummary';
 import type { ScanUpdate } from '../bindings/ScanUpdate';
@@ -22,6 +26,10 @@ export type {
   MapFolder,
   MapItem,
   Overview,
+  Proposal,
+  ProposalAction,
+  ProposalSource,
+  Risk,
   ScanOutcome,
   ScanSummary,
   ScanUpdate,
@@ -54,8 +62,9 @@ export interface Bridge {
   openFullDiskAccessSettings(): Promise<void>;
   /**
    * Scans a volume, read-only. `onUpdate` gets the HUD's numbers about ten times a second, now and then with a
-   * preview of the categories. Resolves with the map, or with `{ status: 'cancelled' }` after `cancelScan`. Each
-   * drive keeps its own map; one scan runs at a time, so starting one cancels the scan running on any drive.
+   * preview of the categories. Resolves with the map and the cleanups the rules propose (each with its own tile on
+   * the map), or with `{ status: 'cancelled' }` after `cancelScan`. Each drive keeps its own map and proposals; one
+   * scan runs at a time, so starting one cancels the scan running on any drive.
    */
   scan(mountPoint: string, onUpdate: (update: ScanUpdate) => void): Promise<ScanOutcome>;
   /** Stops the running scan, on whichever drive. */

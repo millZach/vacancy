@@ -2,6 +2,7 @@ import { Check, Map as MapIcon, ScanLine, ShieldAlert, Sparkles } from 'lucide-r
 import { useId, useRef, type KeyboardEvent, type Ref } from 'react';
 import { DriveIcon, DriveStatus, DriveTags, UsageBar } from '../drives/bits';
 import type { DriveItem, ReadyDrives } from '../drives/context';
+import { reclaimableOf } from '../drives/session';
 import { useNow } from '../drives/useNow';
 import { formatBytes } from '../format';
 import './scan.css';
@@ -120,7 +121,7 @@ function DriveCards({ drives }: { drives: ReadyDrives }) {
             )}
           </span>
           <span className="drive-card-name">{d.volume.name}</span>
-          <UsageBar volume={d.volume} />
+          <UsageBar volume={d.volume} reclaim={reclaimableOf(d.scan)} />
           <span className="drive-card-nums" id={`${ids}-${i}-nums`}>
             <b>{formatBytes(d.volume.freeBytes, 0)} free</b> of {formatBytes(d.volume.totalBytes, 0)}
           </span>

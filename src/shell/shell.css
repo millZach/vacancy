@@ -61,3 +61,16 @@
   min-height: 0;
   display: flex;
 }
+
+/* What the drive on screen could get back, once it has a map. */
+.head-reclaim {
+  color: var(--color-text-2);
+  font-size: var(--text-base);
+  white-space: nowrap;
+}
+.head-reclaim b {
+  color: var(--color-neon-ink);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-shadow: var(--glow-reclaim-text);
+}

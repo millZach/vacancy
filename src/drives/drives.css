@@ -43,6 +43,14 @@
 .usage.is-full > i {
   background: var(--color-careful);
 }
+/* The share a scan found to reclaim, lit at the end of the used space. */
+.usage > b {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--color-neon);
+  box-shadow: var(--glow-dot);
+}
 
 .drive-status {
   display: inline-flex;

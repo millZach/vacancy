@@ -44,4 +44,8 @@ browsable: boolean,
 /**
  * An explanation the hover card shows, for tiles that need one.
  */
-note: string | null, };
+note: string | null, 
+/**
+ * The id of the cleanup proposal the tile is, for proposal tiles.
+ */
+proposal: string | null, };

@@ -7,6 +7,8 @@ import type {
   MapItem,
   Overview,
   Platform,
+  Proposal,
+  Risk,
   VolumeInfo,
 } from './types';
 
@@ -22,6 +24,8 @@ export interface Fixture {
   fullDiskAccess: FullDiskAccess;
   /** The map a scan of the system drive ends with. Other drives get it scaled to their size. */
   overview: Overview;
+  /** The cleanups the rules propose for the system drive, biggest first. Each has a tile on the map. */
+  proposals: Proposal[];
   /** What opening a folder tile shows, by tile id. */
   folders: Record<string, MapFolder>;
 }
@@ -29,7 +33,11 @@ export interface Fixture {
 const GB = 1e9;
 const DAY = 86_400_000;
 
-/** A tile as the fixtures write it: name, path, gigabytes, days since last used, and its own children. */
+/**
+ * A tile as the fixtures write it: name, path, gigabytes, days since last used, and its own children. A tile with
+ * `proposal` is that proposal's tile, the way the core carves it out of the map: named and sized like the proposal,
+ * with no single path.
+ */
 interface Spec {
   name: string;
   path?: string;
@@ -38,6 +46,7 @@ interface Spec {
   kind?: MapItem['kind'];
   note?: string;
   files?: number;
+  proposal?: string;
   children?: Spec[];
 }
 
@@ -57,10 +66,10 @@ function build(
   const folders: Record<string, MapFolder> = {};
   const now = Date.now();
   const item = (s: Spec, id: string, category: CategoryId): MapItem => {
-    const kind = s.kind ?? 'folder';
+    const kind = s.proposal ? 'proposal' : (s.kind ?? 'folder');
     const children = (s.children ?? []).map((c, i) => item(c, `${id}.${i}`, category));
     const out: MapItem = {
-      id,
+      id: s.proposal ? `p:${s.proposal}` : id,
       name: s.name,
       path: s.path ?? '',
       bytes: s.gb * GB,
@@ -70,6 +79,7 @@ function build(
       kind,
       browsable: children.length > 0,
       note: s.note ?? null,
+      proposal: s.proposal ?? null,
     };
     if (children.length) folders[id] = { item: out, category, children };
     return out;
@@ -108,6 +118,46 @@ function build(
   };
 }
 
+/** A proposal as the fixtures write it. Safe ones are on by default; `on` overrides, as some rules do. */
+function proposal(
+  p: Pick<Proposal, 'id' | 'category' | 'title' | 'summary' | 'why' | 'regenerable' | 'samplePaths'> & {
+    gb: number;
+    items: number;
+    places: number;
+    risk?: Risk;
+    on?: boolean;
+  },
+): Proposal {
+  const risk = p.risk ?? 'safe';
+  return {
+    id: p.id,
+    category: p.category,
+    title: p.title,
+    summary: p.summary,
+    why: p.why,
+    bytes: p.gb * GB,
+    itemCount: p.items,
+    placeCount: p.places,
+    risk,
+    source: 'rule',
+    aiNote: null,
+    action: 'delete',
+    regenerable: p.regenerable,
+    samplePaths: p.samplePaths,
+    defaultOn: p.on ?? risk === 'safe',
+  };
+}
+
+/** The proposals, biggest first, the way the core lists them. */
+const biggestFirst = (ps: Proposal[]) => [...ps].sort((a, b) => b.bytes - a.bytes);
+
+/** A proposal's tile, sized like the proposal. */
+function tileOf(ps: Proposal[], id: string): Spec {
+  const p = ps.find((x) => x.id === id);
+  if (!p) throw new Error(`no proposal ${id}`);
+  return { name: p.title, gb: p.bytes / GB, files: p.itemCount, days: 120, proposal: p.id };
+}
+
 /** A drive as the core reports it, from its capacity and used space in gigabytes. */
 function drive(name: string, mountPoint: string, kind: DriveKind, system: boolean, totalGb: number, usedGb: number): VolumeInfo {
   const id = `fx-${name}`;
@@ -116,6 +166,120 @@ function drive(name: string, mountPoint: string, kind: DriveKind, system: boolea
 
 const winVolume = drive('Local Disk (C:)', 'C:\\', 'internal', true, 476, 431);
 const home = 'C:\\Users\\alex';
+const local = `${home}\\AppData\\Local`;
+const roaming = `${home}\\AppData\\Roaming`;
+
+const winProposals = biggestFirst([
+  proposal({
+    id: 'w-node',
+    category: 'dev',
+    title: 'node_modules in 61 idle projects',
+    summary: 'Dependencies in projects you haven’t touched for 90 days or more.',
+    why: 'Run npm install in a project to bring them back. Projects you used in the last 90 days are left alone.',
+    gb: 21,
+    items: 412_118,
+    places: 61,
+    regenerable: true,
+    samplePaths: [
+      `${home}\\code\\portfolio-2024\\node_modules`,
+      `${home}\\code\\hackathon-bot\\node_modules`,
+      `${home}\\code\\web-shop\\node_modules`,
+    ],
+  }),
+  proposal({
+    id: 'w-rust',
+    category: 'dev',
+    title: 'Rust build output in 12 projects',
+    summary: 'target folders from cargo builds, in projects you haven’t touched for 90 days or more.',
+    why: 'cargo build makes them again. Source code is untouched, and projects you used in the last 90 days are left alone.',
+    gb: 19.8,
+    items: 88_310,
+    places: 12,
+    regenerable: true,
+    samplePaths: [`${home}\\code\\raytracer\\target`, `${home}\\code\\advent-2025\\target`],
+  }),
+  proposal({
+    id: 'w-installers',
+    category: 'downloads',
+    title: 'Old installers in Downloads',
+    summary: '47 .exe and .msi files older than 30 days.',
+    why: 'These programs are already installed or can be downloaded again. Check the list if you keep offline installers.',
+    gb: 11.9,
+    items: 47,
+    places: 47,
+    risk: 'review',
+    on: true,
+    regenerable: false,
+    samplePaths: [
+      `${home}\\Downloads\\VSCodeUserSetup-x64-1.92.exe`,
+      `${home}\\Downloads\\SteamSetup.exe`,
+      `${home}\\Downloads\\Installers\\Docker Desktop Installer.exe`,
+    ],
+  }),
+  proposal({
+    id: 'w-pkgcache',
+    category: 'dev',
+    title: 'Package manager caches',
+    summary: 'Download caches from npm, pip and NuGet.',
+    why: 'Package managers download anything they need again. Installed tools and your projects keep working.',
+    gb: 8.7,
+    items: 135_463,
+    places: 4,
+    regenerable: true,
+    samplePaths: [`${local}\\npm-cache\\_cacache`, `${local}\\pip\\cache\\http`, `${home}\\.nuget\\packages\\newtonsoft.json`],
+  }),
+  proposal({
+    id: 'w-browser',
+    category: 'caches',
+    title: 'Browser caches',
+    summary: 'Pages and images Edge and Chrome saved to load sites faster.',
+    why: 'Browsers download these again as you browse. You stay signed in, and history, passwords and bookmarks are untouched.',
+    gb: 6.3,
+    items: 48_310,
+    places: 6,
+    regenerable: true,
+    samplePaths: [
+      `${local}\\Microsoft\\Edge\\User Data\\Default\\Cache\\Cache_Data`,
+      `${local}\\Google\\Chrome\\User Data\\Default\\Cache\\Cache_Data`,
+    ],
+  }),
+  proposal({
+    id: 'w-temp',
+    category: 'caches',
+    title: 'Temp folders',
+    summary: '18,402 temporary files left behind by installers and apps.',
+    why: 'Files in Temp are meant to be thrown away. Anything changed in the last day is left alone, and so is anything in use when the plan runs.',
+    gb: 4.7,
+    items: 18_402,
+    places: 214,
+    regenerable: true,
+    samplePaths: [`${local}\\Temp\\vs_setup_bootstrapper_1234`, `${local}\\Temp\\chocolatey`],
+  }),
+  proposal({
+    id: 'w-appcache',
+    category: 'caches',
+    title: 'App caches',
+    summary: 'Caches that discord, Teams and Spotify rebuild on their own.',
+    why: 'Apps fill these again as you use them. Your settings, sign-ins and files are elsewhere and are untouched.',
+    gb: 2.3,
+    items: 9_871,
+    places: 9,
+    regenerable: true,
+    samplePaths: [`${roaming}\\discord\\Cache\\Cache_Data`, `${roaming}\\Microsoft\\Teams\\Cache`],
+  }),
+  proposal({
+    id: 'w-dumps',
+    category: 'caches',
+    title: 'Crash dumps & error reports',
+    summary: '46 crash dumps and error reports from apps that crashed.',
+    why: 'They’re only useful for sending to a developer right after a crash.',
+    gb: 0.6,
+    items: 46,
+    places: 46,
+    regenerable: false,
+    samplePaths: [`${local}\\CrashDumps\\Discord.exe.18244.dmp`],
+  }),
+]);
 
 const win = build(
   winVolume,
@@ -146,7 +310,7 @@ const win = build(
         },
         { name: 'Microsoft Office', path: 'C:\\Program Files\\Microsoft Office', gb: 4, days: 1 },
         { name: 'NVIDIA Corporation', path: 'C:\\Program Files\\NVIDIA Corporation', gb: 3.2, days: 6 },
-        { name: 'Visual Studio Code', path: `${home}\\AppData\\Local\\Programs\\Microsoft VS Code`, gb: 1.1, days: 0 },
+        { name: 'Visual Studio Code', path: `${local}\\Programs\\Microsoft VS Code`, gb: 1.1, days: 0 },
         { name: '212 smaller items', gb: 28.7, kind: 'more', files: 212 },
       ],
     },
@@ -155,21 +319,23 @@ const win = build(
       name: 'Developer',
       blurb: 'Code, project dependencies, build output, containers and SDKs.',
       items: [
+        tileOf(winProposals, 'w-node'),
+        tileOf(winProposals, 'w-rust'),
         {
           name: 'code',
           path: `${home}\\code`,
-          gb: 53,
-          days: 96,
+          gb: 12.2,
+          days: 3,
           children: [
-            { name: 'node_modules', path: `${home}\\code\\web-shop\\node_modules`, gb: 21, days: 96 },
-            { name: 'target', path: `${home}\\code\\ledger\\target`, gb: 22, days: 120 },
+            { name: 'target', path: `${home}\\code\\ledger\\target`, gb: 2.2, days: 3 },
             { name: 'src', path: `${home}\\code\\web-shop\\src`, gb: 0.4, days: 3 },
             { name: '1,840 files in code', path: `${home}\\code`, gb: 9.6, kind: 'files', files: 1840, days: 3 },
           ],
         },
-        { name: 'Docker', path: `${home}\\AppData\\Local\\Docker`, gb: 19, days: 33 },
-        { name: 'npm-cache', path: `${home}\\AppData\\Local\\npm-cache`, gb: 9 },
-        { name: 'Sdk', path: `${home}\\AppData\\Local\\Android\\Sdk`, gb: 7, days: 240 },
+        { name: 'Docker', path: `${local}\\Docker`, gb: 19, days: 33 },
+        tileOf(winProposals, 'w-pkgcache'),
+        { name: 'npm-cache', path: `${local}\\npm-cache`, gb: 0.3, days: 0 },
+        { name: 'Sdk', path: `${local}\\Android\\Sdk`, gb: 7, days: 240 },
       ],
     },
     {
@@ -204,16 +370,17 @@ const win = build(
       name: 'Downloads',
       blurb: '2,184 files you downloaded.',
       items: [
+        tileOf(winProposals, 'w-installers'),
         {
           name: 'Downloads',
           path: `${home}\\Downloads`,
-          gb: 36,
+          gb: 24.1,
           days: 2,
           children: [
-            { name: 'Installers', path: `${home}\\Downloads\\Installers`, gb: 14, days: 210 },
+            { name: 'Installers', path: `${home}\\Downloads\\Installers`, gb: 2.1, days: 12 },
             { name: 'ubuntu-26.04-desktop-amd64.iso', path: `${home}\\Downloads\\ubuntu-26.04-desktop-amd64.iso`, gb: 6.2, kind: 'file', days: 150 },
             { name: 'Archives', path: `${home}\\Downloads\\Archives`, gb: 9, days: 150 },
-            { name: '2,031 files in Downloads', path: `${home}\\Downloads`, gb: 6.8, kind: 'files', files: 2031, days: 2 },
+            { name: '1,984 files in Downloads', path: `${home}\\Downloads`, gb: 6.8, kind: 'files', files: 1984, days: 2 },
           ],
         },
       ],
@@ -223,12 +390,14 @@ const win = build(
       name: 'Caches & temp',
       blurb: 'Leftovers that Windows and your apps rebuild on their own.',
       items: [
-        { name: 'Download', path: 'C:\\Windows\\SoftwareDistribution\\Download', gb: 8.2, days: 30 },
-        { name: 'Cache', path: `${home}\\AppData\\Local\\Microsoft\\Edge\\User Data\\Default\\Cache`, gb: 6.3, days: 0 },
-        { name: 'Temp', path: `${home}\\AppData\\Local\\Temp`, gb: 5.1, days: 0 },
+        { name: 'Download', path: 'C:\\Windows\\SoftwareDistribution\\Download', gb: 7.6, days: 30 },
+        tileOf(winProposals, 'w-browser'),
+        tileOf(winProposals, 'w-temp'),
+        { name: 'Temp', path: `${local}\\Temp`, gb: 0.4, days: 0 },
         { name: 'DeliveryOptimization', path: 'C:\\Windows\\ServiceProfiles\\NetworkService\\AppData\\Local\\Microsoft\\Windows\\DeliveryOptimization', gb: 4, days: 9 },
         { name: 'WER', path: 'C:\\ProgramData\\Microsoft\\Windows\\WER', gb: 3.1, days: 40 },
-        { name: 'Cache', path: `${home}\\AppData\\Roaming\\discord\\Cache`, gb: 2.3, days: 1 },
+        tileOf(winProposals, 'w-appcache'),
+        tileOf(winProposals, 'w-dumps'),
       ],
     },
     {
@@ -255,6 +424,133 @@ const win = build(
 
 const macVolume = drive('Macintosh HD', '/', 'internal', true, 494, 460);
 const mhome = '/Users/alex';
+const mlib = `${mhome}/Library`;
+
+const macProposals = biggestFirst([
+  proposal({
+    id: 'm-derived',
+    category: 'dev',
+    title: 'Xcode DerivedData',
+    summary: 'Build files for 87 projects you opened in Xcode.',
+    why: 'Xcode rebuilds this on your next build. It’s the same as Clean Build Folder for every project. Left alone while Xcode is open.',
+    gb: 27,
+    items: 214_330,
+    places: 87,
+    regenerable: true,
+    samplePaths: [`${mlib}/Developer/Xcode/DerivedData/Weatherly-abcxyz`, `${mlib}/Developer/Xcode/DerivedData/ModuleCache.noindex`],
+  }),
+  proposal({
+    id: 'm-node',
+    category: 'dev',
+    title: 'node_modules in 52 idle projects',
+    summary: 'Dependencies in projects you haven’t touched for 90 days or more.',
+    why: 'Run npm install in a project to bring them back. Projects you used in the last 90 days are left alone.',
+    gb: 21.4,
+    items: 388_002,
+    places: 52,
+    regenerable: true,
+    samplePaths: [`${mhome}/code/portfolio-2024/node_modules`, `${mhome}/code/hackathon-bot/node_modules`],
+  }),
+  proposal({
+    id: 'm-dmgs',
+    category: 'downloads',
+    title: 'Old disk images in Downloads',
+    summary: '38 .dmg and .pkg files older than 30 days.',
+    why: 'These apps are installed or can be downloaded again.',
+    gb: 11.6,
+    items: 38,
+    places: 38,
+    risk: 'review',
+    on: true,
+    regenerable: false,
+    samplePaths: [`${mhome}/Downloads/Docker.dmg`, `${mhome}/Downloads/googlechrome.dmg`, `${mhome}/Downloads/Figma-124.5.dmg`],
+  }),
+  proposal({
+    id: 'm-archives',
+    category: 'dev',
+    title: 'Xcode archives older than a year',
+    summary: '31 archives of builds you already shipped.',
+    why: 'Keep any archive you might need to symbolicate crash reports for an old release.',
+    gb: 8,
+    items: 2_480,
+    places: 31,
+    risk: 'review',
+    regenerable: false,
+    samplePaths: [`${mlib}/Developer/Xcode/Archives/2025-03-14/Weatherly 2.1.xcarchive`],
+  }),
+  proposal({
+    id: 'm-caches',
+    category: 'caches',
+    title: 'Library caches',
+    summary: 'Caches in your Library, from 61 apps.',
+    why: 'Apps rebuild caches as needed. Caches of apps that are running are left alone.',
+    gb: 7,
+    items: 61_204,
+    places: 61,
+    regenerable: true,
+    samplePaths: [`${mlib}/Caches/com.spotify.client/Data`, `${mlib}/Caches/Google/Chrome/Default`],
+  }),
+  proposal({
+    id: 'm-appcache',
+    category: 'caches',
+    title: 'App caches',
+    summary: 'Caches that Slack, Spotify and discord rebuild on their own.',
+    why: 'Apps fill these again as you use them. Apps that are running are left alone, and your settings and files are untouched.',
+    gb: 6.4,
+    items: 14_022,
+    places: 5,
+    regenerable: true,
+    samplePaths: [`${mlib}/Application Support/Slack/Cache/Cache_Data`, `${mlib}/Application Support/discord/Cache/Cache_Data`],
+  }),
+  proposal({
+    id: 'm-brew',
+    category: 'dev',
+    title: 'Homebrew & package caches',
+    summary: 'Downloaded bottles and package archives from Homebrew and npm.',
+    why: 'Same as brew cleanup: installed packages keep working, and package managers download anything they need again.',
+    gb: 5.6,
+    items: 418,
+    places: 2,
+    regenerable: true,
+    samplePaths: [`${mlib}/Caches/Homebrew/downloads`, `${mhome}/.npm/_cacache/content-v2`],
+  }),
+  proposal({
+    id: 'm-logs',
+    category: 'caches',
+    title: 'Logs & diagnostic reports',
+    summary: '3,310 log files and crash reports from apps.',
+    why: 'They’re only useful right after a crash. macOS and your apps keep writing new ones.',
+    gb: 3.1,
+    items: 3_310,
+    places: 14,
+    regenerable: false,
+    samplePaths: [`${mlib}/Logs/DiagnosticReports`, `${mlib}/Logs/CoreSimulator`],
+  }),
+  proposal({
+    id: 'm-mail',
+    category: 'caches',
+    title: 'Mail attachment downloads',
+    summary: 'Copies of 912 attachments you opened from Mail.',
+    why: 'The originals stay in your mailbox. Mail downloads them again when you open them.',
+    gb: 2.2,
+    items: 912,
+    places: 1,
+    regenerable: true,
+    samplePaths: [`${mlib}/Containers/com.apple.mail/Data/Library/Mail Downloads`],
+  }),
+  proposal({
+    id: 'm-trash',
+    category: 'caches',
+    title: 'Empty the Trash',
+    summary: '214 files already in the Trash.',
+    why: 'You already threw these away.',
+    gb: 1.3,
+    items: 214,
+    places: 214,
+    regenerable: false,
+    samplePaths: [`${mhome}/.Trash`],
+  }),
+]);
 
 const mac = build(
   macVolume,
@@ -262,7 +558,7 @@ const mac = build(
     files: 2_031_447,
     folders: 402_118,
     seconds: 44,
-    unreadable: [`${mhome}/Library/Mail`, `${mhome}/Library/Messages`, `${mhome}/Library/Safari`],
+    unreadable: [`${mlib}/Mail`, `${mlib}/Messages`, `${mlib}/Safari`],
   },
   [
     {
@@ -272,17 +568,22 @@ const mac = build(
       items: [
         {
           name: 'Developer',
-          path: `${mhome}/Library/Developer`,
-          gb: 71,
+          path: `${mlib}/Developer`,
+          gb: 36,
           days: 3,
           children: [
-            { name: 'CoreSimulator', path: `${mhome}/Library/Developer/CoreSimulator`, gb: 34, days: 60 },
-            { name: 'Xcode', path: `${mhome}/Library/Developer/Xcode`, gb: 37, days: 3 },
+            { name: 'CoreSimulator', path: `${mlib}/Developer/CoreSimulator`, gb: 34, days: 60 },
+            { name: 'Xcode', path: `${mlib}/Developer/Xcode`, gb: 2, days: 3 },
           ],
         },
-        { name: 'node_modules', path: `${mhome}/code/weatherly/node_modules`, gb: 26, days: 101 },
-        { name: 'com.docker.docker', path: `${mhome}/Library/Containers/com.docker.docker`, gb: 18, days: 20 },
+        tileOf(macProposals, 'm-derived'),
+        tileOf(macProposals, 'm-node'),
+        { name: 'com.docker.docker', path: `${mlib}/Containers/com.docker.docker`, gb: 18, days: 20 },
+        tileOf(macProposals, 'm-archives'),
         { name: 'homebrew', path: '/opt/homebrew', gb: 6, days: 8 },
+        tileOf(macProposals, 'm-brew'),
+        { name: 'code', path: `${mhome}/code`, gb: 4.6, days: 2 },
+        { name: 'Code', path: `${mlib}/Application Support/Code`, gb: 4.2, days: 2 },
       ],
     },
     {
@@ -333,18 +634,19 @@ const mac = build(
       id: 'downloads',
       name: 'Downloads',
       blurb: '1,412 files you downloaded.',
-      items: [{ name: 'Downloads', path: `${mhome}/Downloads`, gb: 33, days: 4 }],
+      items: [tileOf(macProposals, 'm-dmgs'), { name: 'Downloads', path: `${mhome}/Downloads`, gb: 21.4, days: 4 }],
     },
     {
       id: 'caches',
       name: 'Caches, logs & Trash',
       blurb: 'Leftovers that macOS and your apps rebuild on their own.',
       items: [
-        { name: 'Caches', path: `${mhome}/Library/Caches`, gb: 14, days: 0 },
-        { name: 'Cache', path: `${mhome}/Library/Application Support/Slack/Cache`, gb: 6.4, days: 0 },
-        { name: 'Logs', path: `${mhome}/Library/Logs`, gb: 3.1, days: 1 },
-        { name: 'Mail Downloads', path: `${mhome}/Library/Containers/com.apple.mail/Data/Library/Mail Downloads`, gb: 2.2, days: 18 },
-        { name: '.Trash', path: `${mhome}/.Trash`, gb: 1.3, days: 5 },
+        tileOf(macProposals, 'm-caches'),
+        tileOf(macProposals, 'm-appcache'),
+        tileOf(macProposals, 'm-logs'),
+        tileOf(macProposals, 'm-mail'),
+        { name: 'Caches', path: `${mlib}/Caches`, gb: 1.4, days: 0 },
+        tileOf(macProposals, 'm-trash'),
       ],
     },
     {
@@ -352,16 +654,13 @@ const mac = build(
       name: 'iCloud Drive',
       blurb: 'Synced folders. Vacancy leaves sync roots alone so nothing disappears from your other devices.',
       locked: true,
-      items: [{ name: 'Mobile Documents', path: `${mhome}/Library/Mobile Documents`, gb: 15, days: 0 }],
+      items: [{ name: 'Mobile Documents', path: `${mlib}/Mobile Documents`, gb: 15, days: 0 }],
     },
     {
       id: 'other',
       name: 'Other',
       blurb: 'Everything else.',
-      items: [
-        { name: 'Code', path: `${mhome}/Library/Application Support/Code`, gb: 4.2, days: 2 },
-        { name: 'Shared', path: '/Users/Shared', gb: 0.8, days: 120 },
-      ],
+      items: [{ name: 'Shared', path: '/Users/Shared', gb: 0.8, days: 120 }],
     },
   ],
 );
@@ -377,6 +676,7 @@ export const fixtures = {
     ],
     fullDiskAccess: 'notApplicable',
     overview: win.overview,
+    proposals: winProposals,
     folders: win.folders,
   },
   macos: {
@@ -385,6 +685,7 @@ export const fixtures = {
     volumes: [macVolume, drive('Samsung T7', '/Volumes/Samsung T7', 'external', false, 1000, 380)],
     fullDiskAccess: 'missing',
     overview: mac.overview,
+    proposals: macProposals,
     folders: mac.folders,
   },
 } satisfies Record<Platform, Fixture>;

@@ -299,3 +299,75 @@
   border: 1px solid var(--color-key-scale);
   background: var(--color-key-scale-fill);
 }
+
+/* ---------- reclaimable tiles: the only tiles that glow ---------- */
+.map-tile.is-reclaim {
+  z-index: 2;
+  box-shadow: var(--glow-reclaim);
+}
+.map-tile.is-reclaim::after {
+  box-shadow: var(--edge-reclaim);
+}
+/* On the overview the glow catches like a neon tube; picking tiles in the plan's view doesn't flicker. */
+.map:not(.is-planning) .map-tile.is-reclaim::after {
+  animation: neon-on 1.2s linear both 0.15s;
+}
+.map-tile.is-selected::after {
+  box-shadow: var(--edge-selected);
+  background: var(--color-selected-fill);
+}
+.map-tile.is-reclaim.is-hot::after,
+.map-tile.is-selected.is-hot::after {
+  box-shadow: var(--edge-reclaim-hot);
+}
+/* In the plan's view, a proposal not in the plan yet: a dashed neon edge. It glows once added. */
+.map-tile.is-available::after {
+  border: 1.5px dashed var(--color-available-edge);
+}
+.map-tile.is-available.is-hot::after {
+  border-color: var(--color-neon);
+}
+.map-pin {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  z-index: 4;
+  width: 17px;
+  height: 17px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1.5px solid var(--color-pin-edge);
+  background: var(--color-pin);
+  color: var(--color-neon);
+  pointer-events: none;
+}
+.map-pin.is-on {
+  background: var(--color-neon);
+  border-color: var(--color-neon);
+  color: var(--color-on-neon);
+  box-shadow: var(--glow-pin);
+}
+.map-tile.has-badge .map-label {
+  padding-right: 26px;
+}
+
+.map-tip-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-5);
+  margin-bottom: var(--space-2);
+}
+.map-tip-sum {
+  margin: 0;
+}
+.map-tip-act {
+  margin: var(--space-2) 0 0;
+  color: var(--color-text);
+}
+
+.key-reclaim {
+  background: var(--key-reclaim-fill);
+  box-shadow: var(--glow-key-reclaim);
+}
