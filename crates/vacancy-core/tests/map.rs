@@ -234,16 +234,19 @@ fn tells_whether_full_disk_access_is_missing() {
         "no protected folder exists"
     );
 
+    // As the scanner's unreadable-folder test does: a folder with something in it, made unreadable before
+    // anything has listed it.
     let safari = fx.dir("Library/Safari");
-    assert_eq!(probe(fx.root()), FullDiskAccess::Granted);
-
+    support::write_file(&safari.join("Bookmarks.plist"), 4 * KIB);
     let guard = Unreadable::new(&safari);
     if std::fs::read_dir(&safari).is_ok() {
         assert!(!in_ci(), "CI must be able to make a folder unreadable");
+        eprintln!("skipped: this account can read any folder");
         return;
     }
     assert_eq!(probe(fx.root()), FullDiskAccess::Missing);
     drop(guard);
+    assert_eq!(probe(fx.root()), FullDiskAccess::Granted);
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -209,8 +209,22 @@ mod tests {
     #[test]
     fn the_startup_disk_is_its_system_and_data_volumes() {
         let roots = roots(Path::new("/")).expect("roots of /");
+        let layout = || {
+            let mount = std::process::Command::new("/sbin/mount").output();
+            let stat = std::process::Command::new("/usr/bin/stat")
+                .args(["-f", "%d %N", "/", "/System/Volumes/Data", "/Users"])
+                .output();
+            format!(
+                "{roots:?}\nmount:\n{}\nstat:\n{}",
+                mount
+                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                    .unwrap_or_default(),
+                stat.map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                    .unwrap_or_default()
+            )
+        };
         if Path::new("/System/Volumes/Data").exists() {
-            assert_eq!(roots.len(), 2, "{roots:?}");
+            assert_eq!(roots.len(), 2, "{}", layout());
             assert_eq!(roots[0].kind, RootKind::SealedSystem);
             assert_eq!(roots[0].real, Path::new("/"));
             assert_eq!(roots[1].kind, RootKind::Data);
