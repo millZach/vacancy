@@ -4,21 +4,123 @@
 //! The UI calls these commands through `src/bridge/tauri.ts`; keep the command names in step with it.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use tauri::State;
 use tauri::ipc::Channel;
+use tauri::{AppHandle, Manager, State};
 use vacancy_core::permissions::{self, FullDiskAccess};
 use vacancy_core::{
-    CancelToken, Env, MapFolder, Moment, ScanError, ScanOutcome, ScanUpdate, ScannedVolume,
-    VolumeInfo,
+    CancelToken, Env, MapFolder, Moment, Plan, PlanSummary, RunEvent, RunReport, ScanError,
+    ScanOptions, ScanOutcome, ScanUpdate, ScannedVolume, Snapshot, VolumeInfo, fixture, report,
 };
 
-/// What the app remembers between commands: each drive's last finished scan, which its map's drill-down reads.
-#[derive(Default)]
+/// What the app remembers between commands: each drive's last finished scan (which its map's drill-down reads) with
+/// the plan made from it, the plan running if one is, and whether the app works on the real drives or a fixture.
 struct Session {
-    scans: Scans<ScannedVolume>,
+    scans: Scans<Scanned>,
+    mode: Mode,
+    /// The plan running now, if one is: its drive and how to stop it. One at a time, and no scan while it runs.
+    run: Mutex<Option<(String, CancelToken)>>,
+}
+
+impl Session {
+    fn new(mode: Mode) -> Self {
+        Self {
+            scans: Scans::default(),
+            mode,
+            run: Mutex::new(None),
+        }
+    }
+
+    fn running(&self) -> bool {
+        lock(&self.run).is_some()
+    }
+}
+
+/// A drive's finished scan, the plan made from it, and whether a plan from it already ran. A scan that ran a plan
+/// is spent: what it saw is gone, so another plan needs another scan.
+struct Scanned {
+    volume: ScannedVolume,
+    plan: Option<Plan>,
+    spent: bool,
+}
+
+/// Where the app works.
+enum Mode {
+    /// The computer's drives.
+    Real,
+    /// Fixture mode (`VACANCY_FIXTURE_ROOT`): one pseudo-drive, the fixture folder, with the Guard confined to it.
+    Fixture { root: PathBuf, capacity: u64 },
+    /// `VACANCY_FIXTURE_ROOT` named a folder that can't be a fixture root: nothing is scanned or deleted, and the
+    /// drive list says why. Never quietly the real drives instead.
+    Refused(String),
+}
+
+impl Mode {
+    /// The mode `VACANCY_FIXTURE_ROOT` asks for, its folder checked by `fixture::check_root`.
+    fn from_env() -> Self {
+        let Some(root) = std::env::var_os(fixture::ROOT_VAR) else {
+            return Mode::Real;
+        };
+        let root = PathBuf::from(root);
+        let Some(home) = std::env::home_dir() else {
+            return Mode::Refused("Fixture mode: your home folder can't be found.".into());
+        };
+        match fixture::check_root(&root, &home) {
+            Ok(root) => {
+                let used = measure(&root).map_or(0, |s| s.stats().bytes);
+                Mode::Fixture {
+                    capacity: fixture::capacity(used),
+                    root,
+                }
+            }
+            Err(e) => Mode::Refused(format!("Fixture mode refused: {e}.")),
+        }
+    }
+
+    /// Checks that `mount_point` is a drive this mode works on, and gives the places to scan and judge it with.
+    fn env_for(&self, mount_point: &str) -> Result<Env, String> {
+        match self {
+            Mode::Real => Ok(Env::detect(Path::new(mount_point))),
+            Mode::Fixture { root, .. } if Path::new(mount_point) == root => Ok(fixture::env(root)),
+            Mode::Fixture { .. } => Err(format!("{mount_point} is not the fixture.")),
+            Mode::Refused(why) => Err(why.clone()),
+        }
+    }
+
+    /// The drive's figures: the OS's for a real drive; for the fixture, its own (see `fixture::volume`), from
+    /// `snapshot` if a scan of it is at hand.
+    fn figures(&self, mount_point: &str, snapshot: Option<&Snapshot>) -> Option<VolumeInfo> {
+        match self {
+            Mode::Real => vacancy_core::volume_info(Path::new(mount_point)).ok(),
+            Mode::Fixture { root, capacity } => match snapshot {
+                Some(snap) => Some(fixture::volume(root, *capacity, snap)),
+                None => measure(root).map(|snap| fixture::volume(root, *capacity, &snap)),
+            },
+            Mode::Refused(_) => None,
+        }
+    }
+
+    /// Where the run history is kept: the app's data folder, or in fixture mode the fixture's.
+    fn history(&self, app: &AppHandle) -> Option<PathBuf> {
+        match self {
+            Mode::Fixture { root, .. } => Some(fixture::app_data(root)),
+            _ => app.path().app_data_dir().ok(),
+        }
+        .map(|dir| report::history_dir(&dir))
+    }
+}
+
+/// A quick read-only scan of the fixture, for its figures.
+fn measure(root: &Path) -> Option<Snapshot> {
+    vacancy_core::scan(
+        root,
+        &ScanOptions::default(),
+        &mut |_| {},
+        &CancelToken::new(),
+    )
+    .ok()
 }
 
 /// Scans, kept per drive for the session, so each drive keeps its own map and switching never mixes two drives'
@@ -154,6 +256,17 @@ impl<T> Scans<T> {
         let state = lock(&self.state);
         f(state.drives.get(drive).and_then(|d| d.last.as_ref()))
     }
+
+    /// Runs `f` with `drive`'s last stored result, to change it.
+    fn with_last_mut<R>(&self, drive: &str, f: impl FnOnce(Option<&mut T>) -> R) -> R {
+        let mut state = lock(&self.state);
+        f(state.drives.get_mut(drive).and_then(|d| d.last.as_mut()))
+    }
+
+    /// Whether a scan is running, on any drive.
+    fn scanning(&self) -> bool {
+        lock(&self.state).running.is_some()
+    }
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -168,12 +281,23 @@ async fn machine_name() -> String {
 
 /// The drives to offer for scanning, the system drive first. Read-only. Runs on a blocking thread: a drive slow to
 /// answer must not hold up the async workers that serve scans and the map.
+///
+/// In fixture mode, the one pseudo-drive; if fixture mode was refused, why.
 #[tauri::command]
-async fn list_volumes() -> Result<Vec<VolumeInfo>, String> {
-    tauri::async_runtime::spawn_blocking(vacancy_core::list_volumes)
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+async fn list_volumes(app: AppHandle) -> Result<Vec<VolumeInfo>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mode = &app.state::<Session>().mode;
+        match mode {
+            Mode::Real => vacancy_core::list_volumes().map_err(|e| e.to_string()),
+            Mode::Fixture { root, .. } => mode
+                .figures(&root.display().to_string(), None)
+                .map(|v| vec![v])
+                .ok_or_else(|| format!("The fixture {} can't be read.", root.display())),
+            Mode::Refused(why) => Err(why.clone()),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Forgets a drive that has gone away (an unplugged USB stick): its map, and its scan if one is running.
@@ -201,18 +325,29 @@ async fn open_full_disk_access_settings() -> Result<(), String> {
 async fn scan_volume(
     mount_point: String,
     on_update: Channel<ScanUpdate>,
+    app: AppHandle,
     session: State<'_, Session>,
 ) -> Result<ScanOutcome, String> {
-    let (generation, token) = session.scans.begin(&mount_point);
+    let env = session.mode.env_for(&mount_point)?;
+    let (generation, token) = {
+        // Under the run's lock, which a run takes to check that no scan is running: never both at once.
+        let run = lock(&session.run);
+        if run.is_some() {
+            return Err("A plan is running. Scan again when it has finished.".into());
+        }
+        session.scans.begin(&mount_point)
+    };
     let root = PathBuf::from(&mount_point);
+    let drive = mount_point.clone();
     let scanned = tauri::async_runtime::spawn_blocking(move || {
-        let env = Env::detect(&root);
         // Which apps run is read as the scan starts; the executor skips anything busy when the plan runs.
         let moment = Moment::detect();
-        vacancy_core::scan_for_map(
+        let mode = &app.state::<Session>().mode;
+        vacancy_core::scan_for_map_with(
             &root,
             &env,
             &moment,
+            &|snap| mode.figures(&drive, Some(snap)),
             &mut |update| {
                 // The UI may have gone away mid-scan; the scan finishes either way.
                 let _ = on_update.send(update);
@@ -225,6 +360,11 @@ async fn scan_volume(
         Ok(Ok(scanned)) => {
             let overview = Box::new(scanned.overview.clone());
             let proposals = scanned.proposals.list().to_vec();
+            let scanned = Scanned {
+                volume: scanned,
+                plan: None,
+                spent: false,
+            };
             if session.scans.finish(&mount_point, generation, scanned) {
                 Ok(ScanOutcome::Done {
                     overview,
@@ -265,14 +405,133 @@ async fn browse(
     session.scans.with_last(&mount_point, |last| {
         let scanned =
             last.ok_or_else(|| format!("there is no finished scan of {mount_point} to explore"))?;
-        vacancy_core::browse(&scanned.snapshot, &scanned.categories, &id).map_err(|e| e.to_string())
+        let volume = &scanned.volume;
+        vacancy_core::browse(&volume.snapshot, &volume.categories, &id).map_err(|e| e.to_string())
     })
+}
+
+/// Makes the plan for the proposals `ids` of a drive's last scan, for the confirm dialog, and keeps it as the
+/// drive's plan in place of any made before. Every place passes the Guard again, built afresh.
+#[tauri::command]
+async fn build_plan(
+    mount_point: String,
+    ids: Vec<String>,
+    app: AppHandle,
+) -> Result<PlanSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = app.state::<Session>();
+        if session.running() {
+            return Err("A plan is running.".to_owned());
+        }
+        let env = session.mode.env_for(&mount_point)?;
+        session.scans.with_last_mut(&mount_point, |last| {
+            let scanned = last.ok_or_else(|| {
+                format!("There is no finished scan of {mount_point} to plan from.")
+            })?;
+            if scanned.spent {
+                return Err("This scan already ran a plan. Scan again to make another.".to_owned());
+            }
+            let plan =
+                vacancy_core::plan(&scanned.volume, &env, &ids).map_err(|e| e.to_string())?;
+            let summary = plan.summary();
+            scanned.plan = Some(plan);
+            Ok(summary)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Runs the drive's plan `plan_id`, streaming what happens to `on_event`, and returns the report, which is kept in
+/// the run history too. A plan runs once: the scan it came from is spent.
+#[tauri::command]
+async fn run_plan(
+    mount_point: String,
+    plan_id: String,
+    on_event: Channel<RunEvent>,
+    app: AppHandle,
+) -> Result<RunReport, String> {
+    let session = app.state::<Session>();
+    let env = session.mode.env_for(&mount_point)?;
+    let cancel = CancelToken::new();
+    let plan = {
+        let mut run = lock(&session.run);
+        if run.is_some() {
+            return Err("A plan is already running.".into());
+        }
+        if session.scans.scanning() {
+            return Err("A scan is running. Run the plan when it has finished.".into());
+        }
+        // Taken out of the drive's state under the run's lock, so a plan can never run twice.
+        let plan = session.scans.with_last_mut(&mount_point, |last| {
+            let scanned = last.ok_or("There is no plan for this drive.")?;
+            match scanned.plan.take() {
+                Some(plan) if plan.id() == plan_id => {
+                    scanned.spent = true;
+                    Ok(plan)
+                }
+                other => {
+                    scanned.plan = other;
+                    Err("This plan is no longer the drive's plan. Build it again.")
+                }
+            }
+        })?;
+        *run = Some((mount_point.clone(), cancel.clone()));
+        plan
+    };
+    let worker = app.clone();
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        let session = worker.state::<Session>();
+        let report = vacancy_core::execute(
+            &plan,
+            &env,
+            &|| session.mode.figures(&mount_point, None),
+            &mut |event| {
+                // The UI may have gone away mid-run; the run finishes either way, and its report is kept.
+                let _ = on_event.send(event);
+            },
+            &cancel,
+        );
+        if let Some(dir) = session.mode.history(&worker)
+            && let Err(e) = report::save(&dir, &report)
+        {
+            eprintln!(
+                "could not keep the run in the history at {}: {e}",
+                dir.display()
+            );
+        }
+        report
+    })
+    .await;
+    *lock(&session.run) = None;
+    report.map_err(|e| e.to_string())
+}
+
+/// Stops the running plan after the file being deleted.
+#[tauri::command]
+fn cancel_run(session: State<'_, Session>) {
+    if let Some((_, cancel)) = lock(&session.run).as_ref() {
+        cancel.cancel();
+    }
+}
+
+/// The run history, newest first.
+#[tauri::command]
+async fn list_runs(app: AppHandle) -> Vec<RunReport> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mode = &app.state::<Session>().mode;
+        mode.history(&app)
+            .map(|dir| report::history(&dir))
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// Starts the app and blocks until its last window closes.
 pub fn run() {
     tauri::Builder::default()
-        .manage(Session::default())
+        .manage(Session::new(Mode::from_env()))
         .invoke_handler(tauri::generate_handler![
             machine_name,
             list_volumes,
@@ -282,6 +541,10 @@ pub fn run() {
             scan_volume,
             cancel_scan,
             browse,
+            build_plan,
+            run_plan,
+            cancel_run,
+            list_runs,
         ])
         .run(tauri::generate_context!())
         .expect("Vacancy failed to start");
