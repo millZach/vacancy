@@ -400,6 +400,31 @@ fn a_run_deletes_exactly_what_was_approved() {
     assert_eq!(report.biggest_win.as_deref(), Some(biggest.id.as_str()));
     let by_category: u64 = report.freed_by_category.iter().map(|c| c.bytes).sum();
     assert_eq!(by_category, report.freed_bytes);
+    // Everything the finish shows is in the report: the map the run started from, each step's reason, and no
+    // moves yet.
+    assert_eq!(report.map, fx.scanned.overview);
+    for step in &report.steps {
+        let proposal = fx
+            .scanned
+            .proposals
+            .list()
+            .iter()
+            .find(|p| p.id == step.id)
+            .unwrap();
+        assert_eq!(step.why, proposal.why);
+    }
+    assert_eq!(report.moved_items, 0);
+    assert!(report.reorganized.is_empty());
+    // Kept in the history, it reads back exactly as it was.
+    let history = tempfile::tempdir().unwrap();
+    vacancy_core::report::save(history.path(), &report).unwrap();
+    assert_eq!(
+        vacancy_core::report::open(history.path(), &report.id).unwrap(),
+        report
+    );
+    let listed = vacancy_core::report::history(history.path());
+    assert_eq!(listed.runs.len(), 1);
+    assert_eq!(listed.runs[0].freed_bytes, report.freed_bytes);
     let started = events
         .iter()
         .filter(|e| matches!(e, RunEvent::StepStarted(_)))

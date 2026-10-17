@@ -1377,6 +1377,7 @@ fn step_report(step: &PlanStep, tally: Tally) -> StepReport {
     StepReport {
         id: step.id.clone(),
         title: step.title.clone(),
+        why: step.why.clone(),
         category: step.category,
         regenerable: step.regenerable,
         planned_bytes,
@@ -1445,6 +1446,8 @@ fn report(
         planned_bytes: steps.iter().map(|s| s.planned_bytes).sum(),
         freed_bytes: steps.iter().map(|s| s.freed_bytes).sum(),
         deleted_items: steps.iter().map(|s| s.deleted_items).sum(),
+        // Reorganizations arrive with ticket 08.
+        moved_items: 0,
         // Names deleted while other names keep the file were deleted, not skipped.
         skipped_items: steps
             .iter()
@@ -1461,6 +1464,8 @@ fn report(
         free_change,
         biggest_win,
         left_for_you: plan.left_for_you().to_vec(),
+        reorganized: Vec::new(),
+        map: plan.map().clone(),
         steps,
     }
 }

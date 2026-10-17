@@ -7,7 +7,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 mod offer;
@@ -23,7 +23,7 @@ mod imp;
 mod imp;
 
 /// A drive Vacancy can scan, as the drive picker and the map show it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct VolumeInfo {
@@ -50,7 +50,7 @@ pub struct VolumeInfo {
 }
 
 /// How a drive is attached to the computer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub enum DriveKind {

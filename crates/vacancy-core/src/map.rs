@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::categorize::{
@@ -29,7 +29,7 @@ const FOLDER_ITEMS: usize = 60;
 const UNREADABLE_SAMPLES: usize = 8;
 
 /// The finished scan, as the overview map shows it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct Overview {
@@ -45,7 +45,7 @@ pub struct Overview {
 }
 
 /// The scan's numbers, for the map's notes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct ScanSummary {
@@ -81,7 +81,7 @@ pub struct ScanSummary {
 }
 
 /// A category on the map.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct MapCategory {
@@ -101,7 +101,7 @@ pub struct MapCategory {
 }
 
 /// What an item on the map is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub enum ItemKind {
@@ -120,7 +120,7 @@ pub enum ItemKind {
 }
 
 /// One tile on the map.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct MapItem {
