@@ -294,9 +294,11 @@ struct Guarded<'a> {
     snap: &'a Snapshot,
     /// The folder is protected (the OS, a Photos library, a cloud-sync folder, an app bundle...), or is inside one.
     under: Vec<bool>,
-    /// The folder holds, somewhere below it, a folder whose protection reaches whatever holds it (everything but an
-    /// app bundle, see [`Guard::protected_os_name`]), or a folder whose contents are unknown.
+    /// The folder holds, somewhere below it, a protected folder other than an app bundle, or a folder whose contents
+    /// are unknown.
     holds: Vec<bool>,
+    /// The folder holds a macOS app bundle somewhere below it: only build-output rules may take it whole.
+    holds_app: Vec<bool>,
 }
 
 impl<'a> Guarded<'a> {
@@ -309,6 +311,7 @@ impl<'a> Guarded<'a> {
         let n = snap.dir_count();
         let mut under = vec![false; n];
         let mut holding = vec![false; n];
+        let mut holding_app = vec![false; n];
         for dir in snap.dirs() {
             if dir.index() % CHECK_EVERY == 0 && stop() {
                 return None;
@@ -321,20 +324,25 @@ impl<'a> Guarded<'a> {
             // A folder the scanner couldn't read, found changed, or that is another volume: nobody knows what is
             // in it, so nothing that holds it is offered. (A link is fine: deleting it never touches its target.)
             let unknown = !flags.entered() && !flags.contains(DirFlags::LINK);
-            holding[dir.index()] =
-                by_scan || unknown || by_name.is_some_and(|(_, reaches)| reaches);
+            holding[dir.index()] = by_scan || unknown || by_name.is_some_and(|(_, app)| !app);
+            holding_app[dir.index()] = by_name.is_some_and(|(_, app)| app);
             under[dir.index()] =
                 by_scan || by_name.is_some() || snap.parent(dir).is_some_and(|p| under[p.index()]);
         }
         let mut holds = vec![false; n];
+        let mut holds_app = vec![false; n];
         for dir in snap.dirs().rev() {
             if dir.index() % CHECK_EVERY == 0 && stop() {
                 return None;
             }
-            if let Some(p) = snap.parent(dir)
-                && (holding[dir.index()] || holds[dir.index()])
-            {
-                holds[p.index()] = true;
+            if let Some(p) = snap.parent(dir) {
+                let i = dir.index();
+                if holding[i] || holds[i] {
+                    holds[p.index()] = true;
+                }
+                if holding_app[i] || holds_app[i] {
+                    holds_app[p.index()] = true;
+                }
             }
         }
         Some(Self {
@@ -342,12 +350,14 @@ impl<'a> Guarded<'a> {
             snap,
             under,
             holds,
+            holds_app,
         })
     }
 
     /// Whether `at` may be deleted: the Guard allows its path, and nothing the scan saw in or around it is
     /// protected, a link, or unread.
-    fn allows(&self, at: ItemRef) -> bool {
+    /// `build_output` says the rule takes build output or dependencies, which may hold the apps they build.
+    fn allows(&self, at: ItemRef, build_output: bool) -> bool {
         let snap = self.snap;
         match at {
             ItemRef::Dir(d) => {
@@ -356,6 +366,7 @@ impl<'a> Guarded<'a> {
                     && !flags.contains(DirFlags::LINK)
                     && !self.under[d.index()]
                     && !self.holds[d.index()]
+                    && (build_output || !self.holds_app[d.index()])
                     && PathKey::of(&snap.path(d)).is_some_and(|k| self.guard.check_key(&k).is_ok())
             }
             ItemRef::File(f) => {
@@ -490,7 +501,7 @@ impl Engine<'_> {
         let candidates = self.candidates(rule)?;
         for (at, label, owners_in) in candidates {
             self.tick()?;
-            if !self.wanted(rule, at, owners_in) || !self.guarded.allows(at) {
+            if !self.wanted(rule, at, owners_in) || !self.guarded.allows(at, rule.build_output) {
                 continue;
             }
             if self.claims.overlaps(self.snap, at) {

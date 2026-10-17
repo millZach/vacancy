@@ -784,6 +784,34 @@ mod guard {
         assert_eq!(all_targets(&fx, &snap, &proposals), Vec::<String>::new());
     }
 
+    /// Wrapping an app in a folder doesn't make the folder fair game: nothing that holds an app bundle is taken
+    /// whole, except by the rules for build output and dependencies, which hold the apps they build.
+    #[test]
+    fn a_folder_holding_an_app() {
+        let fx = Fixture::new();
+        fx.file(
+            "Users/alex/.Trash/wrapper/Tool.app/Contents/MacOS/Tool",
+            MIB,
+        );
+        fx.file("Users/alex/.Trash/old.zip", MIB);
+        fx.file("Users/alex/code/app/package.json", 4 * KIB);
+        fx.file("Users/alex/code/app/package-lock.json", 4 * KIB);
+        fx.file(
+            "Users/alex/code/app/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+            MIB,
+        );
+        age(&fx.path("Users/alex/code"), 120);
+        let (snap, proposals) = run(&fx, &mac(&fx), &moment(&[]));
+        assert_eq!(
+            all_targets(&fx, &snap, &proposals),
+            vec![
+                "Users/alex/.Trash/old.zip".to_owned(),
+                "Users/alex/code/app/node_modules".to_owned(),
+            ],
+            "not the wrapper; an idle project's node_modules with Electron.app in it, yes"
+        );
+    }
+
     #[test]
     fn photos_libraries_and_time_machine() {
         let fx = Fixture::new();

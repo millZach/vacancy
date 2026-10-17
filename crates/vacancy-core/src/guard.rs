@@ -193,7 +193,7 @@ impl Guard {
             return Some("Time Machine backups");
         }
         match self.platform {
-            Platform::MacOs if ends(".app") => Some("an app"),
+            Platform::MacOs if ends(".app") => Some(APP_BUNDLE),
             Platform::Windows if matches!(name, "windowsapps" | "steamapps" | "xboxgames") => {
                 Some("installed apps and games")
             }
@@ -201,13 +201,13 @@ impl Guard {
         }
     }
 
-    /// [`protected_name`](Self::protected_name) for a name as the OS spells it, and whether a folder that holds
-    /// one is protected too. A Photos library or a backup somewhere inside makes the whole folder off-limits; an
-    /// app bundle doesn't, because Xcode's build output and archives hold the apps they build, and they may go.
+    /// [`protected_name`](Self::protected_name) for a name as the OS spells it, and whether it is an app bundle
+    /// (only build-output rules may take a folder holding one: Xcode's build output and archives hold the apps they
+    /// build, and an Electron dependency in `node_modules` holds `Electron.app`).
     pub(crate) fn protected_os_name(&self, name: &std::ffi::OsStr) -> Option<(&'static str, bool)> {
         let key = name_key(name);
         let what = self.protected_name(&key)?;
-        Some((what, what != "an app"))
+        Some((what, what == APP_BUNDLE))
     }
 }
 
@@ -271,6 +271,9 @@ const TOOLS_AT_ROOT: &[&str] = &[
     "xampp",
     "wamp64",
 ];
+
+/// What the Guard calls a macOS app bundle.
+const APP_BUNDLE: &str = "an app";
 
 /// What Windows and installers keep at the root of a drive. Protected on every drive; the rules never look there.
 pub(crate) const WINDOWS_DRIVE_SYSTEM: &[&str] = &[
