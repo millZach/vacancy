@@ -274,10 +274,10 @@ unsafe fn cf_string(value: *const c_void) -> Option<String> {
             && CFGetTypeID(value) == CFStringGetTypeID()
             && CFStringGetCString(value, buf.as_mut_ptr(), buf.len() as CFIndex, UTF8) != 0
     };
+    if !ok {
+        return None;
+    }
     // SAFETY: CFStringGetCString succeeded, so `buf` holds a NUL-terminated string.
-    ok.then(|| {
-        unsafe { CStr::from_ptr(buf.as_ptr()) }
-            .to_string_lossy()
-            .into_owned()
-    })
+    let s = unsafe { CStr::from_ptr(buf.as_ptr()) };
+    Some(s.to_string_lossy().into_owned())
 }

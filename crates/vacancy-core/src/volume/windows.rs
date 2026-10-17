@@ -17,12 +17,12 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Ioctl::{
     IOCTL_DISK_GET_PARTITION_INFO_EX, IOCTL_STORAGE_QUERY_PROPERTY, PARTITION_INFORMATION_EX,
-    PARTITION_STYLE_GPT, PARTITION_STYLE_MBR, PropertyStandardQuery, STORAGE_DEVICE_DESCRIPTOR,
-    STORAGE_PROPERTY_QUERY, StorageDeviceProperty,
+    PARTITION_INFORMATION_GPT, PARTITION_INFORMATION_MBR, PARTITION_STYLE_GPT, PARTITION_STYLE_MBR,
+    PropertyStandardQuery, STORAGE_DEVICE_DESCRIPTOR, STORAGE_PROPERTY_QUERY,
+    StorageDeviceProperty,
 };
 use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 use windows_sys::Win32::System::WindowsProgramming as wp;
-use windows_sys::core::GUID;
 
 use super::offer::windows::{self as rules, Guid, Partition, WindowsDrive, drive_type};
 use super::{VolumeError, VolumeInfo};
@@ -233,7 +233,15 @@ fn open_volume(root_w: &[u16]) -> Option<OwnedHandle> {
     Some(unsafe { OwnedHandle::from_raw_handle(handle) })
 }
 
+/// What a query wrote. 8-aligned like the structures Windows writes into it.
+#[repr(C, align(8))]
+struct Out<const N: usize>([u8; N]);
+
 /// How the volume's disk is attached (`STORAGE_BUS_TYPE`), from `IOCTL_STORAGE_QUERY_PROPERTY`.
+///
+/// The answers are read field by field from the bytes Windows wrote, never through the `windows-sys` structures,
+/// whose `BOOLEAN` members are Rust `bool`s: a driver writing anything but 0 or 1 there must not be undefined
+/// behaviour.
 fn bus_type(volume: &OwnedHandle) -> Option<u32> {
     let query = STORAGE_PROPERTY_QUERY {
         PropertyId: StorageDeviceProperty,
@@ -241,62 +249,83 @@ fn bus_type(volume: &OwnedHandle) -> Option<u32> {
         AdditionalParameters: [0],
     };
     // The descriptor is followed by its strings; 1 KiB holds them all.
-    #[repr(C, align(8))]
-    struct Out([u8; 1024]);
-    let mut out = Out([0; 1024]);
+    let mut out = Out([0u8; 1024]);
     let got = ioctl(
         volume,
         IOCTL_STORAGE_QUERY_PROPERTY,
         (&raw const query).cast(),
         mem::size_of::<STORAGE_PROPERTY_QUERY>(),
         (&raw mut out).cast(),
-        mem::size_of::<Out>(),
+        mem::size_of_val(&out),
     )?;
-    let needed = mem::offset_of!(STORAGE_DEVICE_DESCRIPTOR, BusType) + mem::size_of::<i32>();
-    if got < needed {
-        return None;
-    }
-    // SAFETY: `out` is 8-aligned and holds at least the descriptor's fields up to `BusType`, written by Windows.
-    let descriptor = unsafe { &*(&raw const out).cast::<STORAGE_DEVICE_DESCRIPTOR>() };
-    u32::try_from(descriptor.BusType).ok()
+    let written = out.0.get(..got)?;
+    let bus = i32::from_ne_bytes(field(
+        written,
+        mem::offset_of!(STORAGE_DEVICE_DESCRIPTOR, BusType),
+    )?);
+    u32::try_from(bus).ok()
 }
 
 /// What the volume's partition is for, from `IOCTL_DISK_GET_PARTITION_INFO_EX`. `None` for a disk with no partition
-/// table (a "superfloppy" USB stick) or when Windows won't say.
+/// table (a "superfloppy" USB stick) or when Windows won't say. Read field by field, like [`bus_type`].
 fn partition(volume: &OwnedHandle) -> Option<Partition> {
-    let mut info = PARTITION_INFORMATION_EX::default();
+    let mut out = Out([0u8; mem::size_of::<PARTITION_INFORMATION_EX>()]);
     let got = ioctl(
         volume,
         IOCTL_DISK_GET_PARTITION_INFO_EX,
         ptr::null(),
         0,
-        (&raw mut info).cast(),
-        mem::size_of::<PARTITION_INFORMATION_EX>(),
+        (&raw mut out).cast(),
+        mem::size_of_val(&out),
     )?;
-    if got < mem::size_of::<PARTITION_INFORMATION_EX>() {
-        return None;
-    }
-    let service = info.IsServicePartition;
-    match info.PartitionStyle {
-        PARTITION_STYLE_GPT => {
-            // SAFETY: the style says which member of the union Windows filled.
-            let gpt = unsafe { info.Anonymous.Gpt };
-            Some(Partition::Gpt {
-                type_id: guid(gpt.PartitionType),
-                attributes: gpt.Attributes,
-                service,
-            })
-        }
-        PARTITION_STYLE_MBR => {
-            // SAFETY: as above.
-            let mbr = unsafe { info.Anonymous.Mbr };
-            Some(Partition::Mbr {
-                kind: mbr.PartitionType,
-                service,
-            })
-        }
+    let info = out.0.get(..got)?;
+    let style = i32::from_ne_bytes(field(
+        info,
+        mem::offset_of!(PARTITION_INFORMATION_EX, PartitionStyle),
+    )?);
+    let service = field::<1>(
+        info,
+        mem::offset_of!(PARTITION_INFORMATION_EX, IsServicePartition),
+    )?[0]
+        != 0;
+    // The style says which member of the union Windows filled.
+    let union = mem::offset_of!(PARTITION_INFORMATION_EX, Anonymous);
+    match style {
+        PARTITION_STYLE_GPT => Some(Partition::Gpt {
+            type_id: guid(
+                info,
+                union + mem::offset_of!(PARTITION_INFORMATION_GPT, PartitionType),
+            )?,
+            attributes: u64::from_ne_bytes(field(
+                info,
+                union + mem::offset_of!(PARTITION_INFORMATION_GPT, Attributes),
+            )?),
+            service,
+        }),
+        PARTITION_STYLE_MBR => Some(Partition::Mbr {
+            kind: field::<1>(
+                info,
+                union + mem::offset_of!(PARTITION_INFORMATION_MBR, PartitionType),
+            )?[0],
+            service,
+        }),
         _ => None,
     }
+}
+
+/// `N` bytes at `at` in what Windows wrote, if it wrote that far.
+fn field<const N: usize>(bytes: &[u8], at: usize) -> Option<[u8; N]> {
+    bytes.get(at..at.checked_add(N)?)?.try_into().ok()
+}
+
+/// A GUID at `at`, laid out as Windows stores one.
+fn guid(bytes: &[u8], at: usize) -> Option<Guid> {
+    Some(Guid {
+        data1: u32::from_ne_bytes(field(bytes, at)?),
+        data2: u16::from_ne_bytes(field(bytes, at + 4)?),
+        data3: u16::from_ne_bytes(field(bytes, at + 6)?),
+        data4: field(bytes, at + 8)?,
+    })
 }
 
 /// One `DeviceIoControl` call; the number of bytes written, or `None` if it failed.
@@ -325,15 +354,6 @@ fn ioctl(
         )
     };
     (ok != 0).then_some(got as usize)
-}
-
-fn guid(g: GUID) -> Guid {
-    Guid {
-        data1: g.data1,
-        data2: g.data2,
-        data3: g.data3,
-        data4: g.data4,
-    }
 }
 
 fn to_wide(s: &OsStr) -> Vec<u16> {
