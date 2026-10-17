@@ -97,6 +97,18 @@ try {
     await hints.click();
     assert.equal(await hints.getAttribute('aria-checked'), 'true');
   }
+  const deletionBoxes = page.getByRole('complementary', { name: 'Plan', exact: true })
+    .getByRole('region', { name: 'Delete' }).getByRole('checkbox');
+  const deletionSelection = [];
+  for (const box of await deletionBoxes.all()) {
+    deletionSelection.push({ label: await box.getAttribute('aria-label'), checked: await box.getAttribute('aria-checked') });
+  }
+  assert.deepEqual(deletionSelection.map(item => item.label).sort(), [
+    'Include Package manager caches', 'Include Crash dumps & error reports', 'Include Browser caches',
+    'Include Old installers in Downloads', 'Include node_modules in 1 idle project', 'Include Temp folders',
+  ].sort(), 'Fresh fixture must offer exactly the six expected cleanup proposals');
+  assert(deletionSelection.every(item => item.checked === 'true'), 'Every cleanup proposal must be selected before confirmation');
+  await saveText('deletion-selection.json', JSON.stringify(deletionSelection, null, 2));
   const rows = page.locator('.tray-row');
   for (const row of await rows.all()) {
     const title = row.locator('.tray-row-title');
