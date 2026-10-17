@@ -1054,6 +1054,41 @@ mod guard {
         }
     }
 
+    /// With Google Drive's mirrors unknown, only app data (the Library) and the package managers' cache folders may
+    /// be cleaned, whatever the rule: a %TEMP% moved into a folder Drive may be mirroring (`~/Work/Temp`) is not
+    /// emptied, nor is the Trash, while the package caches still go.
+    #[test]
+    fn unknown_sync_folders_leave_only_app_data_and_known_caches() {
+        let fx = Fixture::new();
+        fx.file("Users/alex/Work/Temp/old.tmp", MIB);
+        age(&fx.path("Users/alex/Work/Temp"), 3);
+        fx.file("Users/alex/.Trash/old.zip", MIB);
+        fx.file("Users/alex/AppData/Local/npm-cache/_cacache/content/a", MIB);
+        fx.file("Users/alex/.npm/_cacache/content/a", MIB);
+        for (windows, closed, open) in
+            [(true, "w-temp", "w-pkgcache"), (false, "m-trash", "m-brew")]
+        {
+            let mut env = if windows { win(&fx) } else { mac(&fx) };
+            env.temp = vec![fx.path("Users/alex/Work/Temp")];
+            let (snap, proposals) = run(&fx, &env, &moment(&[]));
+            assert!(
+                !targets(&fx, &snap, &proposals, closed).is_empty(),
+                "the control: {closed}"
+            );
+            env.unknown_clouds = vec!["Google Drive".to_owned()];
+            let (snap, proposals) = run(&fx, &env, &moment(&[]));
+            assert_eq!(
+                targets(&fx, &snap, &proposals, closed),
+                Vec::<String>::new(),
+                "{closed}"
+            );
+            assert!(
+                !targets(&fx, &snap, &proposals, open).is_empty(),
+                "{open} still goes"
+            );
+        }
+    }
+
     #[test]
     fn os_folders() {
         let fx = Fixture::new();

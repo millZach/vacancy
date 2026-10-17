@@ -55,8 +55,8 @@ pub struct Env {
     /// Cloud-sync roots.
     pub cloud: Vec<CloudRoot>,
     /// Sync clients that are installed but whose folders can't be known: Google Drive, when its record of them
-    /// can't be read consistently. Their folders could be anywhere, so the rules that search where people keep
-    /// their own files (projects, Downloads) propose nothing while this is not empty.
+    /// can't be read consistently. Their folders could be anywhere people keep files, so while this is not empty
+    /// the Guard allows only app data (the Library) and the package managers' cache folders, for every rule.
     pub unknown_clouds: Vec<String>,
     /// Windows only: `C:\Windows`.
     pub system_root: PathBuf,

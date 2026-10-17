@@ -12,7 +12,10 @@
 //!
 //! The allowed roots are, on the drive that holds the home folder, the home folder, temp folders (outside the home
 //! folder only if they are called `Temp` or `tmp`) and, on Windows, the folders people make at the drive's root
-//! (`C:\Dev`; never `C:\Users`); on any other drive, the whole drive below its root.
+//! (`C:\Dev`; never `C:\Users`); on any other drive, the whole drive below its root. While a sync client's folders
+//! can't be known ([`Env::unknown_clouds`]), they could be anywhere people keep files, so the allowed roots shrink
+//! to app data (the Library on a Mac) and the package managers' cache folders in the home folder, for every rule
+//! alike.
 //!
 //! **Authorization is by file-system identity** (see [`crate::fsid`]). The allowed roots and the exact and
 //! protected places are resolved once, when the Guard is built, to the identities of the folders they are and of
@@ -101,7 +104,11 @@ impl Guard {
             None => true,
         };
         let mut drive_folders = None;
-        if home_here {
+        if !env.unknown_clouds.is_empty() {
+            for zone in cache_zones(env) {
+                g.allow(&zone);
+            }
+        } else if home_here {
             g.allow(&env.home);
             // A temp folder outside the home folder (`C:\Temp`) is allowed only if it is called that: `%TEMP%`
             // pointed at some other folder must not open it up.
@@ -351,6 +358,24 @@ impl Builder {
             self.held.entry(h.id).or_insert_with(|| what.to_owned());
         }
     }
+}
+
+/// Where Vacancy may still clean while a sync client's folders are unknown: app data (the Library on a Mac), which
+/// no sync client mirrors, and the package managers' cache folders in the home folder that the rules empty.
+fn cache_zones(env: &Env) -> Vec<std::path::PathBuf> {
+    let home = &env.home;
+    let mut zones = match env.platform {
+        Platform::Windows => vec![
+            home.join("AppData"),
+            env.local_app_data.clone(),
+            env.app_data.clone(),
+        ],
+        Platform::MacOs => vec![home.join("Library")],
+    };
+    for rel in [".npm/_cacache", ".nuget/packages", ".cargo/registry/cache"] {
+        zones.push(sub(home, rel));
+    }
+    zones
 }
 
 /// `base` joined with `/`-separated names.
