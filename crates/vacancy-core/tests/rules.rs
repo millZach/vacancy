@@ -673,6 +673,29 @@ fn caches_of_running_apps_are_found_by_bundle_id_vendor_and_name() {
     );
 }
 
+/// App names and folder names are compared in one Unicode form: the cache folder a Mac lists as `Cafe` plus a
+/// combining accent belongs to the installed app `Caf\u{e9}`, so it goes while the app is closed and stays while it
+/// runs.
+#[test]
+fn app_names_match_in_either_unicode_form() {
+    let fx = Fixture::new();
+    let caches = "Users/alex/Library/Caches";
+    fx.file(&format!("{caches}/Cafe\u{301}/Data/blob"), MIB);
+    let env = Env::macos(fx.root(), "alex");
+    let found = |running: &[&str]| {
+        let mut m = moment(running);
+        m.installed_apps.push("Caf\u{e9}".to_owned());
+        let (snap, proposals) = run(&fx, &env, &m);
+        targets(&fx, &snap, &proposals, "m-caches")
+    };
+    assert_eq!(
+        found(&[]),
+        vec![format!("{caches}/Cafe\u{301}/Data")],
+        "installed and closed"
+    );
+    assert_eq!(found(&["Caf\u{e9}"]), Vec::<String>::new(), "running");
+}
+
 /// Every proposal's tile is on the map, in its category; every byte is still in exactly one tile; and opening a
 /// folder part of which was proposed shows only the rest.
 #[test]

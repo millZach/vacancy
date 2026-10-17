@@ -20,6 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use ts_rs::TS;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::categorize::{CHECK_EVERY, Categories, CategoryId, Env, ItemRef, is_library_folder};
 use crate::guard::Guard;
@@ -563,10 +564,12 @@ fn runs(folder: &str, running: &[String]) -> bool {
 }
 
 /// Whether an app's name and a folder's name are the same app's: "Discord" and "discord", "IntelliJ IDEA" and
-/// "IntelliJIdea2024.1". Letters and digits only, either one starting the other, four of them at least.
+/// "IntelliJIdea2024.1". Both are put in Unicode NFC first: a Mac may spell `Café` with `e` and a combining accent,
+/// which isn't a letter and would drop out. Then letters and digits only, either one starting the other, four of
+/// them at least.
 fn same_app(app: &str, folder: &str) -> bool {
     let compact = |s: &str| {
-        s.chars()
+        s.nfc()
             .filter(|c| c.is_alphanumeric())
             .flat_map(char::to_lowercase)
             .collect::<String>()
