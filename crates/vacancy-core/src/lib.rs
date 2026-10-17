@@ -5,7 +5,14 @@
 //! root, and CI fails if the checked-in copy is stale.
 
 mod machine;
+mod scan;
+mod snapshot;
 mod volume;
 
 pub use machine::machine_name;
+pub use scan::{CancelToken, ScanError, ScanOptions, ScanProgress, scan};
+pub use snapshot::{
+    DirFlags, DirId, FileId, FileInfo, Markers, Root, RootKind, ScanStats, Snapshot, Totals,
+    UnixTime,
+};
 pub use volume::{VolumeError, VolumeInfo, system_volume, volume_info};
