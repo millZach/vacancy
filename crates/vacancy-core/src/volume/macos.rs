@@ -99,6 +99,7 @@ fn mount(st: &libc::statfs, arbitration: Option<&Arbitration>) -> MacMount {
         read_only: flags & libc::MNT_RDONLY as u32 != 0,
         internal: device.internal,
         protocol: device.protocol,
+        role: device.role,
         total_bytes: st.f_blocks.saturating_mul(block),
         free_bytes: st.f_bfree.saturating_mul(block),
     }
@@ -156,7 +157,7 @@ fn fallback_name(mount_point: &str) -> String {
     }
 }
 
-// ---------- Disk Arbitration: is the device built in? ----------
+// ---------- Disk Arbitration and IOKit: is the device built in, and what is the volume for? ----------
 
 type CFTypeRef = *const c_void;
 type CFStringRef = *const c_void;
@@ -166,6 +167,8 @@ type DASessionRef = *const c_void;
 type DADiskRef = *const c_void;
 type CFIndex = isize;
 type CFTypeID = usize;
+/// `io_object_t`: a Mach port naming an IOKit object; 0 is none.
+type IoObject = u32;
 const UTF8: u32 = 0x0800_0100; // kCFStringEncodingUTF8
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -177,6 +180,25 @@ unsafe extern "C" {
     fn CFBooleanGetValue(boolean: CFTypeRef) -> u8;
     fn CFStringGetCString(s: CFStringRef, buf: *mut c_char, size: CFIndex, encoding: u32) -> u8;
     fn CFDictionaryGetValue(dict: CFDictionaryRef, key: *const c_void) -> *const c_void;
+    fn CFStringCreateWithCString(
+        allocator: CFAllocatorRef,
+        s: *const c_char,
+        encoding: u32,
+    ) -> CFStringRef;
+    fn CFArrayGetTypeID() -> CFTypeID;
+    fn CFArrayGetCount(array: CFTypeRef) -> CFIndex;
+    fn CFArrayGetValueAtIndex(array: CFTypeRef, index: CFIndex) -> *const c_void;
+}
+
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IORegistryEntryCreateCFProperty(
+        entry: IoObject,
+        key: CFStringRef,
+        allocator: CFAllocatorRef,
+        options: u32,
+    ) -> CFTypeRef;
+    fn IOObjectRelease(object: IoObject) -> i32;
 }
 
 #[link(name = "DiskArbitration", kind = "framework")]
@@ -188,15 +210,17 @@ unsafe extern "C" {
         name: *const c_char,
     ) -> DADiskRef;
     fn DADiskCopyDescription(disk: DADiskRef) -> CFDictionaryRef;
+    fn DADiskCopyIOMedia(disk: DADiskRef) -> IoObject;
     static kDADiskDescriptionDeviceInternalKey: CFStringRef;
     static kDADiskDescriptionDeviceProtocolKey: CFStringRef;
 }
 
-/// What Disk Arbitration says about the device under a volume.
+/// What Disk Arbitration and IOKit say about the device under a volume, and the volume's APFS role.
 #[derive(Default)]
 struct Device {
     internal: Option<bool>,
     protocol: Option<String>,
+    role: Option<String>,
 }
 
 /// A Disk Arbitration session, released when dropped. Only asks; it never mounts, unmounts or claims anything.
@@ -209,7 +233,7 @@ impl Arbitration {
         (!session.is_null()).then_some(Self(session))
     }
 
-    /// The device behind `/dev/diskNsM`: whether it is built in, and how it is attached.
+    /// The device behind `/dev/diskNsM`: whether it is built in, how it is attached, and the volume's APFS role.
     fn device(&self, from: &CStr) -> Device {
         let Some(bsd) = from.to_bytes().strip_prefix(b"/dev/") else {
             return Device::default();
@@ -224,10 +248,15 @@ impl Arbitration {
         }
         // SAFETY: `disk` is a live DADisk we own.
         let description = unsafe { DADiskCopyDescription(disk) };
+        // SAFETY: as above.
+        let role = unsafe { apfs_role(disk) };
         // SAFETY: we own `disk` (a Create call) and are done with it.
         unsafe { CFRelease(disk) };
         if description.is_null() {
-            return Device::default();
+            return Device {
+                role,
+                ..Device::default()
+            };
         }
         // SAFETY: `description` is a live dictionary; the keys are Disk Arbitration's constants. Get returns values
         // the dictionary still owns, read before it is released.
@@ -241,6 +270,7 @@ impl Arbitration {
                     description,
                     kDADiskDescriptionDeviceProtocolKey,
                 )),
+                role,
             }
         };
         // SAFETY: we own `description` (a Copy call) and are done with it.
@@ -254,6 +284,51 @@ impl Drop for Arbitration {
         // SAFETY: we own the session (a Create call), and it is released once.
         unsafe { CFRelease(self.0) };
     }
+}
+
+/// An APFS volume's role ("Preboot", "Recovery", "VM", "Data"): the first entry of the `Role` property on the
+/// volume's IOMedia, as `diskutil apfs list` shows it. `None` when it has no role or isn't APFS.
+///
+/// # Safety
+/// `disk` is a live DADisk.
+unsafe fn apfs_role(disk: DADiskRef) -> Option<String> {
+    // SAFETY: the caller promises `disk` is live; the media object we get is ours to release.
+    let media = unsafe { DADiskCopyIOMedia(disk) };
+    if media == 0 {
+        return None;
+    }
+    // SAFETY: a NUL-terminated literal; a null allocator means the default one.
+    let key = unsafe { CFStringCreateWithCString(ptr::null(), c"Role".as_ptr(), UTF8) };
+    let value = if key.is_null() {
+        ptr::null()
+    } else {
+        // SAFETY: `media` and `key` are live; a null allocator means the default one. The value is ours to release.
+        let value = unsafe { IORegistryEntryCreateCFProperty(media, key, ptr::null(), 0) };
+        // SAFETY: we own `key` (a Create call) and are done with it.
+        unsafe { CFRelease(key) };
+        value
+    };
+    // SAFETY: we own `media` (a Copy call) and are done with it.
+    unsafe { IOObjectRelease(media) };
+    if value.is_null() {
+        return None;
+    }
+    // SAFETY: `value` is a live CF object we own; types are checked before each read, and the array's items are read
+    // before it is released.
+    let role = unsafe {
+        if CFGetTypeID(value) == CFArrayGetTypeID() {
+            if CFArrayGetCount(value) > 0 {
+                cf_string(CFArrayGetValueAtIndex(value, 0))
+            } else {
+                None
+            }
+        } else {
+            cf_string(value)
+        }
+    };
+    // SAFETY: we own `value` (a Create call) and are done with it.
+    unsafe { CFRelease(value) };
+    role.filter(|r| !r.is_empty())
 }
 
 /// A CFBoolean's value; `None` for null or anything else.
@@ -287,4 +362,43 @@ unsafe fn cf_string(value: *const c_void) -> Option<String> {
     // SAFETY: CFStringGetCString succeeded, so `buf` holds a NUL-terminated string.
     let s = unsafe { CStr::from_ptr(buf.as_ptr()) };
     Some(s.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Read-only: asks macOS about its own Preboot and VM volumes, as it mounts them at startup, so the role really is
+    /// readable where the rules rely on it.
+    #[test]
+    fn reads_the_apfs_role_of_the_systems_own_volumes() {
+        let arbitration = Arbitration::new().expect("a Disk Arbitration session");
+        let mut checked = 0;
+        for (path, role) in [
+            ("/System/Volumes/Preboot", "Preboot"),
+            ("/System/Volumes/VM", "VM"),
+        ] {
+            if !Path::new(path).exists() {
+                continue;
+            }
+            let c_path = CString::new(path).expect("no NUL");
+            let mut st = MaybeUninit::<libc::statfs>::uninit();
+            // SAFETY: `c_path` is NUL-terminated; `st` is writable memory for one `statfs`.
+            assert_eq!(unsafe { libc::statfs(c_path.as_ptr(), st.as_mut_ptr()) }, 0);
+            // SAFETY: `statfs` returned 0, so it filled `st`.
+            let st = unsafe { st.assume_init() };
+            let m = mount(&st, Some(&arbitration));
+            if m.mount_point != path {
+                continue; // not a volume of its own on this Mac
+            }
+            assert_eq!(m.role.as_deref(), Some(role), "{m:?}");
+            assert!(
+                !rules::drives(std::slice::from_ref(&m))
+                    .iter()
+                    .any(|d| d.mount_point == path)
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "found neither Preboot nor VM to ask about");
+    }
 }
