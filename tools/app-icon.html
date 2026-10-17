@@ -1,0 +1,54 @@
+<!doctype html>
+<!-- The app icon's source: a lit neon "V" from the wordmark on the dark dot ground. Rendered to
+     src-tauri/icons/app-icon.png by tools/render-icon.mjs, which then runs `tauri icon`. -->
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      @font-face {
+        font-family: 'Neonderthaw';
+        src: url('../node_modules/@fontsource/neonderthaw/files/neonderthaw-latin-400-normal.woff2') format('woff2');
+      }
+      html,
+      body {
+        margin: 0;
+        width: 1024px;
+        height: 1024px;
+        background: transparent;
+      }
+      .tile {
+        position: absolute;
+        left: 100px;
+        top: 100px;
+        width: 824px;
+        height: 824px;
+        border-radius: 185px;
+        overflow: hidden;
+        background:
+          radial-gradient(60% 55% at 50% 52%, rgba(255, 79, 179, 0.16), transparent 70%),
+          radial-gradient(circle at 3px 3px, rgba(255, 255, 255, 0.11) 2.6px, transparent 4px) 0 0 / 34px 34px,
+          #12161c;
+        box-shadow:
+          inset 0 0 0 3px #303845,
+          inset 0 2px 0 6px rgba(255, 255, 255, 0.03);
+      }
+      .v {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        padding: 40px 190px 0 0;
+        font: 400 500px/1 'Neonderthaw', cursive;
+        color: #ffe4f3;
+        text-shadow:
+          0 0 6px #fff,
+          0 0 18px #ff4fb3,
+          0 0 46px rgba(255, 79, 179, 0.9),
+          0 0 110px rgba(255, 79, 179, 0.6);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="tile"><div class="v">V</div></div>
+  </body>
+</html>

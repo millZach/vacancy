@@ -25,3 +25,6 @@ Thumbs.db
 
 # Agent run files
 .zstack/
+
+# Screenshots from tools/ripple-strip.mjs (proof images that ship live in docs/proof/)
+shots/

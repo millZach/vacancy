@@ -1,0 +1,22 @@
+[workspace]
+members = ["crates/vacancy-core", "src-tauri"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+publish = false
+
+[workspace.dependencies]
+vacancy-core = { path = "crates/vacancy-core" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+ts-rs = "12"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"

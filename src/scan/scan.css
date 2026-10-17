@@ -1,0 +1,123 @@
+/* The scan screen: the plate floats on the dot field. Clicks fall through the plate to the field, except on the
+   button and the agent note. */
+
+.scan {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 var(--gutter) var(--gutter);
+  cursor: default;
+}
+
+.scan-toolbar {
+  position: relative;
+  z-index: 1;
+  flex: none;
+  height: var(--toolbar-h);
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+}
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-ui);
+  color: var(--color-text-3);
+}
+.crumb {
+  padding: 3px 0;
+  font: 600 var(--text-ui) var(--font-sans);
+  color: var(--color-text-2);
+  white-space: nowrap;
+}
+.crumb.is-here {
+  color: var(--color-text);
+}
+
+.scan-stage {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  min-height: 0;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.plate {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  text-align: center;
+  pointer-events: none;
+}
+.plate-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.plate-content .cta,
+.plate-content .agent-note {
+  pointer-events: auto;
+}
+.plate-icon {
+  margin-bottom: var(--space-5);
+  color: var(--color-text-3);
+}
+.plate h1 {
+  margin: 0;
+  font: 300 var(--text-display) / 1.05 var(--font-sans);
+  letter-spacing: -0.03em;
+}
+.plate-cap {
+  margin: 10px 0 var(--space-8);
+  font-size: var(--text-md);
+  color: var(--color-text-2);
+  font-variant-numeric: tabular-nums;
+}
+.plate-error {
+  max-width: 520px;
+  color: var(--color-careful);
+}
+.plate-fine {
+  margin: var(--space-5) 0 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-3);
+}
+
+.agent-note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  max-width: 450px;
+  margin-top: 30px;
+  padding: 12px 15px;
+  border: 1px solid var(--color-line-2);
+  border-radius: var(--radius-card);
+  background: var(--color-glass);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  text-align: left;
+  font-size: var(--text-ui);
+  line-height: 1.5;
+  color: var(--color-text-2);
+}
+.agent-note svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--color-ai);
+}
+.agent-note b {
+  color: var(--color-text);
+  font-weight: 600;
+}

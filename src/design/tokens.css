@@ -1,0 +1,110 @@
+/* Vacancy's design tokens: the one place for colour, type, spacing, radii and shared motion. Ported from the
+   prototype's variant D ("Atlas + Wrapped", tag prototype/vacancy-ui). Components use these variables and never
+   hard-code a palette colour or a font. */
+
+:root {
+  /* ---------- colour ---------- */
+  --color-bg: #0f1318; /* app background */
+  --color-head: #12161c; /* header bar */
+  --color-panel: #141920; /* side panels */
+  --color-raise: #1b212a; /* raised controls */
+  --color-line: #232a34; /* hairlines */
+  --color-line-2: #303845; /* stronger borders */
+  --color-text: #e6ebf1;
+  --color-text-2: #a3adba;
+  --color-text-3: #6e7988;
+  --color-neon: #ff4fb3; /* the sign: the only thing that glows */
+  --neon-rgb: 255, 79, 179; /* --color-neon as channels, for rgba() */
+  --dot-rgb: 196, 205, 219; /* the dot field's resting dots, as channels */
+  --color-neon-ink: #ffe4f3; /* text lit by neon */
+  --color-on-neon: #2a0619; /* text on a neon fill */
+  --color-ai: #cfc4e6; /* AI agent accents */
+  --color-safe: #7cc9a6;
+  --color-review: #e6b85c;
+  --color-careful: #f08a6c;
+  --color-glass: rgba(18, 22, 28, 0.9); /* cards floating over the dot field */
+  --color-meter: #7d8796; /* used-space bars */
+  --color-meter-track: #232a35;
+
+  /* ---------- surfaces ---------- */
+  --ground: radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.085) 1px, transparent 1.5px) 0 0 / 9px 9px,
+    var(--color-head);
+  --hatch: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.075) 0 1.5px, transparent 1.5px 7px);
+
+  /* ---------- type ---------- */
+  --font-sans: 'Overpass Variable', 'Overpass', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'Overpass Mono', ui-monospace, Consolas, monospace;
+  --font-script: 'Neonderthaw', 'Brush Script MT', cursive;
+  --text-2xs: 11px;
+  --text-xs: 11.5px;
+  --text-sm: 12px;
+  --text-ui: 12.5px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 15px;
+  --text-display: 46px;
+  --text-wordmark: 35px;
+
+  /* ---------- spacing ---------- */
+  --space-1: 4px;
+  --space-2: 6px;
+  --space-3: 8px;
+  --space-4: 10px;
+  --space-5: 14px;
+  --space-6: 18px;
+  --space-7: 22px;
+  --space-8: 28px;
+
+  /* ---------- radii ---------- */
+  --radius-sm: 6px;
+  --radius-md: 7px;
+  --radius-lg: 9px;
+  --radius-card: 10px;
+  --radius-pill: 999px;
+
+  /* ---------- layout ---------- */
+  --header-h: 54px;
+  --toolbar-h: 42px;
+  --gutter: 14px; /* around the main area */
+  /* Room for the macOS traffic lights over the header (overlay title bar). */
+  --traffic-lights-w: 88px;
+
+  /* ---------- glows ---------- */
+  --glow-cta: 0 0 0 1px rgba(var(--neon-rgb), 0.7), 0 6px 24px -4px rgba(var(--neon-rgb), 0.55);
+  --glow-cta-hover: 0 0 0 1px rgba(var(--neon-rgb), 0.9), 0 8px 30px -4px rgba(var(--neon-rgb), 0.75);
+  --glow-neon-text: 0 0 3px var(--color-neon), 0 0 12px rgba(var(--neon-rgb), 0.85), 0 0 30px rgba(var(--neon-rgb), 0.5);
+}
+
+/* A neon tube catching: two flickers, then steady. */
+@keyframes neon-on {
+  0% {
+    opacity: 0;
+  }
+  8% {
+    opacity: 1;
+  }
+  12% {
+    opacity: 0.15;
+  }
+  20% {
+    opacity: 1;
+  }
+  27% {
+    opacity: 0.45;
+  }
+  31%,
+  100% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    animation-delay: 0s !important;
+    transition-duration: 0.001ms !important;
+  }
+}

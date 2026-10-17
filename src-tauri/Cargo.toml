@@ -1,0 +1,20 @@
+[package]
+name = "vacancy"
+description = "The Vacancy desktop app: a thin Tauri shell over vacancy-core."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+name = "vacancy_app"
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+tauri = { version = "2.12", features = [] }
+vacancy-core.workspace = true
+
+[lints]
+workspace = true
