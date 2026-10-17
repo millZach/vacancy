@@ -301,7 +301,7 @@ mod tests {
                 .any(|e| e.unwrap().file_name() == "Work "),
             "the folder on disk ends in a space"
         );
-        drive_db(fx.path(), &[Some(stored.as_str())], "/nowhere");
+        drive_db(fx.path(), &[Some(stored.as_str())], "no/mount");
         assert_eq!(found(fx.path()), vec![mirror.clone()], "exactly as stored");
         let mut env = if cfg!(windows) {
             Env::windows(fx.path(), "alex")
