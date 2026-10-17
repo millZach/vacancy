@@ -1089,6 +1089,63 @@ mod guard {
         }
     }
 
+    /// In a case-sensitive folder a name only spelled like the catalog's is a folder of its own: Firefox's `cache2`
+    /// after the `*` of `Profiles/*/cache2`, not a `CACHE2` beside it; an app's `GPUCache`, not `GPUCACHE`; a
+    /// project's `node_modules`, not `NODE_MODULES`. Skipped where the system doesn't allow case-sensitive folders.
+    #[cfg(windows)]
+    #[test]
+    fn names_match_exactly_in_a_case_sensitive_folder() {
+        let fx = Fixture::new();
+        let profile = "Users/alex/AppData/Local/Mozilla/Firefox/Profiles/abc.default";
+        let app = "Users/alex/AppData/Roaming/Tool";
+        let proj = "Users/alex/code/proj";
+        for dir in [profile, app, proj] {
+            if !support::make_case_sensitive(&fx.dir(dir)) {
+                return;
+            }
+        }
+        fx.file(&format!("{profile}/cache2/entries/e"), 256 * KIB);
+        fx.file(&format!("{profile}/CACHE2/mine.txt"), 256 * KIB);
+        fx.file(&format!("{app}/GPUCache/data_0"), 256 * KIB);
+        fx.file(&format!("{app}/GPUCACHE/notes.txt"), 256 * KIB);
+        fx.file(&format!("{proj}/package.json"), 4 * KIB);
+        fx.file(&format!("{proj}/package-lock.json"), 4 * KIB);
+        fx.file(&format!("{proj}/node_modules/x/x.js"), 256 * KIB);
+        fx.file(&format!("{proj}/NODE_MODULES/y.js"), 256 * KIB);
+        age(&fx.path("Users/alex/code"), 200);
+        let (snap, proposals) = run(&fx, &win(&fx), &moment(&[]));
+        let found = all_targets(&fx, &snap, &proposals);
+        for real in [
+            format!("{profile}/cache2/entries"),
+            format!("{app}/GPUCache/data_0"),
+            format!("{proj}/node_modules"),
+        ] {
+            assert!(found.contains(&real), "{real} in {found:?}");
+        }
+        for other in ["/CACHE2", "/GPUCACHE", "/NODE_MODULES"] {
+            assert!(
+                found.iter().all(|t| !t.contains(other)),
+                "{other} in {found:?}"
+            );
+        }
+    }
+
+    /// `*.xcarchive` matches whole names that end so: not a bare `.xcarchive`, not `app.xcarchivex`.
+    #[test]
+    fn a_pattern_s_ending_matches_whole_names() {
+        let fx = Fixture::new();
+        let archives = "Users/alex/Library/Developer/Xcode/Archives/2024-03-14";
+        for name in ["App 2.1.xcarchive", ".xcarchive", "App.xcarchivex"] {
+            fx.file(&format!("{archives}/{name}/Info.plist"), 512 * KIB);
+        }
+        age(&fx.path(archives), 400);
+        let (snap, proposals) = run(&fx, &mac(&fx), &moment(&[]));
+        assert_eq!(
+            targets(&fx, &snap, &proposals, "m-archives"),
+            vec![format!("{archives}/App 2.1.xcarchive")]
+        );
+    }
+
     #[test]
     fn os_folders() {
         let fx = Fixture::new();

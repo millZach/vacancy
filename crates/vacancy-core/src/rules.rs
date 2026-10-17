@@ -1006,18 +1006,21 @@ impl Engine<'_> {
         let Some(base) = self.locate(&fixed) else {
             return Vec::new();
         };
-        let rest: Vec<String> = pattern
+        let Some(rest) = pattern
             .components()
             .skip(fixed.components().count())
-            .map(|c| name_key(c.as_os_str()))
-            .collect();
+            .map(|c| c.as_os_str().to_str())
+            .collect::<Option<Vec<&str>>>()
+        else {
+            return Vec::new();
+        };
         let mut level: Vec<(DirId, Option<DirId>)> = vec![(base, None)];
-        for k in &rest {
+        for part in rest {
             let mut next = Vec::new();
             for (d, owners) in level {
                 for c in self.snap.children(d) {
-                    if glob(k, &name_key(self.snap.name(c))) {
-                        let owners = owners.or(k.starts_with('*').then_some(d));
+                    if self.matches_part(d, c, part) {
+                        let owners = owners.or(part.starts_with('*').then_some(d));
                         next.push((c, owners));
                     }
                 }
@@ -1025,6 +1028,53 @@ impl Engine<'_> {
             level = next;
         }
         level
+    }
+
+    /// Whether the folder `child` of `parent` is named `wanted`, a name the catalog spells (`cache2`, `Cache`,
+    /// `node_modules`). The same spelling is. A spelling that only folds to it (`CACHE2`) is the same name only
+    /// where the file system says so: `wanted`, opened in `parent`, must be this very folder, as it is in a folder
+    /// that ignores case and isn't in a case-sensitive one, where `CACHE2` is a folder of its own.
+    fn is_named(&self, parent: DirId, child: DirId, wanted: &str) -> bool {
+        let name = self.snap.name(child);
+        let wanted_os = OsStr::new(wanted);
+        if name == wanted_os {
+            return true;
+        }
+        // Cheap for the usual ASCII names; folded in full only for others.
+        let alike = if name.is_ascii() && wanted.is_ascii() {
+            name.eq_ignore_ascii_case(wanted_os)
+        } else {
+            name_key(name) == name_key(wanted_os)
+        };
+        if !alike {
+            return false;
+        }
+        let last = |path: &Path| fsid::chain(path).and_then(|c| c.last().map(|s| s.id));
+        let resolved = last(&self.snap.path(parent).join(wanted));
+        resolved.is_some() && resolved == last(&self.snap.path(child))
+    }
+
+    /// Whether the folder `child` of `parent` matches one part of a place pattern: `*` (any folder), `*.ext` (a
+    /// name ending so) or a name. Names and endings are matched as [`is_named`](Self::is_named) matches them.
+    fn matches_part(&self, parent: DirId, child: DirId, part: &str) -> bool {
+        let Some(suffix) = part.strip_prefix('*') else {
+            return self.is_named(parent, child, part);
+        };
+        if suffix.is_empty() {
+            return true;
+        }
+        let Some(name) = self.snap.name(child).to_str() else {
+            return false;
+        };
+        if name.len() <= suffix.len() {
+            return false;
+        }
+        if name.ends_with(suffix) {
+            return true;
+        }
+        let cut = name.len() - suffix.len();
+        name.is_char_boundary(cut)
+            && self.is_named(parent, child, &format!("{}{suffix}", &name[..cut]))
     }
 
     /// Folders below `base` named one of `names`, not looking inside a match, code libraries or `prune`.
@@ -1049,7 +1099,7 @@ impl Engine<'_> {
                 }
                 let key = name_key(name);
                 let plain = key == "cache" || key == "caches";
-                if names.iter().any(|n| n.eq_ignore_ascii_case(&key))
+                if names.iter().any(|n| self.is_named(d, c, n))
                     && (!chromium || !plain || self.chromium_layout(c))
                 {
                     out.push(c);
@@ -1067,10 +1117,7 @@ impl Engine<'_> {
     /// `GPUCache`.
     fn chromium_layout(&self, dir: DirId) -> bool {
         let snap = self.snap;
-        let has = |d: DirId, name: &str| {
-            snap.children(d)
-                .any(|c| snap.name(c).eq_ignore_ascii_case(name))
-        };
+        let has = |d: DirId, name: &str| snap.children(d).any(|c| self.is_named(d, c, name));
         has(dir, "Cache_Data")
             || snap.parent(dir).is_some_and(|p| {
                 has(p, "Local Storage") || snap.markers(p).contains(Markers::PREFERENCES)
@@ -1110,7 +1157,7 @@ impl Engine<'_> {
                 if top && name.as_encoded_bytes().first() == Some(&b'.') {
                     continue; // tools' folders in the home folder; system folders at a drive's root
                 }
-                if name.eq_ignore_ascii_case(folder) {
+                if name.eq_ignore_ascii_case(folder) && self.is_named(d, c, folder) {
                     let proven = match proof {
                         Proof::NodeLock => snap.markers(d).contains(Markers::NODE_LOCK) || repo,
                         Proof::CargoTarget => snap.markers(c).contains(Markers::CARGO_TARGET),
@@ -1165,15 +1212,6 @@ impl Engine<'_> {
             }
         }
         Some(out)
-    }
-}
-
-/// Whether a name key matches a pattern key: `*` matches any name, `*.ext` any name ending in `.ext`, anything
-/// else only itself.
-fn glob(pattern: &str, name: &str) -> bool {
-    match pattern.strip_prefix('*') {
-        Some(suffix) => name.len() > suffix.len() && name.ends_with(suffix),
-        None => pattern == name,
     }
 }
 
@@ -1282,15 +1320,5 @@ mod tests {
         assert_eq!(list(&["Edge", "Chrome"]), "Edge and Chrome");
         assert_eq!(list(&["a", "b", "c"]), "a, b and c");
         assert_eq!(list(&["a", "b", "c", "d", "e"]), "a, b, c and 2 more");
-    }
-
-    #[test]
-    fn globs_match_whole_names() {
-        assert!(glob("*", "default"));
-        assert!(glob("*.xcarchive", "app 2.1.xcarchive"));
-        assert!(!glob("*.xcarchive", ".xcarchive"));
-        assert!(!glob("*.xcarchive", "app.xcarchivex"));
-        assert!(glob("cache", "cache"));
-        assert!(!glob("cache", "cache2"));
     }
 }
