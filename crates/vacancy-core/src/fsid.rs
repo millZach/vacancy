@@ -18,11 +18,39 @@ pub(crate) struct Identity {
     file: u128,
 }
 
-/// One step of a path's chain: the name it was reached by (the volume root's is the root's path) and what it is.
+impl Identity {
+    /// Whether this is the identity the scanner recorded as `scanned` for a folder (Windows: its file id, on a
+    /// volume the scanner checked; Unix: its device and inode).
+    pub(crate) fn matches_scan(&self, scanned: u128) -> bool {
+        if cfg!(windows) {
+            self.file == scanned
+        } else {
+            (u128::from(self.volume) << 64) | self.file == scanned
+        }
+    }
+}
+
+/// One step of a path's chain: the name it was reached by (the volume root's is the root's path), what it is, and
+/// on macOS, for a folder the walk opened, where the volume it is on is mounted (`fstatfs`'s `f_mntonname`).
 #[derive(Clone, Debug)]
 pub(crate) struct Step {
     pub(crate) name: OsString,
     pub(crate) id: Identity,
+    pub(crate) mount: Option<OsString>,
+}
+
+/// Whether every step is on the first one's volume: the same volume serial number (Windows) or device (macOS), and
+/// on macOS the same mount. A volume mounted inside a folder is not that folder's: what is on it never inherits the
+/// folder's standing. (Windows mounts a volume inside a folder through a mount-point reparse point, which a chain
+/// never passes.)
+pub(crate) fn one_volume(steps: &[Step]) -> bool {
+    let Some(first) = steps.first() else {
+        return false;
+    };
+    steps.iter().all(|s| {
+        s.id.volume == first.id.volume
+            && (s.mount.is_none() || first.mount.is_none() || s.mount == first.mount)
+    })
 }
 
 /// The chain of `path`: its volume root, then each folder below down to `path` itself. `None` when the path isn't
@@ -200,6 +228,7 @@ mod sys {
         let step = Step {
             name: root_path.into(),
             id: id_of(&dir)?,
+            mount: None,
         };
         Some((dir, step, parts.count()))
     }
@@ -214,6 +243,7 @@ mod sys {
         let step = Step {
             name: name.to_owned(),
             id: id_of(&next)?,
+            mount: None,
         };
         Some((step, open.then_some(next)))
     }
@@ -353,7 +383,9 @@ mod sys {
         (status >= 0 && !file.is_null()).then_some(Handle(file))
     }
 
-    /// Whether an open file or folder is a link (a symlink, junction or mount point). `None` if it can't say.
+    /// Whether an open file or folder is a link: a symlink, a junction, or a mount point (a volume mounted in a
+    /// folder is a junction to the volume). Any reparse point that names somewhere else counts. `None` if it can't
+    /// say.
     fn is_link(handle: &Handle) -> Option<bool> {
         // SAFETY: an all-zero FILE_ATTRIBUTE_TAG_INFO is valid.
         let mut info: FILE_ATTRIBUTE_TAG_INFO = unsafe { mem::zeroed() };
@@ -450,6 +482,7 @@ mod sys {
         let step = Step {
             name: "/".into(),
             id: id(&fstat(&dir)?),
+            mount: mount_of(&dir),
         };
         Some((dir, step, parts.count()))
     }
@@ -466,9 +499,10 @@ mod sys {
         if found != 0 || st.st_mode & libc::S_IFMT == libc::S_IFLNK {
             return None;
         }
-        let step = Step {
+        let mut step = Step {
             name: name.to_owned(),
             id: id(&st),
+            mount: None,
         };
         if !open {
             return Some((step, None));
@@ -489,6 +523,7 @@ mod sys {
         if id(&fstat(&next)?) != step.id {
             return None;
         }
+        step.mount = mount_of(&next);
         Some((step, Some(next)))
     }
 
@@ -525,6 +560,32 @@ mod sys {
             let len = buf.iter().position(|&b| b == 0)?;
             buf.truncate(len);
             Some(std::ffi::OsString::from_vec(buf))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = dir;
+            None
+        }
+    }
+
+    /// Where the volume an open folder is on is mounted (`fstatfs`'s `f_mntonname`). macOS only.
+    fn mount_of(dir: &Fd) -> Option<std::ffi::OsString> {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            // SAFETY: an all-zero statfs is a valid value of a plain C struct.
+            let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+            // SAFETY: `dir` is open and `fs` is writable.
+            if unsafe { libc::fstatfs(dir.0, &mut fs) } != 0 {
+                return None;
+            }
+            let name: Vec<u8> = fs
+                .f_mntonname
+                .iter()
+                .take_while(|&&c| c != 0)
+                .map(|&c| c as u8)
+                .collect();
+            Some(std::ffi::OsString::from_vec(name))
         }
         #[cfg(not(target_os = "macos"))]
         {

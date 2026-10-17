@@ -380,11 +380,23 @@ impl<'a> Guarded<'a> {
         })
     }
 
-    /// Whether the Guard lets `path` go (with `contents`, the loose files directly inside it), judged by identity.
-    fn passes(&self, path: &Path, contents: bool) -> bool {
-        self.guard
+    /// Whether the Guard lets `path` go (with `contents`, the loose files directly inside it), judged by identity,
+    /// and the folder `scanned` (the path's `from_end`th step, counted from its end) is still the folder the scan
+    /// listed. One found with another identity (a volume mounted over it, another folder put in its place) is not
+    /// what the scan measured, and is dropped.
+    fn passes(&self, path: &Path, contents: bool, scanned: DirId, from_end: usize) -> bool {
+        let Ok(chain) = self
+            .guard
             .check_with(&mut self.walker.borrow_mut(), path, contents)
-            .is_ok()
+        else {
+            return false;
+        };
+        let Some(step) = chain.len().checked_sub(from_end).and_then(|i| chain.get(i)) else {
+            return false;
+        };
+        self.snap
+            .identity(scanned)
+            .is_none_or(|id| step.id.matches_scan(id))
     }
 
     /// Whether `at` may be deleted: the Guard allows its path, and nothing the scan saw in or around it is
@@ -400,15 +412,15 @@ impl<'a> Guarded<'a> {
                     && !self.under[d.index()]
                     && !self.holds[d.index()]
                     && (takes_built_apps || !self.holds_app[d.index()])
-                    && self.passes(&snap.path(d), false)
+                    && self.passes(&snap.path(d), false, d, 1)
             }
             ItemRef::File(f) => {
                 let parent = snap.file(f).parent;
-                !self.under[parent.index()] && self.passes(&snap.file_path(f), false)
+                !self.under[parent.index()] && self.passes(&snap.file_path(f), false, parent, 2)
             }
             ItemRef::FilesIn(d) => {
                 // Judged as files directly in the folder: the folder itself may be a place that must stay.
-                !self.under[d.index()] && self.passes(&snap.path(d), true)
+                !self.under[d.index()] && self.passes(&snap.path(d), true, d, 1)
             }
             ItemRef::Proposal(_) => false,
         }

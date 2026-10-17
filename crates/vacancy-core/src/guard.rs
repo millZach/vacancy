@@ -171,17 +171,13 @@ impl Guard {
     }
 
     /// [`check`](Self::check), or with `contents` [`check_contents`](Self::check_contents), walking with `walker`,
-    /// which keeps recently opened folders open for the next path in them.
+    /// which keeps recently opened folders open for the next path in them. Gives the chain it judged.
     pub(crate) fn check_with(
         &self,
         walker: &mut Walker,
         path: &Path,
         contents: bool,
-    ) -> Result<(), Denied> {
-        self.judge(walker, path, contents)
-    }
-
-    fn judge(&self, walker: &mut Walker, path: &Path, contents: bool) -> Result<(), Denied> {
+    ) -> Result<Vec<Step>, Denied> {
         let key = PathKey::of(path).ok_or(Denied::Unclear)?;
         let key = if contents {
             key.child(LOOSE_FILES)
@@ -190,7 +186,12 @@ impl Guard {
         };
         self.deny_by_name(&key)?;
         let chain = walker.chain(path).ok_or(Denied::Unclear)?;
-        self.judge_chain(&chain, contents)
+        self.judge_chain(&chain, contents)?;
+        Ok(chain)
+    }
+
+    fn judge(&self, walker: &mut Walker, path: &Path, contents: bool) -> Result<(), Denied> {
+        self.check_with(walker, path, contents).map(|_| ())
     }
 
     /// Denies what is spelled like an exact or protected place, holds one, or (protected) is inside one, and what
@@ -235,11 +236,18 @@ impl Guard {
         } else {
             &chain[..chain.len() - 1]
         };
-        if above.iter().any(|s| self.allowed.contains(&s.id)) {
+        // An allowed root strictly above, with everything from it down on its volume: a volume mounted inside the
+        // home folder is not the home folder.
+        let from_allowed = above
+            .iter()
+            .enumerate()
+            .any(|(at, s)| self.allowed.contains(&s.id) && fsid::one_volume(&chain[at..]));
+        if from_allowed {
             return Ok(());
         }
         if let Some((root, users)) = self.drive_folders
             && let Some(at) = above.iter().position(|s| s.id == root)
+            && fsid::one_volume(&chain[at..])
         {
             // Inside a folder at the drive's root, not the folder itself: at least two names below the root.
             let below = chain.len() - 1 - at + usize::from(contents);
@@ -918,6 +926,65 @@ mod tests {
                 false
             }
         }
+    }
+
+    /// A disk image mounted inside the home folder is another volume: nothing on it inherits the home folder's
+    /// standing. Skipped where `hdiutil` can't make or mount one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_volume_mounted_inside_the_home_authorizes_nothing() {
+        use std::process::Command;
+
+        struct Detach(PathBuf);
+        impl Drop for Detach {
+            fn drop(&mut self) {
+                let _ = Command::new("hdiutil")
+                    .args(["detach", "-quiet", "-force"])
+                    .arg(&self.0)
+                    .status();
+            }
+        }
+
+        let fx = Fx::new();
+        let g = fx.guard(&Env::macos(&fx.root, "alex"));
+        let mnt = fx.at("Users/alex/code/mnt");
+        let images = tempfile::tempdir().unwrap();
+        let image = images.path().join("vacancy-test.dmg");
+        let made = Command::new("hdiutil")
+            .args([
+                "create",
+                "-quiet",
+                "-size",
+                "4m",
+                "-fs",
+                "HFS+",
+                "-volname",
+                "VacancyTest",
+            ])
+            .arg(&image)
+            .status();
+        if !made.is_ok_and(|s| s.success()) {
+            eprintln!("skipped: hdiutil couldn't make a disk image");
+            return;
+        }
+        let attached = Command::new("hdiutil")
+            .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
+            .arg(&mnt)
+            .arg(&image)
+            .status();
+        if !attached.is_ok_and(|s| s.success()) {
+            eprintln!("skipped: hdiutil couldn't mount the disk image");
+            return;
+        }
+        let _detach = Detach(mnt.clone());
+        let on_it = mnt.join("proj").join("node_modules");
+        std::fs::create_dir_all(&on_it).unwrap();
+        assert_eq!(g.check(&on_it), Err(Denied::OutsideAllowedRoots));
+        assert_eq!(
+            g.check(&fx.at("Users/alex/code/other/node_modules")),
+            Ok(()),
+            "the control"
+        );
     }
 
     #[test]

@@ -1021,6 +1021,39 @@ mod guard {
         }
     }
 
+    /// A folder replaced after the scan (renamed away and another made in its place, as a volume mounted over it
+    /// would be) is not the folder the scan measured: its proposal is dropped, though its path is the same.
+    #[test]
+    fn a_folder_replaced_since_the_scan_is_dropped() {
+        let fx = Fixture::new();
+        bait(&fx, "Users/alex/code");
+        let snap = fx.scan();
+        let target = "Users/alex/code/proj/node_modules".to_owned();
+        for env in [win(&fx), mac(&fx)] {
+            let proposals = propose(&snap, &categorize(&snap, &env), &env, &moment(&[]));
+            assert_eq!(
+                all_targets(&fx, &snap, &proposals),
+                vec![target.clone()],
+                "the control"
+            );
+        }
+        std::fs::rename(
+            fx.path("Users/alex/code/proj/node_modules"),
+            fx.path("Users/alex/code/proj/old-modules"),
+        )
+        .unwrap();
+        fx.file("Users/alex/code/proj/node_modules/x/x.js", 512 * KIB);
+        for env in [win(&fx), mac(&fx)] {
+            let proposals = propose(&snap, &categorize(&snap, &env), &env, &moment(&[]));
+            assert_eq!(
+                all_targets(&fx, &snap, &proposals),
+                Vec::<String>::new(),
+                "{:?}",
+                env.platform
+            );
+        }
+    }
+
     #[test]
     fn os_folders() {
         let fx = Fixture::new();

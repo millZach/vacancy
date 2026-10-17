@@ -278,6 +278,9 @@ const NO_PARENT: u32 = u32::MAX;
 pub struct Snapshot {
     roots: Vec<Root>,
     dirs: Vec<DirRec>,
+    /// Per folder, what identified it when it was listed (Windows file id; Unix device and inode), or 0 where the
+    /// file system has none (FAT) and for the roots.
+    ids: Vec<u128>,
     files: Vec<FileRec>,
     names: Vec<u8>,
     stats: ScanStats,
@@ -376,6 +379,12 @@ impl Snapshot {
     }
 
     /// Which marker files and folders it holds.
+    /// What identified a folder when the scan listed it (Windows file id; Unix device and inode), if the file system
+    /// has one. A folder found with another identity now is not the folder the scan saw.
+    pub(crate) fn identity(&self, dir: DirId) -> Option<u128> {
+        self.ids.get(dir.0 as usize).copied().filter(|&id| id != 0)
+    }
+
     pub fn markers(&self, dir: DirId) -> Markers {
         self.dir(dir).markers
     }
@@ -564,6 +573,7 @@ impl Builder {
             snap: Snapshot {
                 roots: Vec::new(),
                 dirs: Vec::new(),
+                ids: Vec::new(),
                 files: Vec::new(),
                 names: Vec::new(),
                 stats: ScanStats::default(),
@@ -594,6 +604,7 @@ impl Builder {
             flags: DirFlags::default(),
             markers: Markers::default(),
         });
+        self.snap.ids.push(0);
         self.snap.roots.push(Root {
             dir: id,
             real,
@@ -650,6 +661,7 @@ impl Builder {
                 flags: sub.flags,
                 markers: Markers::default(),
             });
+            snap.ids.push(sub.identity.unwrap_or(0));
             if sub.flags.contains(DirFlags::LINK) {
                 snap.stats.links_skipped += 1;
             }
@@ -704,6 +716,7 @@ impl Builder {
         self.snap.stats.elapsed = elapsed;
         self.snap.names.shrink_to_fit();
         self.snap.dirs.shrink_to_fit();
+        self.snap.ids.shrink_to_fit();
         self.snap.files.shrink_to_fit();
         self.snap
     }
