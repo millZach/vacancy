@@ -5,6 +5,7 @@
 //! root, and CI fails if the checked-in copy is stale.
 
 mod categorize;
+mod fsid;
 mod guard;
 mod machine;
 mod map;
@@ -17,8 +18,8 @@ mod text;
 mod volume;
 
 pub use categorize::{
-    Categories, Category, CategoryId, CloudRoot, Env, Item, ItemRef, KnownFolders, NameRule,
-    Platform, categorize,
+    Categories, Category, CategoryId, CloudRoot, Env, Item, ItemRef, KnownFolders, Platform,
+    categorize,
 };
 pub use guard::{Denied, Guard};
 pub use machine::machine_name;

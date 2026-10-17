@@ -1,16 +1,16 @@
-//! Paths as keys, for deciding whether two paths name the same place or one is inside another. Every decision that
-//! depends on where something is (the Guard, the rules, the categorizer's known places) compares keys, never raw
-//! strings: `C:\Users\me\AppDataX` is not inside `C:\Users\me\AppData`, because keys compare whole names.
+//! Paths as keys, for deciding whether two paths may name the same place or one may be inside another, by their
+//! spelling. Keys compare whole names, never raw strings: `C:\Users\me\AppDataX` is not inside
+//! `C:\Users\me\AppData`.
 //!
-//! A key folds away the ways one place can be spelled:
+//! A key never decides that a place may be deleted: names that fold to one key can still be two places (NTFS keeps
+//! `İpek` and `i` + U+0307 + `pek` apart; a case-sensitive folder keeps `alex` and `Alex` apart). The Guard
+//! authorizes by file-system identity (see [`crate::fsid`]), and uses keys only to deny more; the rules use them
+//! to find candidates, confirmed by identity where it matters, and the categorizer to label.
 //!
-//! - **Case and Unicode form, where the volume ignores them.** NTFS ignores case but keeps a precomposed `é` and `e`
-//!   followed by a combining accent (U+0301) apart, so `José` spelled each way can be two folders there. APFS and
-//!   HFS+ treat both forms as one name, and ignore case unless the volume was made case-sensitive. A [`NameRule`]
-//!   says which a volume does, and allowed roots and known places are compared by the volume's rule: on a
-//!   case-sensitive Mac `/Users/ALEX/project` is not inside an allowed `/Users/alex`, and on NTFS a `José` folder
-//!   spelled with U+0301 is not inside an allowed home spelled precomposed. Deny entries are compared with case and
-//!   form both folded on every volume, which only ever blocks more.
+//! A key folds away the ways one place can be spelled, as widely as any volume does:
+//!
+//! - **Case and Unicode form.** Names are lowercased and put in NFC, so `OneDrive` and `onedrive`, and a
+//!   precomposed `é` and `e` followed by a combining accent, give one key.
 //! - **Prefixes.** `\\?\C:\x`, `\\.\C:\x` and `C:\x` are the same place, and so are `\\?\UNC\srv\share` and
 //!   `\\srv\share`.
 //! - **Separators.** Trailing separators and `.` names are dropped.
@@ -26,50 +26,12 @@ use std::path::{Component, Path};
 
 use unicode_normalization::UnicodeNormalization;
 
-/// Which spellings of a name a volume treats as the same name.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub enum NameRule {
-    /// `A` and `a` are one name, but a precomposed `é` and `e` plus a combining accent are two: NTFS, FAT and exFAT.
-    #[default]
-    FoldCase,
-    /// Case and Unicode form are both ignored: APFS and HFS+ as they come.
-    FoldCaseAndForm,
-    /// Only the Unicode form is ignored: case-sensitive APFS and HFS+.
-    FoldForm,
-    /// Every spelling is its own name: a volume that can't say how it compares names.
-    Exact,
-}
-
-impl NameRule {
-    /// `name` in the one spelling every equal name shares under this rule.
-    fn fold(self, name: &str) -> String {
-        match self {
-            NameRule::FoldCase => name.to_lowercase(),
-            NameRule::FoldCaseAndForm => name.nfc().collect::<String>().to_lowercase(),
-            NameRule::FoldForm => name.nfc().collect(),
-            NameRule::Exact => name.to_owned(),
-        }
-    }
-}
-
 /// A path as a list of keys: where it starts (`c:`, `\\srv\share` or nothing on Unix), `/` for the root, then each
-/// name. See the module docs. Two keys are equal when they are with case and form folded: they may name the same
-/// place.
-#[derive(Clone, Debug)]
+/// name, folded. See the module docs. Two equal keys may name the same place.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PathKey {
-    /// The names as written (on Windows without the trailing dots and spaces Win32 ignores).
-    exact: Vec<String>,
-    /// The names with case and Unicode form folded: the widest match, which deny entries use.
     folded: Vec<String>,
 }
-
-impl PartialEq for PathKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.folded == other.folded
-    }
-}
-
-impl Eq for PathKey {}
 
 /// The key that stands for the root folder after a drive or share.
 const ROOT: &str = "/";
@@ -78,19 +40,15 @@ impl PathKey {
     /// The key for `path`, or `None` when the path doesn't pin down one place (see the module docs).
     pub(crate) fn of(path: &Path) -> Option<Self> {
         let path = long_form(path);
-        let mut exact = Vec::new();
         let mut folded = Vec::new();
         let mut rooted = false;
         for part in path.components() {
             match part {
                 Component::Prefix(prefix) => {
                     // Drive letters and server names never depend on case.
-                    let key = prefix_key(prefix.kind())?;
-                    exact.push(key.clone());
-                    folded.push(key);
+                    folded.push(prefix_key(prefix.kind())?);
                 }
                 Component::RootDir => {
-                    exact.push(ROOT.to_owned());
                     folded.push(ROOT.to_owned());
                     rooted = true;
                 }
@@ -100,62 +58,37 @@ impl PathKey {
                     if !rooted {
                         return None; // relative, or relative to a drive's current folder (`C:x`)
                     }
-                    exact.push(name_key_checked(name, NameRule::Exact)?);
-                    folded.push(name_key_checked(name, NameRule::FoldCaseAndForm)?);
+                    folded.push(name_key_checked(name)?);
                 }
             }
         }
-        rooted.then_some(Self { exact, folded })
+        rooted.then_some(Self { folded })
     }
 
-    /// The keys as a volume that compares names by `rule` sees them, root first.
-    pub(crate) fn keys_in(&self, rule: NameRule) -> Cow<'_, [String]> {
-        match rule {
-            NameRule::FoldCaseAndForm => Cow::Borrowed(&self.folded),
-            NameRule::Exact => Cow::Borrowed(&self.exact),
-            NameRule::FoldCase | NameRule::FoldForm => {
-                Cow::Owned(self.exact.iter().map(|k| rule.fold(k)).collect())
-            }
-        }
-    }
-
-    /// The keys with case and form folded, root first.
+    /// The keys, root first.
     pub(crate) fn keys(&self) -> &[String] {
         &self.folded
     }
 
-    /// Whether this is `base` or a place inside it, comparing names as a volume with `rule` does.
-    pub(crate) fn starts_with_in(&self, base: &PathKey, rule: NameRule) -> bool {
-        let (me, base) = (self.keys_in(rule), base.keys_in(rule));
+    /// Whether this is, or may be, `base` or a place inside it.
+    pub(crate) fn starts_with(&self, base: &PathKey) -> bool {
+        let (me, base) = (&self.folded, &base.folded);
         me.len() >= base.len() && me[..base.len()] == base[..]
     }
 
-    /// Whether this is a place strictly inside `base`, comparing names as a volume with `rule` does.
-    pub(crate) fn is_inside_in(&self, base: &PathKey, rule: NameRule) -> bool {
-        self.folded.len() > base.folded.len() && self.starts_with_in(base, rule)
-    }
-
-    /// Whether this is, or may be, `base` or a place inside it: case and form folded, the comparison deny entries
-    /// use.
-    pub(crate) fn starts_with(&self, base: &PathKey) -> bool {
-        self.starts_with_in(base, NameRule::FoldCaseAndForm)
-    }
-
-    /// Whether this is, or may be, a place strictly inside `base` (case and form folded).
+    /// Whether this is, or may be, a place strictly inside `base`.
     pub(crate) fn is_inside(&self, base: &PathKey) -> bool {
-        self.is_inside_in(base, NameRule::FoldCaseAndForm)
+        self.folded.len() > base.folded.len() && self.starts_with(base)
     }
 
-    /// The key of a place directly inside this one, whose name has the key `name` under every rule.
+    /// The key of a place directly inside this one, whose name has the key `name`.
     pub(crate) fn child(&self, name: &str) -> Self {
-        let mut exact = self.exact.clone();
         let mut folded = self.folded.clone();
-        exact.push(name.to_owned());
         folded.push(name.to_owned());
-        Self { exact, folded }
+        Self { folded }
     }
 
-    /// The folded names after the root, last first.
+    /// The names after the root, last first.
     pub(crate) fn names_from_last(&self) -> impl Iterator<Item = &str> {
         self.folded
             .iter()
@@ -171,28 +104,22 @@ impl PathKey {
     }
 }
 
-/// A file or folder name as a key with case and Unicode form folded (the widest match), and on Windows without the
-/// trailing dots and spaces Win32 ignores.
+/// A file or folder name as a key: in NFC, lowercased, and on Windows without the trailing dots and spaces Win32
+/// ignores.
 pub(crate) fn name_key(name: &OsStr) -> String {
-    name_key_in(name, NameRule::FoldCaseAndForm)
-}
-
-/// A file or folder name as a key for a volume that compares names by `rule`, on Windows without the trailing dots
-/// and spaces Win32 ignores.
-pub(crate) fn name_key_in(name: &OsStr, rule: NameRule) -> String {
     let text = name.to_string_lossy();
     let text = if cfg!(windows) {
         text.trim_end_matches(['.', ' '])
     } else {
         &text
     };
-    rule.fold(text)
+    text.nfc().collect::<String>().to_lowercase()
 }
 
-/// [`name_key_in`], or `None` for a name no place has: empty once folded, or on Windows one with a stream (`:`) or
-/// a separator in it.
-fn name_key_checked(name: &OsStr, rule: NameRule) -> Option<String> {
-    let key = name_key_in(name, rule);
+/// [`name_key`], or `None` for a name no place has: empty once folded, or on Windows one with a stream (`:`) or a
+/// separator in it.
+fn name_key_checked(name: &OsStr) -> Option<String> {
+    let key = name_key(name);
     if key.is_empty() || (cfg!(windows) && key.contains([':', '/', '\\'])) {
         return None;
     }
@@ -370,30 +297,6 @@ mod tests {
         );
     }
 
-    /// NTFS keeps the two Unicode forms of `José` apart; Apple's volumes don't, whatever they do with case.
-    #[test]
-    fn each_volume_folds_only_what_it_ignores() {
-        let nfc = OsStr::new("Jos\u{e9}");
-        let nfd = OsStr::new("JOSE\u{301}");
-        let same = |rule| name_key_in(nfc, rule) == name_key_in(nfd, rule);
-        assert!(!same(NameRule::FoldCase), "NTFS: two folders");
-        assert!(same(NameRule::FoldCaseAndForm), "APFS: one");
-        let nfd_lower = OsStr::new("Jose\u{301}");
-        assert_eq!(
-            name_key_in(nfc, NameRule::FoldForm),
-            name_key_in(nfd_lower, NameRule::FoldForm),
-            "case-sensitive APFS: one"
-        );
-        assert_ne!(
-            name_key_in(nfc, NameRule::FoldForm),
-            name_key_in(nfd, NameRule::FoldForm)
-        );
-        assert_ne!(
-            name_key_in(nfc, NameRule::Exact),
-            name_key_in(nfd_lower, NameRule::Exact)
-        );
-    }
-
     #[test]
     fn spots_unexpanded_short_names() {
         assert!(looks_short("PROGRA~1"));
@@ -467,15 +370,15 @@ mod tests {
             eprintln!("8.3 names are off on this volume; nothing to check");
             return;
         }
-        let key = PathKey::of(&short.join("mixed")).unwrap();
-        let exact = key.keys_in(NameRule::Exact);
+        let long_path = long_form(&short.join("mixed")).into_owned();
+        let names: Vec<_> = long_path.iter().collect();
         assert_eq!(
-            exact[exact.len() - 1],
+            names[names.len() - 1],
             "mixed",
             "as written, not as on disk"
         );
         assert_eq!(
-            exact[exact.len() - 2],
+            names[names.len() - 2],
             "A folder with a long name",
             "the short name, expanded"
         );

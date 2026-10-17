@@ -15,18 +15,19 @@ pub const MIB: u64 = 1024 * 1024;
 
 /// A fixture tree in a temp dir, deleted when dropped.
 pub struct Fixture {
-    dir: tempfile::TempDir,
+    _dir: tempfile::TempDir,
+    root: PathBuf,
 }
 
 impl Fixture {
     pub fn new() -> Self {
-        Self {
-            dir: tempfile::tempdir().expect("temp dir"),
-        }
+        let dir = tempfile::tempdir().expect("temp dir");
+        let root = real_path(dir.path());
+        Self { _dir: dir, root }
     }
 
     pub fn root(&self) -> &Path {
-        self.dir.path()
+        &self.root
     }
 
     pub fn path(&self, rel: &str) -> PathBuf {
@@ -84,6 +85,42 @@ pub fn write_file(p: &Path, len: u64) {
         left -= n as u64;
     }
     f.sync_all().expect("sync");
+}
+
+/// `path` as the file system has it, links resolved. A Mac's temp folder is under `/var`, a link to `/private/var`;
+/// what a scan reports is never reached through a link, so fixtures are built at the real path. (Windows' temp folder
+/// has no links on the way; its path is kept as it is, 8.3 names and all.)
+pub fn real_path(path: &Path) -> PathBuf {
+    if cfg!(windows) {
+        path.to_path_buf()
+    } else {
+        path.canonicalize().expect("canonicalize")
+    }
+}
+
+/// Makes the empty folder `dir` case-sensitive (`fsutil file setCaseSensitiveInfo`, as WSL does), or says why it
+/// can't and returns false, for tests to skip.
+#[cfg(windows)]
+pub fn make_case_sensitive(dir: &Path) -> bool {
+    let out = std::process::Command::new("fsutil")
+        .args(["file", "setCaseSensitiveInfo"])
+        .arg(dir)
+        .arg("enable")
+        .output();
+    match out {
+        Ok(out) if out.status.success() => true,
+        Ok(out) => {
+            eprintln!(
+                "skipped: this system doesn't allow case-sensitive folders: {}",
+                String::from_utf8_lossy(&out.stdout).trim()
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("skipped: fsutil didn't run: {e}");
+            false
+        }
+    }
 }
 
 /// Makes everything at and below `path` look last used `days` ago: the modified and accessed times of every file

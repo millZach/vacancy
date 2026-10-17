@@ -14,24 +14,34 @@
 //! folder only if they are called `Temp` or `tmp`) and, on Windows, the folders people make at the drive's root
 //! (`C:\Dev`; never `C:\Users`); on any other drive, the whole drive below its root.
 //!
-//! Places are compared as [`PathKey`]s, so case, `\\?\` prefixes, trailing separators and 8.3 short names don't
-//! change the answer. A path that can't be pinned to one place (relative, with `..`, with a stream, or with a short
-//! name the file system couldn't expand) is denied.
+//! **Authorization is by file-system identity** (see [`crate::fsid`]). The allowed roots and the exact and
+//! protected places are resolved once, when the Guard is built, to the identities of the folders they are and of
+//! every folder that holds them. A path is judged by its real chain: its volume root and each folder below, opened
+//! by name inside the one before and never through a link, compared by identity. Two spellings that fold to the
+//! same string (`İpek` and `i` + U+0307 + `pek`, `alex` and `Alex` in a case-sensitive folder) are two places when
+//! the file system keeps them apart. A path that can't be walked (relative, with `..`, through a link, or not
+//! there) is denied.
+//!
+//! Names are compared too, as keys that fold case and Unicode form ([`PathKey`]), but only ever to deny: a path
+//! spelled like a protected place, or with a protected name on it, is denied whatever its identity. A name never
+//! decides that a place may go.
 //!
 //! [`Guard::check`] judges a path on its own. A protected place deeper inside a folder (a Photos library somewhere in
 //! the Trash) is only visible to whoever has the folder's contents: the rules use the scan for that (see
 //! `rules::Guarded`), and the executor (ticket 04) must look again on disk.
 
+use std::collections::HashMap;
 use std::path::Path;
 
-use crate::categorize::{Env, NameRule, Platform};
+use crate::categorize::{Env, Platform};
+use crate::fsid::{self, Identity, Step, Walker};
 use crate::pathkey::{PathKey, name_key};
 
 /// Why the Guard refused a place.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Denied {
-    /// The path can't be pinned to one place: relative, with `..`, with a stream, or with a short name that could
-    /// not be expanded.
+    /// The path can't be pinned to one place: relative, with `..`, with a stream, through a link, not there, or
+    /// with a short name that could not be expanded.
     #[error("the path is not clear enough to act on")]
     Unclear,
     /// It is not inside a place Vacancy may clean.
@@ -58,33 +68,39 @@ struct Entry {
     what: String,
 }
 
+/// The name a folder's loose files are judged under: a file directly inside it, which no real name can be.
+const LOOSE_FILES: &str = "\0";
+
 /// The deny-list for one volume, built from the [`Env`]. See the module docs.
 #[derive(Clone, Debug)]
 pub struct Guard {
     platform: Platform,
-    /// How the volume compares names, for the allowed roots. Deny entries always ignore case and Unicode form.
-    names: NameRule,
-    allowed: Vec<PathKey>,
-    /// On the Windows drive that holds the home folder, the drive's root and the folder of user accounts: what is
-    /// inside the folders people make at the root (`C:\Dev`) is allowed too, but never other users' homes.
-    drive_folders: Option<(PathKey, Option<PathKey>)>,
+    /// The exact and protected places by name, to deny what is spelled like one.
     entries: Vec<Entry>,
+    /// The allowed roots' identities.
+    allowed: Vec<Identity>,
+    /// Protected places' identities: they and everything inside them are denied.
+    inside: HashMap<Identity, String>,
+    /// The identities of every exact and protected place and of every folder that holds one: none may go.
+    held: HashMap<Identity, String>,
+    /// On the Windows drive that holds the home folder, the identities of the drive's root and of the folder of
+    /// user accounts: what is inside the folders people make at the root (`C:\Dev`) is allowed too, but never
+    /// other users' homes.
+    drive_folders: Option<(Identity, Option<Identity>)>,
 }
 
 impl Guard {
-    /// The Guard for the volume at `volume_root`, with the places `env` names.
+    /// The Guard for the volume at `volume_root`, with the places `env` names. Reads the file system once, to
+    /// resolve those places' identities.
     pub fn new(env: &Env, volume_root: &Path) -> Self {
-        let mut g = Builder {
-            allowed: Vec::new(),
-            entries: Vec::new(),
+        let mut g = Builder::default();
+        let root = fsid::identity(volume_root);
+        let home_here = match fsid::resolve(&env.home) {
+            Some(home) => root.is_some_and(|r| home.iter().any(|s| s.id == r)),
+            // A home folder that can't be found is taken to be here, which allows less than another drive would.
+            None => true,
         };
         let mut drive_folders = None;
-        let root = PathKey::of(volume_root);
-        let home = PathKey::of(&env.home);
-        let home_here = match (&home, &root) {
-            (Some(home), Some(root)) => home.starts_with(root),
-            _ => false,
-        };
         if home_here {
             g.allow(&env.home);
             // A temp folder outside the home folder (`C:\Temp`) is allowed only if it is called that: `%TEMP%`
@@ -102,10 +118,10 @@ impl Guard {
                 }
             }
             if env.platform == Platform::Windows
-                && let Some(root) = &root
+                && let Some(root) = root
             {
-                let users = env.home.parent().and_then(PathKey::of);
-                drive_folders = Some((root.clone(), users));
+                let users = env.home.parent().and_then(fsid::identity);
+                drive_folders = Some((root, users));
             }
         } else {
             g.allow(volume_root);
@@ -135,20 +151,51 @@ impl Guard {
         }
         Self {
             platform: env.platform,
-            names: env.names,
-            allowed: g.allowed,
-            drive_folders,
             entries: g.entries,
+            allowed: g.allowed,
+            inside: g.inside,
+            held: g.held,
+            drive_folders,
         }
     }
 
     /// Whether Vacancy may delete the folder or file at `path`. See the module docs.
     pub fn check(&self, path: &Path) -> Result<(), Denied> {
-        self.check_key(&PathKey::of(path).ok_or(Denied::Unclear)?)
+        self.judge(&mut Walker::default(), path, false)
     }
 
-    /// [`check`](Self::check) for a path already turned into a key.
-    pub(crate) fn check_key(&self, key: &PathKey) -> Result<(), Denied> {
+    /// Whether Vacancy may delete the loose files directly inside the folder at `dir` (not the folder itself, which
+    /// may be a place that must stay, like a temp folder).
+    pub fn check_contents(&self, dir: &Path) -> Result<(), Denied> {
+        self.judge(&mut Walker::default(), dir, true)
+    }
+
+    /// [`check`](Self::check), or with `contents` [`check_contents`](Self::check_contents), walking with `walker`,
+    /// which keeps recently opened folders open for the next path in them.
+    pub(crate) fn check_with(
+        &self,
+        walker: &mut Walker,
+        path: &Path,
+        contents: bool,
+    ) -> Result<(), Denied> {
+        self.judge(walker, path, contents)
+    }
+
+    fn judge(&self, walker: &mut Walker, path: &Path, contents: bool) -> Result<(), Denied> {
+        let key = PathKey::of(path).ok_or(Denied::Unclear)?;
+        let key = if contents {
+            key.child(LOOSE_FILES)
+        } else {
+            key
+        };
+        self.deny_by_name(&key)?;
+        let chain = walker.chain(path).ok_or(Denied::Unclear)?;
+        self.judge_chain(&chain, contents)
+    }
+
+    /// Denies what is spelled like an exact or protected place, holds one, or (protected) is inside one, and what
+    /// has a protected name on its path. Names only ever deny.
+    fn deny_by_name(&self, key: &PathKey) -> Result<(), Denied> {
         if key.has_short_alias() {
             return Err(Denied::Unclear);
         }
@@ -163,19 +210,52 @@ impl Guard {
         if let Some(what) = key.names_from_last().find_map(|n| self.protected_name(n)) {
             return Err(Denied::Protected(what.to_owned()));
         }
-        let in_drive_folder = self.drive_folders.as_ref().is_some_and(|(root, users)| {
-            let n = root.keys().len();
-            key.keys().len() >= n + 2
-                && key.starts_with_in(root, self.names)
-                && users.as_ref().is_none_or(|u| !key.starts_with(u))
-                && !TOOLS_AT_ROOT.contains(&key.keys()[n].as_str())
-                && !key.keys()[n].starts_with("python")
-                && !key.keys()[n].starts_with("ruby")
-        });
-        if !in_drive_folder && !self.allowed.iter().any(|a| key.is_inside_in(a, self.names)) {
-            return Err(Denied::OutsideAllowedRoots);
-        }
         Ok(())
+    }
+
+    /// Judges a path by its chain's identities. With `contents`, the chain is a folder's and what is judged is a
+    /// loose file directly inside it.
+    fn judge_chain(&self, chain: &[Step], contents: bool) -> Result<(), Denied> {
+        let target = chain.last().ok_or(Denied::Unclear)?;
+        if !contents && let Some(what) = self.held.get(&target.id) {
+            return Err(Denied::Protected(what.clone()));
+        }
+        if let Some(what) = chain.iter().find_map(|s| self.inside.get(&s.id)) {
+            return Err(Denied::Protected(what.clone()));
+        }
+        if let Some(what) = chain[1..]
+            .iter()
+            .find_map(|s| self.protected_name(&name_key(&s.name)))
+        {
+            return Err(Denied::Protected(what.to_owned()));
+        }
+        // The folders strictly above what is judged: all of a folder's chain, for its loose files.
+        let above = if contents {
+            chain
+        } else {
+            &chain[..chain.len() - 1]
+        };
+        if above.iter().any(|s| self.allowed.contains(&s.id)) {
+            return Ok(());
+        }
+        if let Some((root, users)) = self.drive_folders
+            && let Some(at) = above.iter().position(|s| s.id == root)
+        {
+            // Inside a folder at the drive's root, not the folder itself: at least two names below the root.
+            let below = chain.len() - 1 - at + usize::from(contents);
+            if below >= 2 {
+                let first = &chain[at + 1];
+                let name = name_key(&first.name);
+                if users.is_none_or(|u| first.id != u)
+                    && !TOOLS_AT_ROOT.contains(&name.as_str())
+                    && !name.starts_with("python")
+                    && !name.starts_with("ruby")
+                {
+                    return Ok(());
+                }
+            }
+        }
+        Err(Denied::OutsideAllowedRoots)
     }
 
     /// What a folder of this name is, if the name alone makes it protected wherever it is. `name` is a key (see
@@ -212,15 +292,18 @@ impl Guard {
     }
 }
 
+#[derive(Default)]
 struct Builder {
-    allowed: Vec<PathKey>,
     entries: Vec<Entry>,
+    allowed: Vec<Identity>,
+    inside: HashMap<Identity, String>,
+    held: HashMap<Identity, String>,
 }
 
 impl Builder {
     fn allow(&mut self, path: &Path) {
-        if let Some(key) = PathKey::of(path) {
-            self.allowed.push(key);
+        if let Some(id) = fsid::identity(path) {
+            self.allowed.push(id);
         }
     }
 
@@ -241,6 +324,23 @@ impl Builder {
                 reach,
                 what: what.to_owned(),
             });
+        }
+        // A place that isn't there has no identity: nothing on disk is it, inside it or holding it. Its name still
+        // denies.
+        let Some(chain) = fsid::resolve(path) else {
+            return;
+        };
+        let Some((place, holders)) = chain.split_last() else {
+            return;
+        };
+        self.held.insert(place.id, what.to_owned());
+        if reach == Reach::Subtree {
+            self.inside
+                .entry(place.id)
+                .or_insert_with(|| what.to_owned());
+        }
+        for h in holders {
+            self.held.entry(h.id).or_insert_with(|| what.to_owned());
         }
     }
 }
@@ -411,28 +511,71 @@ mod tests {
     use super::*;
     use crate::categorize::CloudRoot;
 
-    fn root() -> PathBuf {
-        PathBuf::from(if cfg!(windows) { r"C:\" } else { "/" })
+    /// A fixture tree standing for a drive: the Guard reads identities, so the places it judges are real folders.
+    struct Fx {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
     }
 
-    fn at(rel: &str) -> PathBuf {
-        sub(&root(), rel)
-    }
+    impl Fx {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            // A Mac's temp folder is reached through the `/var` link; a scan never reports such a path.
+            let root = if cfg!(windows) {
+                dir.path().to_path_buf()
+            } else {
+                dir.path().canonicalize().unwrap()
+            };
+            Self { _dir: dir, root }
+        }
 
-    fn win() -> (Env, Guard) {
-        let mut env = Env::windows(&root(), "me");
-        env.cloud.push(CloudRoot {
-            provider: "OneDrive".into(),
-            path: at("Users/me/OneDrive"),
-        });
-        let guard = Guard::new(&env, &root());
-        (env, guard)
-    }
+        /// The folder at `rel` (`/`-separated) below the root, made if it isn't there.
+        fn at(&self, rel: &str) -> PathBuf {
+            let p = sub(&self.root, rel);
+            if !rel.contains("..") {
+                std::fs::create_dir_all(&p).unwrap();
+            }
+            p
+        }
 
-    fn mac() -> (Env, Guard) {
-        let env = Env::macos(&root(), "me");
-        let guard = Guard::new(&env, &root());
-        (env, guard)
+        /// The Guard for `env` on the fixture's drive, with the places `env` names made first.
+        fn guard(&self, env: &Env) -> Guard {
+            self.guard_for(env, &self.root.clone())
+        }
+
+        fn guard_for(&self, env: &Env, volume_root: &Path) -> Guard {
+            let k = &env.known;
+            let mut places = vec![
+                &env.home,
+                &env.local_app_data,
+                &env.app_data,
+                &k.downloads,
+                &k.documents,
+                &k.desktop,
+                &k.pictures,
+                &k.videos,
+                &k.music,
+            ];
+            places.extend(&env.temp);
+            places.extend(env.cloud.iter().map(|c| &c.path));
+            for p in places {
+                std::fs::create_dir_all(p).unwrap();
+            }
+            Guard::new(env, volume_root)
+        }
+
+        fn win(&self) -> Guard {
+            let mut env = Env::windows(&self.root, "me");
+            env.cloud.push(CloudRoot {
+                provider: "OneDrive".into(),
+                path: sub(&self.root, "Users/me/OneDrive"),
+            });
+            self.guard(&env)
+        }
+
+        fn mac(&self) -> Guard {
+            self.guard(&Env::macos(&self.root, "me"))
+        }
     }
 
     fn protected(r: Result<(), Denied>) -> bool {
@@ -441,38 +584,50 @@ mod tests {
 
     #[test]
     fn lets_through_what_is_inside_the_home_and_nothing_else() {
-        let (_, g) = win();
-        assert_eq!(g.check(&at("Users/me/AppData/Local/Temp/x.tmp")), Ok(()));
+        let fx = Fx::new();
+        let g = fx.win();
+        assert_eq!(g.check(&fx.at("Users/me/AppData/Local/Temp/x.tmp")), Ok(()));
         assert_eq!(
-            g.check(&at("Users/me/code/app/node_modules")),
+            g.check(&fx.at("Users/me/code/app/node_modules")),
             Ok(()),
             "a project inside the home"
         );
         assert_eq!(
-            g.check(&at("Users/other/AppData/Local/Temp/x")),
+            g.check(&fx.at("Users/other/AppData/Local/Temp/x")),
             Err(Denied::OutsideAllowedRoots),
             "another user's home"
         );
         assert_eq!(
-            g.check(&at("Tools")),
+            g.check(&fx.at("Tools")),
             Err(Denied::OutsideAllowedRoots),
             "a folder at the drive's root is never removed whole"
         );
         assert_eq!(
-            g.check(&at("Dev/app/node_modules")),
+            g.check(&fx.at("Tools/x")),
+            Err(Denied::OutsideAllowedRoots),
+            "nor is what toolchains keep there"
+        );
+        assert_eq!(
+            g.check(&fx.at("Dev/app/node_modules")),
             Ok(()),
             "but what is inside a folder people made there may be"
         );
         assert_eq!(g.check(Path::new("relative/x")), Err(Denied::Unclear));
         assert_eq!(
-            g.check(&at("Users/me/Downloads/../OneDrive/x")),
+            g.check(&fx.at("Users/me/Downloads/../OneDrive/x")),
             Err(Denied::Unclear)
+        );
+        assert_eq!(
+            g.check(&sub(&fx.root, "Users/me/code/not-there")),
+            Err(Denied::Unclear),
+            "what isn't there can't be vouched for"
         );
     }
 
     #[test]
     fn never_lets_through_a_known_place_itself_or_what_holds_it() {
-        let (_, g) = win();
+        let fx = Fx::new();
+        let g = fx.win();
         for rel in [
             "Users/me",
             "Users/me/Downloads",
@@ -481,18 +636,27 @@ mod tests {
             "Users/me/AppData/Local",
             "Users/me/AppData/Local/Temp",
         ] {
-            assert!(protected(g.check(&at(rel))), "{rel}");
+            assert!(protected(g.check(&fx.at(rel))), "{rel}");
         }
         assert!(
-            g.check(&at("Users/me/Downloads/setup.exe")).is_ok(),
+            g.check(&fx.at("Users/me/Downloads/setup.exe")).is_ok(),
             "inside Downloads is fine"
         );
-        assert!(g.check(&at("Users/me/Documents/app/node_modules")).is_ok());
+        assert!(
+            g.check(&fx.at("Users/me/Documents/app/node_modules"))
+                .is_ok()
+        );
+        assert_eq!(
+            g.check_contents(&fx.at("Users/me/AppData/Local/Temp")),
+            Ok(()),
+            "a temp folder's loose files, not the folder"
+        );
     }
 
     #[test]
     fn denies_protected_places_inside_and_around() {
-        let (_, g) = win();
+        let fx = Fx::new();
+        let g = fx.win();
         for rel in [
             "Users/me/OneDrive",
             "Users/me/OneDrive/Documents/node_modules",
@@ -503,40 +667,81 @@ mod tests {
             "Users/me/AppData/Local/Docker/wsl/disk.vhdx",
             "Users/me/AppData/Local/Microsoft/WindowsApps/python.exe",
         ] {
-            assert!(protected(g.check(&at(rel))), "{rel}");
+            assert!(protected(g.check(&fx.at(rel))), "{rel}");
         }
     }
 
     #[test]
     fn holding_a_protected_place_is_as_bad_as_being_one() {
-        let mut env = Env::windows(&root(), "me");
+        let fx = Fx::new();
+        let mut env = Env::windows(&fx.root, "me");
         env.cloud.push(CloudRoot {
             provider: "Dropbox".into(),
-            path: at("Users/me/Stuff/Dropbox"),
+            path: fx.at("Users/me/Stuff/Dropbox"),
         });
-        let g = Guard::new(&env, &root());
+        let g = fx.guard(&env);
         assert_eq!(
-            g.check(&at("Users/me/Stuff")),
+            g.check(&fx.at("Users/me/Stuff")),
             Err(Denied::Protected("Dropbox".into()))
         );
-        assert_eq!(g.check(&at("Users/me/Stuff/notes.txt")), Ok(()));
-        assert!(protected(g.check(&at("Users/me/Stuff/Dropbox/notes.txt"))));
+        assert_eq!(g.check(&fx.at("Users/me/Stuff/notes.txt")), Ok(()));
+        assert!(protected(
+            g.check(&fx.at("Users/me/Stuff/Dropbox/notes.txt"))
+        ));
+    }
+
+    /// A protected place's identity protects it under any name: here a cloud root the Env names through a link,
+    /// whose real folder is spelled nothing like it.
+    #[test]
+    fn a_protected_place_is_protected_by_identity_under_any_name() {
+        let fx = Fx::new();
+        let real = fx.at("Users/me/Sync Area/Box Files");
+        let link = sub(&fx.root, "Users/me/Box");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(windows)]
+        {
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(&real)
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "mklink /J");
+        }
+        let mut env = Env::windows(&fx.root, "me");
+        env.cloud.push(CloudRoot {
+            provider: "Box".into(),
+            path: link,
+        });
+        let g = fx.guard(&env);
+        assert_eq!(
+            g.check(&fx.at("Users/me/Sync Area/Box Files/code/node_modules")),
+            Err(Denied::Protected("Box".into()))
+        );
+        assert_eq!(
+            g.check(&fx.at("Users/me/Sync Area")),
+            Err(Denied::Protected("Box".into())),
+            "and what holds it"
+        );
     }
 
     #[test]
     fn whole_names_only() {
-        let (_, g) = win();
+        let fx = Fx::new();
+        let g = fx.win();
         assert!(
-            g.check(&at("Users/me/OneDriveX/cache")).is_ok(),
+            g.check(&fx.at("Users/me/OneDriveX/cache")).is_ok(),
             "OneDriveX is not OneDrive"
         );
-        assert!(g.check(&at("Users/me/AppDataX/thing")).is_ok());
-        assert!(protected(g.check(&at("Users/me/AppData"))));
+        assert!(g.check(&fx.at("Users/me/AppDataX/thing")).is_ok());
+        assert!(protected(g.check(&fx.at("Users/me/AppData"))));
     }
 
     #[test]
     fn protected_names_anywhere() {
-        let (_, g) = mac();
+        let fx = Fx::new();
+        let g = fx.mac();
         for rel in [
             "Users/me/.Trash/Old.photoslibrary",
             "Users/me/.Trash/Old.photoslibrary/originals/A/1.heic",
@@ -545,24 +750,26 @@ mod tests {
             "Users/me/Applications/Slack.app",
             "Users/me/code/Demo.app/Contents/node_modules",
         ] {
-            assert!(protected(g.check(&at(rel))), "{rel}");
+            assert!(protected(g.check(&fx.at(rel))), "{rel}");
         }
         assert!(
-            g.check(&at("Users/me/Library/Developer/Xcode/DerivedData/App-abc"))
+            g.check(&fx.at("Users/me/Library/Developer/Xcode/DerivedData/App-abc"))
                 .is_ok()
         );
-        let (_, g) = win();
+        let fx = Fx::new();
+        let g = fx.win();
         for rel in [
             "Users/me/Games/steamapps/common/x",
             "Users/me/WindowsApps/x",
         ] {
-            assert!(protected(g.check(&at(rel))), "{rel}");
+            assert!(protected(g.check(&fx.at(rel))), "{rel}");
         }
     }
 
     #[test]
     fn mac_places() {
-        let (_, g) = mac();
+        let fx = Fx::new();
+        let g = fx.mac();
         for rel in [
             "Users/me/Library",
             "Users/me/Library/Caches",
@@ -572,98 +779,161 @@ mod tests {
             "Users/me/Library/Containers/com.docker.docker/Data/vms",
             "Users/me/.Trash",
         ] {
-            assert!(protected(g.check(&at(rel))), "{rel}");
+            assert!(protected(g.check(&fx.at(rel))), "{rel}");
         }
         for rel in [
             "System/Library/Caches/x",
             "Applications/Xcode.app",
             "private/var/folders/x",
         ] {
-            assert!(g.check(&at(rel)).is_err(), "{rel}");
+            assert!(g.check(&fx.at(rel)).is_err(), "{rel}");
         }
         for rel in [
             "Users/me/Library/Caches/com.spotify.client",
             "Users/me/Library/Containers/com.apple.mail/Data/Library/Mail Downloads/x.pdf",
             "Users/me/.Trash/old.zip",
         ] {
-            assert_eq!(g.check(&at(rel)), Ok(()), "{rel}");
+            assert_eq!(g.check(&fx.at(rel)), Ok(()), "{rel}");
         }
     }
 
-    /// A cloud root recorded with a precomposed `é` (as Dropbox's `info.json` writes it) protects the folder a
-    /// macOS listing spells with `e` and a combining accent.
+    /// A cloud root recorded with a precomposed `é` (as Dropbox's `info.json` writes it) protects the folder spelled
+    /// with `e` and a combining accent, by name, whether or not the file system treats them as one.
     #[test]
     fn one_name_in_either_unicode_form() {
-        let mut env = Env::macos(&root(), "alex");
+        let fx = Fx::new();
+        let mut env = Env::macos(&fx.root, "alex");
         env.cloud.push(CloudRoot {
             provider: "Dropbox".into(),
-            path: at("Users/alex/Caf\u{e9} Sync"),
+            path: sub(&fx.root, "Users/alex/Caf\u{e9} Sync"),
         });
-        let g = Guard::new(&env, &root());
+        let g = fx.guard(&env);
         assert!(protected(
-            g.check(&at("Users/alex/Cafe\u{301} Sync/node_modules"))
+            g.check(&fx.at("Users/alex/Cafe\u{301} Sync/node_modules"))
         ));
         assert!(protected(
-            g.check(&at("Users/alex/Caf\u{e9} Sync/node_modules"))
+            g.check(&fx.at("Users/alex/Caf\u{e9} Sync/node_modules"))
         ));
     }
 
-    /// On a case-sensitive volume `/Users/ALEX` is another folder than `/Users/alex`: only the exact spelling is
-    /// allowed. Deny entries still match every spelling.
-    #[test]
-    fn a_case_sensitive_volume_allows_only_the_exact_spelling() {
-        let mut env = Env::macos(&root(), "alex");
-        env.names = NameRule::FoldForm;
-        let g = Guard::new(&env, &root());
-        assert_eq!(g.check(&at("Users/alex/code/app/node_modules")), Ok(()));
-        assert_eq!(
-            g.check(&at("Users/ALEX/code/app/node_modules")),
-            Err(Denied::OutsideAllowedRoots)
-        );
-        assert!(
-            protected(g.check(&at("Users/alex/library/MOBILE DOCUMENTS/x"))),
-            "deny entries ignore case"
-        );
-        // A case-insensitive volume treats both spellings as one place.
-        let g = Guard::new(&Env::macos(&root(), "alex"), &root());
-        assert_eq!(g.check(&at("Users/ALEX/code/app/node_modules")), Ok(()));
+    /// Whether the file system keeps two spellings of a folder apart: two folders made under them are two.
+    fn kept_apart(a: &Path, b: &Path) -> bool {
+        fsid::identity(a).unwrap() != fsid::identity(b).unwrap()
     }
 
-    /// NTFS keeps `Jos\u{e9}` (precomposed) and `Jose\u{301}` (with a combining accent) apart, so only the home
-    /// folder's own spelling is allowed there; APFS treats both as one name. Deny entries match both everywhere.
+    /// `İpek` and `i` + U+0307 + `pek` lowercase to the same string, but NTFS keeps them apart: two users' homes.
+    /// Only the home folder the file system means is allowed; where the file system treats them as one name, both
+    /// spellings are that folder.
     #[test]
-    fn unicode_forms_are_one_name_only_on_apple_volumes() {
-        let g = Guard::new(&Env::windows(&root(), "Jos\u{e9}"), &root());
-        assert_eq!(g.check(&at("Users/Jos\u{e9}/code/node_modules")), Ok(()));
+    fn turkish_dotted_i_names_another_home_where_the_file_system_says_so() {
+        let fx = Fx::new();
+        let env = Env::windows(&fx.root, "\u{130}pek");
+        let g = fx.guard(&env);
+        let mine = fx.at("Users/\u{130}pek/code/app/node_modules");
+        let other = fx.at("Users/i\u{307}pek/code/app/node_modules");
+        assert_eq!(g.check(&mine), Ok(()));
+        let apart = kept_apart(
+            &sub(&fx.root, "Users/\u{130}pek"),
+            &sub(&fx.root, "Users/i\u{307}pek"),
+        );
         assert_eq!(
-            g.check(&at("Users/Jose\u{301}/code/node_modules")),
-            Err(Denied::OutsideAllowedRoots)
+            g.check(&other),
+            if apart {
+                Err(Denied::OutsideAllowedRoots)
+            } else {
+                Ok(())
+            },
+            "kept apart: {apart}"
         );
+        if cfg!(windows) {
+            assert!(apart, "NTFS keeps them apart");
+        }
+    }
+
+    /// `Jos` + `é` and `Jose` + U+0301: NTFS keeps the two Unicode forms apart, APFS doesn't. The Guard agrees with
+    /// whichever file system it is on.
+    #[test]
+    fn unicode_forms_name_another_home_where_the_file_system_says_so() {
+        let fx = Fx::new();
+        let g = fx.guard(&Env::windows(&fx.root, "Jos\u{e9}"));
+        let other = fx.at("Users/Jose\u{301}/code/node_modules");
+        let apart = kept_apart(
+            &sub(&fx.root, "Users/Jos\u{e9}"),
+            &sub(&fx.root, "Users/Jose\u{301}"),
+        );
+        assert_eq!(
+            g.check(&other),
+            if apart {
+                Err(Denied::OutsideAllowedRoots)
+            } else {
+                Ok(())
+            },
+            "kept apart: {apart}"
+        );
+        if cfg!(windows) {
+            assert!(apart, "NTFS keeps them apart");
+        }
+    }
+
+    /// Windows can make one folder case-sensitive (`fsutil file setCaseSensitiveInfo`, as WSL does): `alex` and
+    /// `Alex` in it are two users' homes. Skipped where the system doesn't allow it.
+    #[cfg(windows)]
+    #[test]
+    fn a_case_sensitive_folder_on_windows_keeps_homes_apart() {
+        let fx = Fx::new();
+        let users = fx.at("Users");
+        if !make_case_sensitive(&users) {
+            return;
+        }
+        let mine = fx.at("Users/alex/code/app/node_modules");
+        let other = fx.at("Users/Alex/code/app/node_modules");
         assert!(
-            protected(g.check(&at("Users/Jose\u{301}/AppData/Local/Programs/x"))),
-            "deny entries ignore the form"
+            kept_apart(&sub(&fx.root, "Users/alex"), &sub(&fx.root, "Users/Alex")),
+            "two folders"
         );
-        let g = Guard::new(&Env::macos(&root(), "Jos\u{e9}"), &root());
-        assert_eq!(g.check(&at("Users/Jose\u{301}/code/node_modules")), Ok(()));
+        let g = fx.guard(&Env::windows(&fx.root, "alex"));
+        assert_eq!(g.check(&mine), Ok(()));
+        assert_eq!(g.check(&other), Err(Denied::OutsideAllowedRoots));
+    }
+
+    /// Makes the empty folder `dir` case-sensitive, or says why not and returns false.
+    #[cfg(windows)]
+    pub(crate) fn make_case_sensitive(dir: &Path) -> bool {
+        let out = std::process::Command::new("fsutil")
+            .args(["file", "setCaseSensitiveInfo"])
+            .arg(dir)
+            .arg("enable")
+            .output();
+        match out {
+            Ok(out) if out.status.success() => true,
+            Ok(out) => {
+                eprintln!(
+                    "skipped: this system doesn't allow case-sensitive folders: {}",
+                    String::from_utf8_lossy(&out.stdout).trim()
+                );
+                false
+            }
+            Err(e) => {
+                eprintln!("skipped: fsutil didn't run: {e}");
+                false
+            }
+        }
     }
 
     #[test]
     fn another_drive_is_allowed_below_its_root_but_not_its_system_folders() {
-        let env = Env::windows(&root(), "me");
-        let d = if cfg!(windows) {
-            PathBuf::from(r"D:\")
-        } else {
-            PathBuf::from("/Volumes/Data")
-        };
-        let g = Guard::new(&env, &d);
-        assert_eq!(g.check(&d.join("code").join("node_modules")), Ok(()));
+        let fx = Fx::new();
+        let env = Env::windows(&fx.root, "me");
+        let d = fx.at("Volumes/Data");
+        let g = fx.guard_for(&env, &d);
+        assert_eq!(g.check(&fx.at("Volumes/Data/code/node_modules")), Ok(()));
         assert!(protected(g.check(&d)), "the drive itself");
         assert!(protected(
-            g.check(&d.join("System Volume Information").join("x"))
+            g.check(&fx.at("Volumes/Data/System Volume Information/x"))
         ));
-        assert!(protected(g.check(&d.join("Program Files").join("x"))));
+        assert!(protected(g.check(&fx.at("Volumes/Data/Program Files/x"))));
         assert_eq!(
-            g.check(&at("Users/me/AppData/Local/Temp/x")),
+            g.check(&fx.at("Users/me/AppData/Local/Temp/x")),
             Err(Denied::OutsideAllowedRoots),
             "C:'s places are not D:'s"
         );
@@ -672,19 +942,22 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_spellings_dont_get_past() {
-        let (_, g) = win();
+        let fx = Fx::new();
+        let g = fx.win();
+        fx.at("Users/me/OneDrive/x");
+        let r = fx.root.display().to_string();
         for p in [
-            r"\\?\C:\Users\me\OneDrive\x",
-            r"c:\users\ME\onedrive\x",
-            r"C:\Users\me\OneDrive.\x",
-            r"C:\Users\me\OneDrive \x",
-            r"C:/Users/me/OneDrive/x",
-            r"\\.\C:\Users\me\OneDrive\x",
+            format!(r"\\?\{r}\Users\me\OneDrive\x"),
+            format!(r"{}\users\ME\onedrive\x", r.to_lowercase()),
+            format!(r"{r}\Users\me\OneDrive.\x"),
+            format!(r"{r}\Users\me\OneDrive \x"),
+            format!("{}/Users/me/OneDrive/x", r.replace('\\', "/")),
+            format!(r"\\.\{r}\Users\me\OneDrive\x"),
         ] {
-            assert!(protected(g.check(Path::new(p))), "{p}");
+            assert!(protected(g.check(Path::new(&p))), "{p}");
         }
         assert_eq!(
-            g.check(Path::new(r"C:\Users\me\ONEDRI~1\x")),
+            g.check(Path::new(&format!(r"{r}\Users\me\NOTHER~1\x"))),
             Err(Denied::Unclear),
             "a short name that names nothing on this disk"
         );

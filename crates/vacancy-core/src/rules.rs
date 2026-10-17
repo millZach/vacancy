@@ -13,9 +13,10 @@
 //! Sizes and counts come from the scan; nothing is estimated. Nothing here changes the disk; the only questions
 //! asked of it are the long forms of 8.3 short names.
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -23,8 +24,9 @@ use ts_rs::TS;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::categorize::{CHECK_EVERY, Categories, CategoryId, Env, ItemRef, is_library_folder};
+use crate::fsid::{self, Identity};
 use crate::guard::Guard;
-use crate::pathkey::{NameRule, PathKey, name_key, name_key_in};
+use crate::pathkey::{PathKey, name_key};
 use crate::snapshot::{DirFlags, DirId, FileId, Markers, Snapshot, UnixTime};
 use crate::text::group_digits;
 
@@ -245,7 +247,7 @@ pub(crate) fn propose_until(
     let mut engine = Engine {
         snap: snapshot,
         keep,
-        names: env.names,
+        identities: RefCell::new(HashMap::new()),
         guarded,
         personal,
         claims: Claims::new(snapshot.dir_count()),
@@ -320,6 +322,8 @@ struct Guarded<'a> {
     holds: Vec<bool>,
     /// The folder holds a macOS app bundle somewhere below it: only the DerivedData rule may take it whole.
     holds_app: Vec<bool>,
+    /// Walks candidates' chains for the Guard, keeping the folders they are in open for their siblings.
+    walker: RefCell<fsid::Walker>,
 }
 
 impl<'a> Guarded<'a> {
@@ -372,7 +376,15 @@ impl<'a> Guarded<'a> {
             under,
             holds,
             holds_app,
+            walker: RefCell::new(fsid::Walker::default()),
         })
+    }
+
+    /// Whether the Guard lets `path` go (with `contents`, the loose files directly inside it), judged by identity.
+    fn passes(&self, path: &Path, contents: bool) -> bool {
+        self.guard
+            .check_with(&mut self.walker.borrow_mut(), path, contents)
+            .is_ok()
     }
 
     /// Whether `at` may be deleted: the Guard allows its path, and nothing the scan saw in or around it is
@@ -388,27 +400,20 @@ impl<'a> Guarded<'a> {
                     && !self.under[d.index()]
                     && !self.holds[d.index()]
                     && (takes_built_apps || !self.holds_app[d.index()])
-                    && PathKey::of(&snap.path(d)).is_some_and(|k| self.guard.check_key(&k).is_ok())
+                    && self.passes(&snap.path(d), false)
             }
             ItemRef::File(f) => {
                 let parent = snap.file(f).parent;
-                !self.under[parent.index()]
-                    && PathKey::of(&snap.file_path(f))
-                        .is_some_and(|k| self.guard.check_key(&k).is_ok())
+                !self.under[parent.index()] && self.passes(&snap.file_path(f), false)
             }
             ItemRef::FilesIn(d) => {
-                // Judged as one file directly in the folder: the folder itself may be a place that must stay.
-                !self.under[d.index()]
-                    && PathKey::of(&snap.path(d))
-                        .is_some_and(|k| self.guard.check_key(&k.child(LOOSE_FILES)).is_ok())
+                // Judged as files directly in the folder: the folder itself may be a place that must stay.
+                !self.under[d.index()] && self.passes(&snap.path(d), true)
             }
             ItemRef::Proposal(_) => false,
         }
     }
 }
-
-/// The key a folder's loose files are judged under: a NUL, which no real name holds.
-const LOOSE_FILES: &str = "\0";
 
 /// Which places rules have taken, so no two proposals overlap.
 struct Claims {
@@ -483,8 +488,8 @@ struct Engine<'a> {
     /// Per folder: it is, or holds, data that isn't regenerable although it sits among caches (see
     /// [`KEPT_DATA`]).
     keep: Vec<bool>,
-    /// How the volume compares names: places are found only in the spellings the volume treats as theirs.
-    names: NameRule,
+    /// Configured places' identities, resolved once each: finding a place by its spelling is confirmed by identity.
+    identities: RefCell<HashMap<PathBuf, Option<Identity>>>,
     guarded: Guarded<'a>,
     /// Places no rule sweeps whole, nor anything holding them (see [`Engine::holds_personal`]), each marked if it
     /// is the Downloads folder.
@@ -936,30 +941,28 @@ impl Engine<'_> {
         Some(())
     }
 
-    /// The folder at `path`, compared as keys (any case, any spelling), if the scan has it.
+    /// The folder the scan has at the configured place `path`. Folders spelled like it are candidates; the one that
+    /// is it by identity is the answer, so a folder that only folds to the same name (`temp` beside `Temp` in a
+    /// case-sensitive folder, another user's `İpek`) is never taken for it.
     fn locate(&self, path: &Path) -> Option<DirId> {
-        let key = PathKey::of(path)?;
-        let names = self.names;
-        self.snap.roots().iter().find_map(|root| {
-            let root_key = PathKey::of(&root.shown)?;
-            if !key.starts_with_in(&root_key, names) {
-                return None;
-            }
-            let mut at = root.dir;
-            for name in &key.keys_in(names)[root_key.keys().len()..] {
-                at = self
-                    .snap
-                    .children(at)
-                    .find(|&c| name_key_in(self.snap.name(c), names) == *name)?;
-            }
-            Some(at)
+        let want = self.identity_of_place(path)?;
+        self.spelled_like(path).into_iter().find(|&d| {
+            fsid::chain(&self.snap.path(d)).and_then(|c| c.last().map(|s| s.id)) == Some(want)
         })
     }
 
-    /// The folders a place pattern names: any name after the root may be `*` (any folder) or `*.ext` (any folder
-    /// whose name ends so). Each comes with the folder the first `*` stood in, where its owners are named.
-    fn locate_pattern(&self, pattern: &Path) -> Vec<(DirId, Option<DirId>)> {
-        let Some(key) = PathKey::of(pattern) else {
+    /// The identity of the configured place `path`, resolved once.
+    fn identity_of_place(&self, path: &Path) -> Option<Identity> {
+        *self
+            .identities
+            .borrow_mut()
+            .entry(path.to_path_buf())
+            .or_insert_with(|| fsid::identity(path))
+    }
+
+    /// The scan's folders whose path folds to the same key as `path`.
+    fn spelled_like(&self, path: &Path) -> Vec<DirId> {
+        let Some(key) = PathKey::of(path) else {
             return Vec::new();
         };
         let mut out = Vec::new();
@@ -967,25 +970,54 @@ impl Engine<'_> {
             let Some(root_key) = PathKey::of(&root.shown) else {
                 continue;
             };
-            if !key.starts_with_in(&root_key, self.names) {
+            if !key.starts_with(&root_key) {
                 continue;
             }
-            let mut level: Vec<(DirId, Option<DirId>)> = vec![(root.dir, None)];
-            for k in &key.keys_in(self.names)[root_key.keys().len()..] {
-                let mut next = Vec::new();
-                for (d, owners) in level {
-                    for c in self.snap.children(d) {
-                        if glob(k, &name_key_in(self.snap.name(c), self.names)) {
-                            let owners = owners.or(k.starts_with('*').then_some(d));
-                            next.push((c, owners));
-                        }
-                    }
-                }
-                level = next;
+            let mut level = vec![root.dir];
+            for name in &key.keys()[root_key.keys().len()..] {
+                level = level
+                    .into_iter()
+                    .flat_map(|d| self.snap.children(d))
+                    .filter(|&c| name_key(self.snap.name(c)) == *name)
+                    .collect();
             }
             out.extend(level);
         }
         out
+    }
+
+    /// The folders a place pattern names: any name after the root may be `*` (any folder) or `*.ext` (any folder
+    /// whose name ends so). Each comes with the folder the first `*` stood in, where its owners are named.
+    ///
+    /// The part before the first `*` is a configured place, found by identity like any other (see
+    /// [`locate`](Self::locate)); the names after it are patterns.
+    fn locate_pattern(&self, pattern: &Path) -> Vec<(DirId, Option<DirId>)> {
+        let fixed: std::path::PathBuf = pattern
+            .components()
+            .take_while(|c| !c.as_os_str().as_encoded_bytes().starts_with(b"*"))
+            .collect();
+        let Some(base) = self.locate(&fixed) else {
+            return Vec::new();
+        };
+        let rest: Vec<String> = pattern
+            .components()
+            .skip(fixed.components().count())
+            .map(|c| name_key(c.as_os_str()))
+            .collect();
+        let mut level: Vec<(DirId, Option<DirId>)> = vec![(base, None)];
+        for k in &rest {
+            let mut next = Vec::new();
+            for (d, owners) in level {
+                for c in self.snap.children(d) {
+                    if glob(k, &name_key(self.snap.name(c))) {
+                        let owners = owners.or(k.starts_with('*').then_some(d));
+                        next.push((c, owners));
+                    }
+                }
+            }
+            level = next;
+        }
+        level
     }
 
     /// Folders below `base` named one of `names`, not looking inside a match, code libraries or `prune`.

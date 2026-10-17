@@ -17,13 +17,12 @@ use std::path::Path;
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::pathkey::{PathKey, name_key_in};
+use crate::pathkey::{PathKey, name_key};
 use crate::snapshot::{DirFlags, DirId, FileId, Markers, RootKind, Snapshot, UnixTime};
 
 mod catalog;
 mod env;
 
-pub use crate::pathkey::NameRule;
 pub use env::{CloudRoot, Env, KnownFolders, Platform};
 
 /// The categories, in the order the map lists them when sizes tie.
@@ -393,7 +392,7 @@ pub(crate) fn categorize_until(
     stop: &dyn Fn() -> bool,
 ) -> Option<Categories> {
     let rules = catalog::rules(env);
-    let trie = Trie::build(&rules, env.names);
+    let trie = Trie::build(&rules);
     let n = snapshot.dir_count();
     let mut node = vec![
         Node {
@@ -807,7 +806,8 @@ fn ends_with_ignore_case(name: &str, suffix: &str) -> bool {
         && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
-/// Known locations, keyed by path components compared as the volume compares names.
+/// Known locations, keyed by path components ([`PathKey`]s). They label folders; they authorize nothing (the Guard
+/// goes by identity), so a key that matches a folder of another spelling only labels it.
 struct Trie {
     nodes: Vec<TrieNode>,
 }
@@ -819,7 +819,7 @@ struct TrieNode {
 }
 
 impl Trie {
-    fn build(rules: &[catalog::Rule], names: NameRule) -> TrieWithRules<'_> {
+    fn build(rules: &[catalog::Rule]) -> TrieWithRules<'_> {
         let mut trie = Trie {
             nodes: vec![TrieNode::default()],
         };
@@ -829,7 +829,7 @@ impl Trie {
                 continue;
             };
             let mut at = 0;
-            for key in key.keys_in(names).iter().cloned() {
+            for key in key.keys().iter().cloned() {
                 at = match trie.nodes[at].children.get(&key) {
                     Some(&next) => next,
                     None => {
@@ -843,21 +843,19 @@ impl Trie {
             // The first rule for a place wins; catalogs list the specific before the general.
             trie.nodes[at].rule.get_or_insert(i);
         }
-        TrieWithRules { trie, rules, names }
+        TrieWithRules { trie, rules }
     }
 }
 
 struct TrieWithRules<'r> {
     trie: Trie,
     rules: &'r [catalog::Rule],
-    /// How the volume compares names: known places match only the spellings the volume treats as theirs.
-    names: NameRule,
 }
 
 impl TrieWithRules<'_> {
     fn find(&self, path: &Path) -> Option<usize> {
         let mut at = 0;
-        for key in PathKey::of(path)?.keys_in(self.names).iter() {
+        for key in PathKey::of(path)?.keys() {
             at = *self.trie.nodes[at].children.get(key)?;
         }
         Some(at)
@@ -868,7 +866,7 @@ impl TrieWithRules<'_> {
         if node.children.is_empty() {
             return None;
         }
-        node.children.get(&name_key_in(name, self.names)).copied()
+        node.children.get(&name_key(name)).copied()
     }
 
     fn has_children(&self, at: usize) -> bool {

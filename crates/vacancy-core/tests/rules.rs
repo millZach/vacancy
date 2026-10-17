@@ -10,9 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use support::{Fixture, KIB, MIB, age};
 use vacancy_core::{
-    CategoryId, CloudRoot, DriveKind, Env, ItemKind, ItemRef, Moment, NameRule, Proposal,
-    ProposalAction, ProposalSource, Proposals, Risk, Snapshot, VolumeInfo, categorize, overview,
-    propose,
+    CategoryId, CloudRoot, DriveKind, Env, ItemKind, ItemRef, Moment, Proposal, ProposalAction,
+    ProposalSource, Proposals, Risk, Snapshot, VolumeInfo, categorize, overview, propose,
 };
 
 fn now() -> i64 {
@@ -1225,39 +1224,69 @@ mod guard {
         );
     }
 
-    /// On a case-sensitive volume a folder spelled differently from the home folder is someone else's: the scan
-    /// listing `Users/Alex` is not the home `Users/alex`. (The test volume itself ignores case, so one folder stands
-    /// for both spellings; what matters is how the rules compare them.)
+    /// A folder spelled like the home folder is the home folder only if the file system says so. `İpek` and
+    /// `i` + U+0307 + `pek` lowercase alike, and `Jos` + `é` and `Jose` + U+0301 are one string in NFC; NTFS keeps
+    /// both pairs apart, APFS treats the second as one name. With only the other spelling on disk, its idle project
+    /// is proposed exactly when the file system takes it for the home folder.
     #[test]
-    fn a_case_sensitive_volume_matches_only_exact_spellings() {
-        let fx = Fixture::new();
-        bait(&fx, "Users/Alex/code");
-        let mut env = mac(&fx);
-        env.names = NameRule::FoldForm;
-        let (snap, proposals) = run(&fx, &env, &moment(&[]));
-        assert_eq!(all_targets(&fx, &snap, &proposals), Vec::<String>::new());
-        // The same tree on a case-insensitive volume is the home folder.
-        let (snap, proposals) = run(&fx, &mac(&fx), &moment(&[]));
-        assert_eq!(
-            all_targets(&fx, &snap, &proposals),
-            vec!["Users/Alex/code/proj/node_modules".to_owned()]
-        );
+    fn a_home_spelled_another_way_is_the_home_only_if_the_file_system_says_so() {
+        for (home, other) in [("\u{130}pek", "i\u{307}pek"), ("Jos\u{e9}", "Jose\u{301}")] {
+            for windows in [true, false] {
+                let fx = Fixture::new();
+                bait(&fx, &format!("Users/{other}/code"));
+                let same = fx.path(&format!("Users/{home}")).is_dir();
+                let env = if windows {
+                    Env::windows(fx.root(), home)
+                } else {
+                    Env::macos(fx.root(), home)
+                };
+                let (snap, proposals) = run(&fx, &env, &moment(&[]));
+                let want = if same {
+                    vec![format!("Users/{other}/code/proj/node_modules")]
+                } else {
+                    Vec::new()
+                };
+                assert_eq!(
+                    all_targets(&fx, &snap, &proposals),
+                    want,
+                    "{home} and {other} (one folder: {same}) on {:?}",
+                    env.platform
+                );
+                if cfg!(windows) {
+                    assert!(!same, "NTFS keeps {home} and {other} apart");
+                }
+            }
+        }
     }
 
-    /// NTFS keeps `Jos\u{e9}` (precomposed) and `Jose\u{301}` (with a combining accent) apart: they are two folders,
-    /// so the second is not the home folder spelled the first way. APFS treats both as one name.
+    /// In a case-sensitive folder (Windows can make one, as WSL does) `temp` is not the configured `Temp`: the temp
+    /// rule finds its place by identity, so a `temp` of the user's own beside it is never emptied, whether or not
+    /// `Temp` is there too. Skipped where the system doesn't allow case-sensitive folders.
+    #[cfg(windows)]
     #[test]
-    fn only_apple_volumes_treat_both_unicode_forms_as_one_name() {
+    fn a_case_sensitive_folder_on_windows() {
         let fx = Fixture::new();
-        bait(&fx, "Users/Jose\u{301}/code");
-        let env = Env::windows(fx.root(), "Jos\u{e9}");
-        let (snap, proposals) = run(&fx, &env, &moment(&[]));
-        assert_eq!(all_targets(&fx, &snap, &proposals), Vec::<String>::new());
-        let env = Env::macos(fx.root(), "Jos\u{e9}");
+        let local = fx.dir("Users/alex/AppData/Local");
+        if !support::make_case_sensitive(&local) {
+            return;
+        }
+        fx.file("Users/alex/AppData/Local/temp/mine.tmp", MIB);
+        age(&fx.path("Users/alex/AppData/Local/temp"), 3);
+        let env = win(&fx);
         let (snap, proposals) = run(&fx, &env, &moment(&[]));
         assert_eq!(
-            all_targets(&fx, &snap, &proposals),
-            vec!["Users/Jose\u{301}/code/proj/node_modules".to_owned()]
+            targets(&fx, &snap, &proposals, "w-temp"),
+            Vec::<String>::new(),
+            "only `temp` is there, and it isn't `Temp`"
+        );
+        fx.file("Users/alex/AppData/Local/Temp/old.tmp", MIB);
+        age(&fx.path("Users/alex/AppData/Local/Temp"), 3);
+        assert_ne!(std::fs::read_dir(&local).unwrap().count(), 1, "two folders");
+        let (snap, proposals) = run(&fx, &env, &moment(&[]));
+        assert_eq!(
+            targets(&fx, &snap, &proposals, "w-temp"),
+            vec!["Users/alex/AppData/Local/Temp/old.tmp".to_owned()],
+            "`Temp`, never `temp`"
         );
     }
 
