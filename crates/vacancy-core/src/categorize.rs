@@ -26,7 +26,9 @@ mod env;
 pub use env::{CloudRoot, Env, KnownFolders, Platform};
 
 /// The categories, in the order the map lists them when sizes tie.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, TS)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, serde::Deserialize, TS,
+)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub enum CategoryId {

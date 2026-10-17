@@ -1,5 +1,16 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
-import type { Bridge, FullDiskAccess, MapFolder, Platform, ScanOutcome, ScanUpdate, VolumeInfo } from './types';
+import type {
+  Bridge,
+  FullDiskAccess,
+  MapFolder,
+  PlanSummary,
+  Platform,
+  RunEvent,
+  RunReport,
+  ScanOutcome,
+  ScanUpdate,
+  VolumeInfo,
+} from './types';
 
 /** The real bridge: Tauri commands registered in `src-tauri/src/lib.rs`. Keep the command names in step with it. */
 export function createTauriBridge(): Bridge {
@@ -17,6 +28,14 @@ export function createTauriBridge(): Bridge {
     },
     cancelScan: () => invoke<undefined>('cancel_scan'),
     browse: (mountPoint, id) => invoke<MapFolder>('browse', { mountPoint, id }),
+    buildPlan: (mountPoint, ids) => invoke<PlanSummary>('build_plan', { mountPoint, ids }),
+    runPlan: (mountPoint, planId, onEvent) => {
+      const onEventChannel = new Channel<RunEvent>();
+      onEventChannel.onmessage = onEvent;
+      return invoke<RunReport>('run_plan', { mountPoint, planId, onEvent: onEventChannel });
+    },
+    cancelRun: () => invoke<undefined>('cancel_run'),
+    listRuns: () => invoke<RunReport[]>('list_runs'),
   };
 }
 

@@ -167,6 +167,7 @@ pub(crate) fn scan_inner(
     hooks: &Hooks<'_>,
 ) -> Result<Snapshot, ScanError> {
     let started = Instant::now();
+    let started_at = SystemTime::now();
     let fail = |source| ScanError::Root {
         path: volume.to_path_buf(),
         source,
@@ -183,7 +184,7 @@ pub(crate) fn scan_inner(
         .build()
         .map_err(|e| fail(io::Error::other(e)))?;
 
-    let mut builder = Builder::new(options.keep_files_from);
+    let mut builder = Builder::new(options.keep_files_from, started_at);
     let tasks: Vec<Task> = roots
         .into_iter()
         .map(|root| Task {
@@ -337,8 +338,8 @@ pub(crate) struct Entry<'n> {
     pub(crate) accessed: UnixTime,
     /// Identifies the file across its hard links, when it may have more than one name.
     pub(crate) link_key: Option<LinkKey>,
-    /// For folders: what identifies this folder (Windows file id; Unix device and inode), checked when it is
-    /// opened.
+    /// For folders and files: what identifies it (Windows file id; Unix device and inode). A folder's is checked
+    /// when it is opened; a kept file's is its fingerprint for the plan.
     pub(crate) identity: Option<u128>,
 }
 
@@ -428,7 +429,7 @@ impl Collector<'_> {
                 listing.own_files += 1;
                 listing.own_last_used = listing.own_last_used.max(used);
                 if e.allocated >= self.keep_from || is_installer(e.name) {
-                    listing.push_kept(e.name, e.allocated, used);
+                    listing.push_kept(e.name, e.allocated, used, e.identity);
                 }
                 let len = e.name.len();
                 if Markers::may_mark(len)

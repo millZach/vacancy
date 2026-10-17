@@ -68,6 +68,9 @@ pub struct Env {
     pub local_app_data: PathBuf,
     /// Windows only: `%APPDATA%` (Roaming).
     pub app_data: PathBuf,
+    /// Fixture mode (see [`crate::fixture`]): everything outside this folder is off-limits to the Guard, by
+    /// identity, whatever else allows it. It only ever narrows what Vacancy may touch. `None` normally.
+    pub confined_to: Option<PathBuf>,
 }
 
 impl Env {
@@ -90,6 +93,7 @@ impl Env {
             temp: vec![local.join("Temp")],
             cloud: Vec::new(),
             unknown_clouds: Vec::new(),
+            confined_to: None,
             system_root: root.join("Windows"),
             program_files: vec![root.join("Program Files"), root.join("Program Files (x86)")],
             program_data: root.join("ProgramData"),
@@ -121,6 +125,7 @@ impl Env {
                 path: library.join("Mobile Documents"),
             }],
             unknown_clouds: Vec::new(),
+            confined_to: None,
             system_root: root.join("System"),
             program_files: vec![root.join("Applications")],
             program_data: root.join("Library"),

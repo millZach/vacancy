@@ -12,7 +12,7 @@
 use std::ffi::OsStr;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// A folder in a [`Snapshot`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -269,6 +269,9 @@ struct FileRec {
     name: NameRef,
     bytes: u64,
     last_used: UnixTime,
+    /// What identified the file when it was listed (Windows file id; Unix device and inode), or 0 where the file
+    /// system has none.
+    identity: u128,
 }
 
 const NO_PARENT: u32 = u32::MAX;
@@ -285,6 +288,8 @@ pub struct Snapshot {
     names: Vec<u8>,
     stats: ScanStats,
     keep_files_from: u64,
+    /// When the scan began. Anything modified or changed since then is not what the scan saw.
+    started: SystemTime,
 }
 
 impl Snapshot {
@@ -378,13 +383,27 @@ impl Snapshot {
         self.dir(dir).flags
     }
 
-    /// Which marker files and folders it holds.
     /// What identified a folder when the scan listed it (Windows file id; Unix device and inode), if the file system
     /// has one. A folder found with another identity now is not the folder the scan saw.
     pub(crate) fn identity(&self, dir: DirId) -> Option<u128> {
         self.ids.get(dir.0 as usize).copied().filter(|&id| id != 0)
     }
 
+    /// What identified a kept file when the scan listed it, as [`identity`](Self::identity) does for folders.
+    pub(crate) fn file_identity(&self, file: FileId) -> Option<u128> {
+        self.files
+            .get(file.0 as usize)
+            .map(|f| f.identity)
+            .filter(|&id| id != 0)
+    }
+
+    /// When the scan began: anything in the snapshot that was modified or changed on disk since then is no longer
+    /// what the scan saw.
+    pub fn started(&self) -> SystemTime {
+        self.started
+    }
+
+    /// Which marker files and folders it holds.
     pub fn markers(&self, dir: DirId) -> Markers {
         self.dir(dir).markers
     }
@@ -507,6 +526,7 @@ pub(crate) struct PendingFile {
     name: Range<usize>,
     bytes: u64,
     last_used: UnixTime,
+    identity: Option<u128>,
 }
 
 impl Listing {
@@ -539,12 +559,19 @@ impl Listing {
         });
     }
 
-    pub(crate) fn push_kept(&mut self, name: &OsStr, bytes: u64, last_used: UnixTime) {
+    pub(crate) fn push_kept(
+        &mut self,
+        name: &OsStr,
+        bytes: u64,
+        last_used: UnixTime,
+        identity: Option<u128>,
+    ) {
         let name = self.push_name(name);
         self.kept.push(PendingFile {
             name,
             bytes,
             last_used,
+            identity,
         });
     }
 
@@ -568,7 +595,7 @@ pub(crate) struct Builder {
 }
 
 impl Builder {
-    pub(crate) fn new(keep_files_from: u64) -> Self {
+    pub(crate) fn new(keep_files_from: u64, started: SystemTime) -> Self {
         Self {
             snap: Snapshot {
                 roots: Vec::new(),
@@ -578,6 +605,7 @@ impl Builder {
                 names: Vec::new(),
                 stats: ScanStats::default(),
                 keep_files_from,
+                started,
             },
         }
     }
@@ -676,6 +704,7 @@ impl Builder {
                 name,
                 bytes: kept.bytes,
                 last_used: kept.last_used,
+                identity: kept.identity.unwrap_or(0),
             });
         }
         let child_count = listing.subdirs.len() as u32;

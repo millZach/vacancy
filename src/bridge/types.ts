@@ -1,3 +1,4 @@
+import type { CategoryFreed } from '../bindings/CategoryFreed';
 import type { CategoryId } from '../bindings/CategoryId';
 import type { CategoryTotal } from '../bindings/CategoryTotal';
 import type { DriveKind } from '../bindings/DriveKind';
@@ -6,17 +7,26 @@ import type { ItemKind } from '../bindings/ItemKind';
 import type { MapCategory } from '../bindings/MapCategory';
 import type { MapFolder } from '../bindings/MapFolder';
 import type { MapItem } from '../bindings/MapItem';
+import type { Outcome } from '../bindings/Outcome';
 import type { Overview } from '../bindings/Overview';
+import type { PlanStep } from '../bindings/PlanStep';
+import type { PlanSummary } from '../bindings/PlanSummary';
 import type { Proposal } from '../bindings/Proposal';
 import type { ProposalAction } from '../bindings/ProposalAction';
 import type { ProposalSource } from '../bindings/ProposalSource';
 import type { Risk } from '../bindings/Risk';
+import type { RunEvent } from '../bindings/RunEvent';
+import type { RunReport } from '../bindings/RunReport';
 import type { ScanOutcome } from '../bindings/ScanOutcome';
 import type { ScanSummary } from '../bindings/ScanSummary';
 import type { ScanUpdate } from '../bindings/ScanUpdate';
+import type { Skip } from '../bindings/Skip';
+import type { SkipKind } from '../bindings/SkipKind';
+import type { StepReport } from '../bindings/StepReport';
 import type { VolumeInfo } from '../bindings/VolumeInfo';
 
 export type {
+  CategoryFreed,
   CategoryId,
   CategoryTotal,
   DriveKind,
@@ -25,14 +35,22 @@ export type {
   MapCategory,
   MapFolder,
   MapItem,
+  Outcome,
   Overview,
+  PlanStep,
+  PlanSummary,
   Proposal,
   ProposalAction,
   ProposalSource,
   Risk,
+  RunEvent,
+  RunReport,
   ScanOutcome,
   ScanSummary,
   ScanUpdate,
+  Skip,
+  SkipKind,
+  StepReport,
   VolumeInfo,
 };
 
@@ -71,4 +89,22 @@ export interface Bridge {
   cancelScan(): Promise<void>;
   /** Opens a folder tile of a drive's map. */
   browse(mountPoint: string, id: string): Promise<MapFolder>;
+  /**
+   * Turns the proposals `ids` of a drive's last scan into a plan, for the confirm dialog: what it deletes, from how
+   * many places, step by step. Every place passes the Guard again; the ones it refuses (or finds changed since the
+   * scan) are left out of the numbers and listed in `refused`. Rejects if the drive has no scan to plan from (or
+   * its scan already ran a plan: scan again first).
+   */
+  buildPlan(mountPoint: string, ids: string[]): Promise<PlanSummary>;
+  /**
+   * Runs the plan `planId` of a drive: deletes permanently what it holds, re-checking every place right before it
+   * goes. `onEvent` gets the run as it happens: steps starting and finishing, progress about ten times a second,
+   * each place deleted, and each thing skipped with its reason. Resolves with the report, which is also kept in
+   * the run history. One run at a time; no scan can start while it runs.
+   */
+  runPlan(mountPoint: string, planId: string, onEvent: (event: RunEvent) => void): Promise<RunReport>;
+  /** Stops the running plan after the file being deleted. Its report says what was done and what was left. */
+  cancelRun(): Promise<void>;
+  /** The run history, newest first. */
+  listRuns(): Promise<RunReport[]>;
 }

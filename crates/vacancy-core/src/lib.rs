@@ -5,12 +5,16 @@
 //! root, and CI fails if the checked-in copy is stale.
 
 mod categorize;
+mod exec;
+pub mod fixture;
 mod fsid;
 mod guard;
 mod machine;
 mod map;
 mod pathkey;
 pub mod permissions;
+mod plan;
+pub mod report;
 mod rules;
 mod scan;
 mod snapshot;
@@ -21,12 +25,16 @@ pub use categorize::{
     Categories, Category, CategoryId, CloudRoot, Env, Item, ItemRef, KnownFolders, Platform,
     categorize,
 };
+pub use exec::{Deleted, RunEvent, RunProgress, Skipped, StepFinished, StepStarted, execute};
 pub use guard::{Denied, Guard};
 pub use machine::machine_name;
 pub use map::{
     CategoryTotal, ItemKind, MapCategory, MapError, MapFolder, MapItem, Overview, ScanOutcome,
-    ScanSummary, ScanUpdate, ScannedVolume, browse, overview, scan_for_map, scan_update,
+    ScanSummary, ScanUpdate, ScannedVolume, browse, overview, scan_for_map, scan_for_map_with,
+    scan_update,
 };
+pub use plan::{Plan, PlanError, PlanStep, PlanSummary, plan};
+pub use report::{CategoryFreed, Outcome, RunReport, Skip, SkipKind, StepReport};
 pub use rules::{
     ActionKind, Moment, Proposal, ProposalAction, ProposalSource, Proposals, Risk, propose,
 };

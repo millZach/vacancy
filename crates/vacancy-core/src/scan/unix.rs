@@ -247,7 +247,7 @@ fn entry<'n>(name: &'n OsStr, st: &libc::stat, volume: &Volume) -> Entry<'n> {
         libc::S_IFLNK => EntryKind::FileLink,
         _ => EntryKind::Other,
     };
-    let identity = (kind == EntryKind::Dir).then(|| identity(st));
+    let identity = matches!(kind, EntryKind::Dir | EntryKind::File).then(|| identity(st));
     let link_key = (kind == EntryKind::File && st.st_nlink > 1)
         .then(|| LinkKey::Id((u128::from(st.st_dev as u64) << 64) | u128::from(st.st_ino)));
     Entry {

@@ -19,6 +19,17 @@ pub(crate) struct Identity {
 }
 
 impl Identity {
+    /// The identity of a file `file` on the volume `volume` (Windows: the volume's serial number and the file id;
+    /// Unix: the device and inode numbers).
+    pub(crate) fn new(volume: u64, file: u128) -> Self {
+        Self { volume, file }
+    }
+
+    /// The volume part: Windows' volume serial number, the Unix device number.
+    pub(crate) fn volume(&self) -> u64 {
+        self.volume
+    }
+
     /// Whether this is the identity the scanner recorded as `scanned` for a folder (Windows: its file id, on a
     /// volume the scanner checked; Unix: its device and inode).
     pub(crate) fn matches_scan(&self, scanned: u128) -> bool {

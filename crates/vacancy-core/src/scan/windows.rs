@@ -390,7 +390,7 @@ impl Scratch {
             allocated = real;
         }
         let identity = match kind {
-            EntryKind::Dir | EntryKind::CloudDir => raw.file_id,
+            EntryKind::Dir | EntryKind::CloudDir | EntryKind::File => raw.file_id,
             _ => None,
         };
         let link_key = match (kind, raw.file_id) {

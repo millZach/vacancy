@@ -90,6 +90,9 @@ pub struct Guard {
     /// user accounts: what is inside the folders people make at the root (`C:\Dev`) is allowed too, but never
     /// other users' homes.
     drive_folders: Option<(Identity, Option<Identity>)>,
+    /// Fixture mode ([`Env::confined_to`]): nothing passes unless this folder is strictly above it, on its volume.
+    /// `Some(None)` when the folder can't be walked to without a link: then nothing passes at all.
+    confine: Option<Option<Identity>>,
 }
 
 impl Guard {
@@ -168,6 +171,9 @@ impl Guard {
             inside: g.inside,
             held: g.held,
             drive_folders,
+            // Resolved like an allowed root, without following links: a confining folder reached through a link
+            // confines to nothing, and nothing passes.
+            confine: env.confined_to.as_deref().map(fsid::identity),
         }
     }
 
@@ -202,6 +208,39 @@ impl Guard {
         Ok(chain)
     }
 
+    /// Judges `path` by a chain someone else walked to it just now (the executor, which keeps the chain's folders
+    /// open to delete relative to them): its name, then the chain's identities. With `contents`, what is judged is a
+    /// loose file directly inside the folder the chain ends at. The chain must be the path's: its volume root and
+    /// one step per name, each opened inside the one before without following a link.
+    pub(crate) fn judge_walked(
+        &self,
+        path: &Path,
+        chain: &[Step],
+        contents: bool,
+    ) -> Result<(), Denied> {
+        let key = PathKey::of(path).ok_or(Denied::Unclear)?;
+        let key = if contents {
+            key.child(LOOSE_FILES)
+        } else {
+            key
+        };
+        self.deny_by_name(&key)?;
+        let names = path
+            .components()
+            .filter(|c| matches!(c, std::path::Component::Normal(_)))
+            .count();
+        if chain.len() != names + 1 {
+            return Err(Denied::Unclear);
+        }
+        self.judge_chain(chain, contents)
+    }
+
+    /// What protected place a folder with this identity is or holds, if any: a folder inside something being
+    /// deleted that is one must stay, and so must everything holding it.
+    pub(crate) fn protects(&self, id: Identity) -> Option<&str> {
+        self.held.get(&id).map(String::as_str)
+    }
+
     fn judge(&self, walker: &mut Walker, path: &Path, contents: bool) -> Result<(), Denied> {
         self.check_with(walker, path, contents).map(|_| ())
     }
@@ -227,8 +266,31 @@ impl Guard {
     }
 
     /// Judges a path by its chain's identities. With `contents`, the chain is a folder's and what is judged is a
-    /// loose file directly inside it.
+    /// loose file directly inside it. In fixture mode, what passes must also be inside the fixture.
     fn judge_chain(&self, chain: &[Step], contents: bool) -> Result<(), Denied> {
+        self.judge_allowed(chain, contents)?;
+        let Some(confine) = self.confine else {
+            return Ok(());
+        };
+        let confine = confine.ok_or(Denied::OutsideAllowedRoots)?;
+        let above = if contents {
+            chain
+        } else {
+            &chain[..chain.len().saturating_sub(1)]
+        };
+        let inside = above
+            .iter()
+            .position(|s| s.id == confine)
+            .is_some_and(|at| fsid::one_volume(&chain[at..]));
+        if inside {
+            Ok(())
+        } else {
+            Err(Denied::OutsideAllowedRoots)
+        }
+    }
+
+    /// [`judge_chain`](Self::judge_chain) without fixture mode's confinement.
+    fn judge_allowed(&self, chain: &[Step], contents: bool) -> Result<(), Denied> {
         let target = chain.last().ok_or(Denied::Unclear)?;
         if !contents && let Some(what) = self.held.get(&target.id) {
             return Err(Denied::Protected(what.clone()));
