@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createMockBridge, fixtures, type ScanUpdate } from '.';
+import { createMockBridge, fixtures, type RunEvent, type ScanUpdate } from '.';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -84,5 +84,107 @@ describe('the mock bridge', () => {
     const outcome = bridge.scan('E:\\', () => {});
     await bridge.forgetDrive('E:\\');
     expect(await outcome).toEqual({ status: 'cancelled' });
+  });
+
+  describe('plans and runs', () => {
+    const ids = fixtures.windows.proposals.map((p) => p.id);
+    const scanned = async (options = {}) => {
+      const bridge = createMockBridge(fixtures.windows, { scanMs: 0, runMs: 0, ...options });
+      await bridge.scan('C:\\', () => {});
+      return bridge;
+    };
+
+    it('plans from the scan, leaving out a place that changed since it', async () => {
+      const bridge = await scanned();
+      const plan = await bridge.buildPlan('C:\\', ['w-installers', 'w-node']);
+      expect(plan.steps.map((s) => s.id)).toEqual(['w-node', 'w-installers']);
+      expect(plan.refused).toEqual([expect.objectContaining({ kind: 'changed', reason: 'It changed since the scan' })]);
+      const installers = fixtures.windows.proposals.find((p) => p.id === 'w-installers')!;
+      expect(plan.steps[1]).toMatchObject({ bytes: installers.bytes - 0.62e9, items: 46, places: 46 });
+      expect(plan.bytes).toBe(plan.steps[0]!.bytes + plan.steps[1]!.bytes);
+      expect(plan.moves).toBe(0);
+    });
+
+    it('refuses to plan without a scan, or from proposals the scan doesn’t have', async () => {
+      const bridge = createMockBridge(fixtures.windows, { scanMs: 0 });
+      await expect(bridge.buildPlan('C:\\', ['w-node'])).rejects.toThrow('there is no finished scan of C:\\ to plan from');
+      await bridge.scan('C:\\', () => {});
+      await expect(bridge.buildPlan('C:\\', ['m-trash'])).rejects.toThrow('there is no proposal m-trash in this scan');
+    });
+
+    it('runs a plan step by step, with every place and skip as it happens, and reports it', async () => {
+      const bridge = await scanned();
+      const plan = await bridge.buildPlan('C:\\', ids);
+      const events: RunEvent[] = [];
+      const report = await bridge.runPlan('C:\\', plan.id, (e) => events.push(e));
+
+      const started = events.filter((e) => e.kind === 'stepStarted').map((e) => e.id);
+      expect(started).toEqual(plan.steps.map((s) => s.id));
+      expect(events.filter((e) => e.kind === 'deleted')).toHaveLength(plan.places);
+      const skips = events.flatMap((e) => (e.kind === 'skipped' ? [e.skip] : []));
+      expect(skips.map((k) => k.kind).sort()).toEqual(['changed', 'inUse']);
+
+      expect(report.cancelled).toBe(false);
+      expect(report.steps.map((s) => s.outcome)).toContain('partial');
+      expect(report.deletedItems).toBe(plan.items - 212);
+      expect(report.freedBytes).toBeCloseTo(plan.bytes - 0.41e9, -3);
+      expect(report.plannedBytes).toBeCloseTo(plan.bytes + 0.62e9, -3);
+      expect(report.skippedItems).toBe(213);
+      expect(report.biggestWin).toBe('w-node');
+      expect(report.freedByCategory.map((c) => c.id)).toEqual(['dev', 'caches', 'downloads']);
+      // The drive's own figures: a little less than what was freed, since other apps write too.
+      expect(report.freeChange).toBeLessThan(report.freedBytes);
+      expect(report.freeAfter - report.freeBefore).toBe(report.freeChange);
+      expect(await bridge.listRuns()).toEqual([report]);
+      const c = (await bridge.listVolumes())[0]!;
+      expect(c.freeBytes).toBe(report.freeAfter);
+    });
+
+    it('runs each scan’s plan once', async () => {
+      const bridge = await scanned();
+      const plan = await bridge.buildPlan('C:\\', ['w-temp']);
+      await bridge.runPlan('C:\\', plan.id, () => {});
+      await expect(bridge.runPlan('C:\\', plan.id, () => {})).rejects.toThrow('there is no plan');
+      await expect(bridge.buildPlan('C:\\', ['w-temp'])).rejects.toThrow('already ran a plan: scan again first');
+      await bridge.scan('C:\\', () => {});
+      await expect(bridge.buildPlan('C:\\', ['w-temp'])).resolves.toMatchObject({ steps: [{ id: 'w-temp' }] });
+    });
+
+    it('stops after the file being deleted, and reports what was left', async () => {
+      vi.useFakeTimers();
+      const bridge = createMockBridge(fixtures.windows, { scanMs: 0, runMs: 8000 });
+      const scan = bridge.scan('C:\\', () => {});
+      await vi.advanceTimersByTimeAsync(10);
+      await scan;
+      const plan = await (async () => {
+        const p = bridge.buildPlan('C:\\', ids);
+        await vi.advanceTimersByTimeAsync(10);
+        return p;
+      })();
+      const events: RunEvent[] = [];
+      const done = bridge.runPlan('C:\\', plan.id, (e) => events.push(e));
+      await vi.advanceTimersByTimeAsync(1500);
+      const stopping = bridge.cancelRun();
+      await vi.advanceTimersByTimeAsync(200);
+      await stopping;
+      const report = await done;
+
+      expect(report.cancelled).toBe(true);
+      expect(report.freedBytes).toBeGreaterThan(0);
+      expect(report.freedBytes).toBeLessThan(plan.bytes);
+      expect(report.steps).toHaveLength(plan.steps.length);
+      expect(report.steps.at(-1)!.outcome).toBe('skipped');
+      expect(report.steps.at(-1)!.skipped.every((k) => k.kind === 'cancelled')).toBe(true);
+      // Every file is either deleted or left.
+      const left = report.steps.flatMap((s) => s.skipped).reduce((n, k) => n + k.items, 0);
+      expect(report.deletedItems + left).toBe(plan.items + 1);
+      expect(events.at(-1)!.kind).toBe('stepFinished');
+    });
+
+    it('fails every plan and run with the fail option', async () => {
+      const bridge = createMockBridge(fixtures.windows, { fail: 'Access is denied.' });
+      await expect(bridge.buildPlan('C:\\', [])).rejects.toThrow('Access is denied.');
+      await expect(bridge.runPlan('C:\\', 'plan-1', () => {})).rejects.toThrow('Access is denied.');
+    });
   });
 });

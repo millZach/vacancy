@@ -4,7 +4,7 @@ import { Atlas } from './atlas/Atlas';
 import { DrivesPending } from './atlas/DrivesPending';
 import { useDrives } from './drives/context';
 import { DriveMenu } from './drives/DriveMenu';
-import { reclaimableOf } from './drives/session';
+import { reclaimableOf, reportOf } from './drives/session';
 import { Shell } from './shell/Shell';
 
 /** Which AI agent Vacancy found. Detection of Claude Code and Codex arrives with ticket 7; until then, rules only. */
@@ -26,15 +26,20 @@ export function App() {
   const scan = ready?.current.scan;
   const onMap = ready?.screen === 'map' && scan?.phase === 'done';
   const proposals = onMap && scan.phase === 'done' ? scan.proposals : [];
+  // Once the plan runs, its proposals are spent: no reclaimable figure and no new plan until the drive is scanned again.
+  const planRun = scan?.phase === 'done' ? scan.planRun : null;
+  const planning = !planRun || planRun.phase === 'failed';
+  const report = onMap && scan ? reportOf(scan) : null;
 
   return (
     <Shell
       platform={bridge.platform}
       drive={ready && <DriveMenu drives={ready} />}
       agent={AGENT}
-      reclaimable={onMap && scan ? reclaimableOf(scan) : null}
+      reclaimable={onMap && scan && planning ? reclaimableOf(scan) : null}
+      lit={!!report && report.freedBytes > 0}
       action={
-        onMap && !planOpen && proposals.length > 0 ? (
+        onMap && !planOpen && !planRun && proposals.length > 0 ? (
           <button type="button" className="cta cta--sm" onClick={() => setPlanOpen(true)}>
             Build a plan
           </button>

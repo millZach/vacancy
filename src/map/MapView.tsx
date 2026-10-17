@@ -31,17 +31,23 @@ export interface MapViewProps {
   leafAction?: (leaf: Leaf) => string | null;
   /** The last line of a region header's hover card, if any. */
   regionAction?: (region: Region) => string | null;
-  /** How a tile looks beyond its kind: extra classes (reclaimable, selected) and a badge in its corner. */
-  look?: (leaf: Leaf) => TileLook;
+  /** How a tile looks beyond its kind: extra classes (reclaimable, selected, draining) and a badge in its corner. */
+  look?: (leaf: Leaf, rect: Rect) => TileLook;
   /** What a tile's hover card says under its numbers, in place of `leafAction` (a proposal's risk and summary). */
   leafStatus?: (leaf: Leaf) => ReactNode;
   /** The plan tray is open: reclaimable tiles are being picked. */
   planning?: boolean;
+  /** What the free-space tile says in place of its size (while a run frees space, the free space it will have). */
+  freeLabel?: ReactNode;
 }
 
 /** A tile's extra look, and what assistive tech hears about it. */
 export interface TileLook {
   cls?: string;
+  /** How full the tile is, 0..1. Below 1 its colour drains from the top and shows the vacant ground under it. */
+  fill?: number;
+  /** In place of the tile's name and size (a "Vacant" sign). */
+  label?: ReactNode;
   badge?: ReactNode;
   /** Said after the tile's name and size ("reclaimable, in the plan"). */
   state?: string;
@@ -102,7 +108,7 @@ export function MapView(p: MapViewProps) {
                 type="button"
                 className="map-region-head"
                 data-tile={regionKey(r.id)}
-                tabIndex={p.interactive && shown ? 0 : -1}
+                tabIndex={p.interactive && shown && p.onRegion ? 0 : -1}
                 disabled={!p.interactive}
                 onClick={() => p.onRegion?.(r)}
                 onFocus={() => p.onHot(regionKey(r.id))}
@@ -122,7 +128,7 @@ export function MapView(p: MapViewProps) {
         if (!rect || !r || r.pending) return null;
         const shown = !p.focus || p.focus === l.regionId;
         const canClick = p.interactive && shown && (p.clickable?.(l) ?? false);
-        const look = p.look?.(l) ?? {};
+        const look = p.look?.(l, rect) ?? {};
         // A badge needs room; a narrow tile with one has room for its size only, its name is in the hover card.
         const badge = rect.w >= 40 && rect.h >= 26 ? look.badge : undefined;
         const compact = !!badge && rect.w < 92;
@@ -157,13 +163,23 @@ export function MapView(p: MapViewProps) {
             onFocus={canClick ? () => p.onHot(l.id) : undefined}
             style={{ ...place(rect, shown), '--shade': l.shade } as CSSProperties}
           >
-            {l.kind !== 'free' && <div className="map-fill" />}
-            {showName && (
-              <div className={oneLine ? 'map-label is-1line' : 'map-label'}>
-                {!compact && <span className="map-name">{l.name}</span>}
-                {showSize && <span className="map-size">{formatBytes(l.bytes)}</span>}
-              </div>
+            {l.kind !== 'free' && (
+              <div
+                className="map-fill"
+                style={look.fill === undefined ? undefined : { height: `${Math.max(0, Math.min(1, look.fill)) * 100}%` }}
+              />
             )}
+            {look.label ??
+              (showName && (
+                <div className={oneLine ? 'map-label is-1line' : 'map-label'}>
+                  {!compact && <span className="map-name">{l.name}</span>}
+                  {showSize && (
+                    <span className="map-size">
+                      {l.kind === 'free' && p.freeLabel ? p.freeLabel : formatBytes(l.bytes)}
+                    </span>
+                  )}
+                </div>
+              ))}
             {badge}
           </div>
         );

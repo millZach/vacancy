@@ -113,6 +113,56 @@
   --text-total: 34px; /* the plan's total */
   --tray-in: 0.34s cubic-bezier(0.2, 0.7, 0.2, 1);
 
+  /* ---------- the confirm dialog ---------- */
+  --color-scrim: rgba(8, 10, 14, 0.64);
+  --shadow-dialog: 0 30px 90px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(0, 0, 0, 0.4);
+  --radius-dialog: 13px;
+  --text-dialog: 22px; /* its question */
+  --text-dialog-body: 13.5px;
+
+  /* ---------- the run ---------- */
+  --text-counter: 50px; /* the freed counter */
+  --glow-counter: 0 0 22px rgba(var(--neon-rgb), 0.55);
+  --glow-meter: 0 0 10px var(--color-neon);
+  --color-step-on: rgba(var(--neon-rgb), 0.08); /* the running step's row */
+  --color-step-track: #2a313c;
+  --color-log: #10141a;
+  --color-log-del: #8c96a5;
+  --color-log-sum: #ffc4e6;
+  /* A plan tile waiting its turn, draining, then vacant ground. */
+  --edge-queued: inset 0 0 0 1.5px rgba(var(--neon-rgb), 0.65);
+  --glow-running: 0 0 22px -2px rgba(var(--neon-rgb), 0.7);
+  --edge-running: inset 0 0 0 2px var(--color-neon);
+  --glow-drain: 0 -6px 18px rgba(var(--neon-rgb), 0.55);
+  --color-vacant-edge: rgba(var(--neon-rgb), 0.75);
+  --glow-vacant: 0 0 18px -4px rgba(var(--neon-rgb), 0.55);
+  --glow-vacant-in: inset 0 0 22px rgba(var(--neon-rgb), 0.22);
+  --text-vacant: 30px; /* the "Vacant" sign on a cleared tile */
+  --drain: 0.3s linear; /* a tile's fill and the meters between batches of the run's events */
+
+  /* ---------- the summary ---------- */
+  --summary-w: clamp(380px, 35%, 470px);
+  --text-hero: 88px; /* what the run freed */
+  --glow-hero: 0 0 2px rgba(var(--neon-rgb), 0.9), 0 0 18px rgba(var(--neon-rgb), 0.65),
+    0 0 48px rgba(var(--neon-rgb), 0.35);
+  --color-hero-unit: #ffb9df;
+  --text-stat: 19px;
+  --text-win: 27px;
+  --color-win: rgba(var(--neon-rgb), 0.06);
+  --color-win-edge: rgba(var(--neon-rgb), 0.35);
+  --color-freed-fill: rgba(var(--neon-rgb), 0.18);
+  --edge-freed: inset 0 0 0 1.5px var(--color-neon), 0 0 10px rgba(var(--neon-rgb), 0.5);
+  --edge-freed-thin: inset 0 0 0 1px rgba(var(--neon-rgb), 0.85);
+  --map-kept-l: 0.42; /* what a category kept, in its bar on the summary */
+  --map-kept-c: 0.06;
+  --color-swipe: #f4f6f9; /* the Before/After line and its knob */
+  --glow-swipe: 0 0 14px rgba(255, 255, 255, 0.55);
+  --color-swipe-grip: #5b6370;
+  --color-swipe-tag: rgba(10, 12, 16, 0.78);
+  --shadow-knob: 0 4px 18px rgba(0, 0, 0, 0.55);
+  --color-seg: #171c23; /* the Before/After switch */
+  --color-seg-on: #2a323e;
+
   /* ---------- surfaces ---------- */
   --ground: radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.085) 1px, transparent 1.5px) 0 0 / 9px 9px,
     var(--color-head);

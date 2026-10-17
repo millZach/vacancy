@@ -1,5 +1,15 @@
-import type { Fixture } from './fixtures';
-import type { Bridge, CategoryTotal, MapFolder, Proposal, ScanOutcome, ScanUpdate, VolumeInfo } from './types';
+import type { Fixture, RunSkip } from './fixtures';
+import { makePlan, play, type MockPlan, type Playback } from './mockRun';
+import type {
+  Bridge,
+  CategoryTotal,
+  MapFolder,
+  Proposal,
+  RunReport,
+  ScanOutcome,
+  ScanUpdate,
+  VolumeInfo,
+} from './types';
 
 export interface MockOptions {
   /** Answer after this many milliseconds, to see loading states. Default: next tick. */
@@ -12,7 +22,12 @@ export interface MockOptions {
   fullDiskAccess?: Fixture['fullDiskAccess'];
   /** Unplug the last drive in the list (the USB stick on Windows) this long after the bridge is made. */
   unplugMs?: number;
+  /** How long a mock run of a plan takes. Default: two seconds a step. Zero finishes on the next tick. */
+  runMs?: number;
 }
+
+/** A mock run's length when `runMs` isn't given, per step. */
+const STEP_MS = 2000;
 
 /** The mock bridge, plus what tests need to act out the world around the app. */
 export interface MockBridge extends Bridge {
@@ -29,6 +44,11 @@ const ease = (t: number) => 1 - Math.pow(1 - t, 2.4);
  * one after another, the way the prototype's scan reveals them, then it answers with the map and the proposals.
  * Another drive gets the system drive's map and proposals scaled to its size, with their paths moved onto it. Like
  * the app, it keeps a map per drive and runs one scan at a time.
+ *
+ * Its plans come from a drive's proposals, and a run plays one back over `runMs` with the events the core sends:
+ * the fixture's skips happen on the way (a place changed since the scan, which planning leaves out; one in use),
+ * Stop is honoured, and the report's free-space figures are a little off what was freed, as other apps write too.
+ * Each scan runs at most one plan; a run's report goes in the history and the drive's figures change.
  */
 export function createMockBridge(fixture: Fixture, options: MockOptions = {}): MockBridge {
   const answer = <T>(value: T) =>
@@ -38,11 +58,26 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
         else resolve(structuredClone(value));
       }, options.delayMs ?? 0);
     });
+  /** Fails after the delay, like every answer when `fail` is set. */
+  const failure = <T>(message: string) =>
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error(message)), options.delayMs ?? 0));
   const system = fixture.volumes[0]!;
   let volumes = [...fixture.volumes];
-  /** Drives with a finished scan, which `browse` can open. */
-  const mapped = new Set<string>();
+  /** Drives with a finished scan, which `browse` can open, with the proposals and skips their runs work from. */
+  const mapped = new Map<string, { proposals: Proposal[]; skips: RunSkip[] }>();
   let running: { mountPoint: string; timer: number; finish: (outcome: ScanOutcome) => void } | null = null;
+  /** Plans made and not yet run, by id. A new scan of their drive drops them. */
+  const plans = new Map<string, MockPlan & { mountPoint: string }>();
+  /** Drives whose scan has run its plan. */
+  const ran = new Set<string>();
+  let playing: Playback | null = null;
+  const history: RunReport[] = [];
+  let made = 0;
+  const forget = (mountPoint: string) => {
+    mapped.delete(mountPoint);
+    ran.delete(mountPoint);
+    for (const [id, p] of plans) if (p.mountPoint === mountPoint) plans.delete(id);
+  };
 
   const unplug = (mountPoint: string) => {
     volumes = volumes.filter((v) => v.mountPoint !== mountPoint);
@@ -58,19 +93,21 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
     listVolumes: () => answer(volumes),
     forgetDrive: (mountPoint) => {
       if (running?.mountPoint === mountPoint) running.finish({ status: 'cancelled' });
-      mapped.delete(mountPoint);
+      forget(mountPoint);
       return answer(undefined);
     },
     fullDiskAccess: () => answer(options.fullDiskAccess ?? fixture.fullDiskAccess),
     openFullDiskAccessSettings: () => answer(undefined),
     scan: (mountPoint, onUpdate) => {
       if (options.fail !== undefined) return answer<ScanOutcome>({ status: 'cancelled' });
+      if (playing) return Promise.reject(new Error('a plan is running: scan once it has finished'));
       running?.finish({ status: 'cancelled' });
-      mapped.delete(mountPoint);
+      forget(mountPoint);
       const volume = volumes.find((v) => v.mountPoint === mountPoint);
       if (!volume) return Promise.reject(new Error(`could not scan ${mountPoint}: the drive is not connected`));
       const map = onDrive(structuredClone(fixture.overview), system, volume);
       const proposals = proposalsOnDrive(structuredClone(fixture.proposals), system, volume);
+      const skips = skipsOnDrive(structuredClone(fixture.runSkips), system, volume);
       const paths = map.categories.flatMap((c) => c.items.map((i) => i.path)).filter(Boolean);
       // Interleaved, so the ticker jumps around the disk the way a real walk does.
       const ticker = paths.map((p, i) => paths[(i * 7) % paths.length] ?? p);
@@ -80,7 +117,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
         const finish = (outcome: ScanOutcome) => {
           if (running) clearInterval(running.timer);
           running = null;
-          if (outcome.status === 'done') mapped.add(mountPoint);
+          if (outcome.status === 'done') mapped.set(mountPoint, { proposals: structuredClone(proposals), skips });
           resolve(outcome);
         };
         const tick = () => {
@@ -101,8 +138,64 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
       const volume = volumes.find((v) => v.mountPoint === mountPoint) ?? system;
       return folder ? answer(folderOnDrive(folder, system, volume)) : Promise.reject(new Error(`there is no folder ${id} in this scan`));
     },
+    buildPlan: (mountPoint, ids) => {
+      if (options.fail !== undefined) return failure(options.fail);
+      const scan = mapped.get(mountPoint);
+      if (!scan) return failure(`there is no finished scan of ${mountPoint} to plan from`);
+      if (ran.has(mountPoint)) return failure(`this scan of ${mountPoint} already ran a plan: scan again first`);
+      let plan: MockPlan;
+      try {
+        plan = makePlan(`plan-${++made}`, mountPoint, scan.proposals, ids, scan.skips);
+      } catch (error) {
+        return failure(error instanceof Error ? error.message : String(error));
+      }
+      plans.set(plan.summary.id, { ...plan, mountPoint });
+      return answer(plan.summary);
+    },
+    runPlan: (mountPoint, planId, onEvent) => {
+      if (options.fail !== undefined) return failure(options.fail);
+      const plan = plans.get(planId);
+      if (!plan || plan.mountPoint !== mountPoint) return Promise.reject(new Error(`there is no plan ${planId} for ${mountPoint}`));
+      if (playing) return Promise.reject(new Error('a plan is already running'));
+      if (ran.has(mountPoint)) return Promise.reject(new Error(`this scan of ${mountPoint} already ran a plan: scan again first`));
+      const volume = volumes.find((v) => v.mountPoint === mountPoint);
+      if (!volume) return Promise.reject(new Error(`could not run the plan: ${mountPoint} is not connected`));
+      ran.add(mountPoint);
+      for (const [id, p] of plans) if (p.mountPoint === mountPoint) plans.delete(id);
+      const totalMs = options.runMs ?? STEP_MS * plan.steps.length;
+      return new Promise<RunReport>((resolve) => {
+        setTimeout(() => {
+          const playback = play({ id: `run-${++made}`, plan, volume, totalMs }, onEvent);
+          playing = playback;
+          void playback.done.then((report) => {
+            playing = null;
+            history.unshift(report);
+            volumes = volumes.map((v) =>
+              v.mountPoint === mountPoint ? { ...v, usedBytes: report.usedAfter, freeBytes: report.freeAfter } : v,
+            );
+            resolve(structuredClone(report));
+          });
+        }, options.delayMs ?? 0);
+      });
+    },
+    cancelRun: () => {
+      playing?.cancel();
+      return answer(undefined);
+    },
+    listRuns: () => answer(history),
     unplug,
   };
+}
+
+/** The system drive's skips as another drive's: scaled like its proposals, their paths moved onto it. */
+function skipsOnDrive(skips: RunSkip[], system: VolumeInfo, volume: VolumeInfo): RunSkip[] {
+  if (volume.mountPoint === system.mountPoint) return skips;
+  const scale = volume.usedBytes / system.usedBytes;
+  for (const s of skips) {
+    s.skip.bytes *= scale;
+    s.skip.path = moved(s.skip.path, system, volume);
+  }
+  return skips;
 }
 
 /** The system drive's map as another drive's: scaled to that drive's used space, its paths moved onto it. */

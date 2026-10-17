@@ -395,8 +395,7 @@ describe('proposals and the plan', () => {
     expect(freed()).toBe('75.3 GB');
     expect(tray()).toHaveTextContent('712,567 items in 399 places, deleted permanently');
     const free = within(tray()).getByRole('button', { name: /^Free 75\.3\sGB$/ });
-    expect(free).toBeDisabled();
-    expect(free).toHaveAccessibleDescription('Vacancy can’t run plans yet. This version only proposes.');
+    expect(free).toBeEnabled();
 
     await userEvent.click(within(tray()).getByRole('button', { name: 'Hide the plan' }));
     expect(screen.queryByRole('complementary', { name: 'Plan' })).toBeNull();

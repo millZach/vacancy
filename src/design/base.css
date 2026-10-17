@@ -5,6 +5,11 @@
   box-sizing: border-box;
 }
 
+/* `hidden` wins over a component's own display. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body,
 #root {

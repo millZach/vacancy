@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ago, formatBytes, formatCount, percentOf, timeAgo } from './format';
+import { ago, formatBytes, formatCount, formatDuration, percentOf, timeAgo } from './format';
 
 const plain = (s: string) => s.replace(/\u00a0/g, ' ');
 
@@ -60,5 +60,15 @@ describe('timeAgo', () => {
     expect(timeAgo(now - 59 * 60_000, now)).toBe('59 min ago');
     expect(timeAgo(now - 125 * 60_000, now)).toBe('2 h ago');
     expect(timeAgo(now - 3 * 86_400_000, now)).toBe('3 days ago');
+  });
+});
+
+describe('formatDuration', () => {
+  it('keeps a tenth of a second for short runs, then whole seconds, minutes and hours', () => {
+    expect(plain(formatDuration(420))).toBe('0.4 s');
+    expect(plain(formatDuration(8_240))).toBe('8.2 s');
+    expect(plain(formatDuration(38_400))).toBe('38 s');
+    expect(plain(formatDuration(125_000))).toBe('2 min 5 s');
+    expect(plain(formatDuration(3_840_000))).toBe('1 h 4 min');
   });
 });

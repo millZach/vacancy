@@ -272,9 +272,22 @@
   padding: 12px 16px 11px;
   font-size: var(--text-md);
 }
-.tray-later {
+.tray-later,
+.tray-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
   margin: var(--space-3) 0 0;
   font-size: var(--text-xs);
+  line-height: 1.45;
   color: var(--color-text-3);
   text-align: center;
+}
+.tray-error {
+  color: var(--color-careful);
+}
+.tray-spin {
+  flex: none;
+  animation: spin 0.9s linear infinite;
 }

@@ -1,11 +1,24 @@
 import { useCallback, useEffect, useReducer, useRef, useState, type Dispatch, type ReactNode } from 'react';
-import { useBridge, type Bridge, type FullDiskAccess, type VolumeInfo } from '../bridge';
+import {
+  useBridge,
+  type Bridge,
+  type FullDiskAccess,
+  type PlanSummary,
+  type RunEvent,
+  type VolumeInfo,
+} from '../bridge';
 import { errorMessage } from '../errors';
 import { DrivesContext, type DriveItem, type Drives } from './context';
 import { EMPTY, reduce, sameDrive, scanOf, shownVolume, type Action, type Session } from './session';
 
 /** How often to look for drives coming and going. Listing is read-only and takes about a millisecond. */
 const POLL_MS = 3000;
+
+/**
+ * A run's events are handed to the screens in batches this far apart: a run reports every place it deletes, and
+ * drawing the map once per event would fall behind.
+ */
+const BATCH_MS = 50;
 
 /** Numbers each scan, so a scan's late events are never taken for those of the scan after it. */
 let lastRun = 0;
@@ -115,7 +128,39 @@ export function DrivesProvider({ children }: { children: ReactNode }) {
     [bridge],
   );
 
-  // Leaving the app mid-scan stops the scan; a finished one has nothing to stop.
+  const runPlan = useCallback(
+    (plan: PlanSummary) => {
+      const { mountPoint, id: planId } = plan;
+      dispatch({ type: 'runStarted', mountPoint, plan });
+      let queue: RunEvent[] = [];
+      let timer = 0;
+      const flush = () => {
+        clearTimeout(timer);
+        timer = 0;
+        if (queue.length === 0) return;
+        const events = queue;
+        queue = [];
+        dispatch({ type: 'runEvents', mountPoint, planId, events });
+      };
+      const onEvent = (event: RunEvent) => {
+        queue.push(event);
+        if (!timer) timer = window.setTimeout(flush, BATCH_MS);
+      };
+      bridge.runPlan(mountPoint, planId, onEvent).then(
+        (report) => {
+          flush();
+          dispatch({ type: 'runEnded', mountPoint, planId, report });
+        },
+        (error: unknown) => {
+          flush();
+          dispatch({ type: 'runFailed', mountPoint, planId, message: errorMessage(error) });
+        },
+      );
+    },
+    [bridge],
+  );
+
+  // Leaving the app mid-scan stops the scan, and mid-run stops the run; a finished one has nothing to stop.
   const latest = useRef(session);
   useEffect(() => {
     latest.current = session;
@@ -123,12 +168,16 @@ export function DrivesProvider({ children }: { children: ReactNode }) {
   useEffect(
     () => () => {
       const s = latest.current;
-      if (scanOf(s, s.current).phase === 'scanning') void bridge.cancelScan();
+      const scan = scanOf(s, s.current);
+      if (scan.phase === 'scanning') void bridge.cancelScan();
+      if (scan.phase === 'done' && scan.planRun?.phase === 'running') void bridge.cancelRun();
     },
     [bridge],
   );
 
-  return <DrivesContext value={drivesValue(info, session, dispatch, bridge, startScan)}>{children}</DrivesContext>;
+  return (
+    <DrivesContext value={drivesValue(info, session, dispatch, bridge, startScan, runPlan)}>{children}</DrivesContext>
+  );
 }
 
 /** What `useDrives()` hands out: the drives as the screens show them, and what they can do. */
@@ -138,6 +187,7 @@ function drivesValue(
   dispatch: Dispatch<Action>,
   bridge: Bridge,
   startScan: (mountPoint: string) => void,
+  runPlan: (plan: PlanSummary) => void,
 ): Drives {
   if (info.status !== 'ready') return info;
   const list: DriveItem[] = session.drives.map((d) => ({
@@ -166,13 +216,22 @@ function drivesValue(
     switchTo: (mountPoint) => leave(mountPoint, 'switch'),
     openMap: () => dispatch({ type: 'openMap' }),
     showScanScreen: () => dispatch({ type: 'showScanScreen' }),
-    scan: () => startScan(session.current),
+    scan: () => {
+      if (!session.locked) startScan(session.current);
+    },
     cancelScan: () => {
       dispatch({ type: 'scanCancelled', mountPoint: session.current });
       void bridge.cancelScan();
     },
     setInPlan: (id, on) => dispatch({ type: 'plan', mountPoint: session.current, id, on }),
     setRunning: (running) => dispatch({ type: 'lock', locked: running }),
+    runPlan,
+    cancelRun: () => {
+      dispatch({ type: 'runStopping', mountPoint: session.current });
+      void bridge.cancelRun();
+    },
+    showSummary: () => dispatch({ type: 'showSummary', mountPoint: session.current }),
+    leaveRun: () => dispatch({ type: 'leaveRun', mountPoint: session.current }),
     dismissGone: () => dispatch({ type: 'dismissGone' }),
   };
 }

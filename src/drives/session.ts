@@ -1,9 +1,20 @@
-import type { CategoryTotal, Overview, Proposal, ScanOutcome, ScanUpdate, VolumeInfo } from '../bridge';
+import type {
+  CategoryTotal,
+  Overview,
+  PlanSummary,
+  Proposal,
+  RunEvent,
+  RunReport,
+  ScanOutcome,
+  ScanUpdate,
+  VolumeInfo,
+} from '../bridge';
+import { foldEvents, settleRun, startRun, type RunView } from '../run/progress';
 
 /**
- * The drives for this session, one at a time on screen, each with its own scan, map, proposals and plan (and, as
- * later tickets add it, its own summary), so switching never mixes two drives' data. This file is the pure part: the
- * state and how each event changes it. `DrivesProvider` wires it to the bridge.
+ * The drives for this session, one at a time on screen, each with its own scan, map, proposals, plan, run and
+ * summary, so switching never mixes two drives' data. This file is the pure part: the state and how each event
+ * changes it. `DrivesProvider` wires it to the bridge.
  */
 export interface Session {
   /** The drives to offer, the system drive first, from the latest listing. */
@@ -14,7 +25,7 @@ export interface Session {
   screen: Screen;
   /** Each drive's scan, by mount point. A drive with no entry hasn't been scanned. */
   scans: Record<string, DriveScan>;
-  /** A plan is running: switching drives waits until it ends. */
+  /** A plan is running: switching drives, and scanning, wait until it ends. */
   locked: boolean;
   /** The drive on screen went away, for a short notice. */
   gone: Gone | null;
@@ -41,8 +52,20 @@ export type DriveScan =
       plan: string[];
       /** When it finished, in ms since the epoch. */
       at: number;
+      /** The plan this scan ran, if it ran one. A drive keeps it, and its summary, until it is scanned again. */
+      planRun: PlanRun | null;
     }
   | { phase: 'failed'; message: string };
+
+/**
+ * A drive's plan once it is confirmed: running, ended (the run panel says Done, or that it was stopped), failed
+ * (the run panel says why), and then the summary of what changed.
+ */
+export type PlanRun =
+  | { phase: 'running'; plan: PlanSummary; view: RunView; stopping: boolean }
+  | { phase: 'ended'; plan: PlanSummary; view: RunView; report: RunReport }
+  | { phase: 'failed'; plan: PlanSummary; view: RunView; message: string }
+  | { phase: 'summary'; plan: PlanSummary; report: RunReport };
 
 /** A drive that went away while it was on screen, and what went with it. */
 export interface Gone {
@@ -69,6 +92,18 @@ export type Action =
   | { type: 'scanCancelled'; mountPoint: string }
   /** Puts a proposal in this drive's plan, or takes it out. */
   | { type: 'plan'; mountPoint: string; id: string; on: boolean }
+  /** The user confirmed the plan and it started: drive switching and scanning wait until it ends. */
+  | { type: 'runStarted'; mountPoint: string; plan: PlanSummary }
+  /** What the run did since the last batch, in order. */
+  | { type: 'runEvents'; mountPoint: string; planId: string; events: RunEvent[] }
+  /** The user pressed Stop; the run ends after the file being deleted. */
+  | { type: 'runStopping'; mountPoint: string }
+  | { type: 'runEnded'; mountPoint: string; planId: string; report: RunReport }
+  | { type: 'runFailed'; mountPoint: string; planId: string; message: string }
+  /** From the ended run to the drive's summary ("See what changed"). */
+  | { type: 'showSummary'; mountPoint: string }
+  /** From a failed run back to the drive's plan. */
+  | { type: 'leaveRun'; mountPoint: string }
   | { type: 'lock'; locked: boolean }
   | { type: 'dismissGone' };
 
@@ -95,15 +130,34 @@ export function reclaimableBytes(proposals: readonly Proposal[]): number {
   return proposals.filter((p) => p.action === 'delete').reduce((sum, p) => sum + p.bytes, 0);
 }
 
-/** A drive's reclaimable space once it has a map; zero until then. */
+/** A drive's reclaimable space once it has a map; zero until then, and once its plan has run. */
 export function reclaimableOf(scan: DriveScan): number {
-  return scan.phase === 'done' ? reclaimableBytes(scan.proposals) : 0;
+  if (scan.phase !== 'done' || ranPlan(scan)) return 0;
+  return reclaimableBytes(scan.proposals);
 }
 
-/** The figures to show for a drive: those its map was drawn against once it has one, so they agree with the map. */
+/** The report of the plan a drive's scan ran, once the run has ended. */
+export function reportOf(scan: DriveScan): RunReport | null {
+  if (scan.phase !== 'done' || !scan.planRun) return null;
+  const r = scan.planRun;
+  return r.phase === 'ended' || r.phase === 'summary' ? r.report : null;
+}
+
+/** The scan's plan has run, or is running: its proposals are spent. A run that failed leaves them to try again. */
+function ranPlan(scan: Extract<DriveScan, { phase: 'done' }>): boolean {
+  return scan.planRun !== null && scan.planRun.phase !== 'failed';
+}
+
+/**
+ * The figures to show for a drive: those its map was drawn against once it has one, so they agree with the map;
+ * once its plan has run, the drive's own figures from the end of the run.
+ */
 export function shownVolume(s: Session, drive: VolumeInfo): VolumeInfo {
   const scan = scanOf(s, drive.mountPoint);
-  return scan.phase === 'done' ? scan.overview.volume : drive;
+  if (scan.phase !== 'done') return drive;
+  const report = reportOf(scan);
+  if (!report || report.totalBytes === 0) return scan.overview.volume;
+  return { ...scan.overview.volume, usedBytes: report.usedAfter, freeBytes: report.freeAfter };
 }
 
 /** The screen a drive opens at: its map once it has one, its scan screen until then. */
@@ -120,6 +174,15 @@ function goTo(s: Session, mountPoint: string, screen: Screen): Session {
     delete scans[s.current];
   }
   return { ...s, scans, current: mountPoint, screen, gone: null };
+}
+
+/** Applies `change` to the plan run of a drive whose scan is done. `change` returns the run as it was to do nothing. */
+function onPlanRun(s: Session, mountPoint: string, change: (run: PlanRun | null) => PlanRun | null): Session {
+  const scan = scanOf(s, mountPoint);
+  if (scan.phase !== 'done') return s;
+  const next = change(scan.planRun);
+  if (next === scan.planRun) return s;
+  return { ...s, scans: { ...s.scans, [mountPoint]: { ...scan, planRun: next } } };
 }
 
 /** Applies `change` to the drive's scan only if it is the scan `run` (a later scan, or none, ignores it). */
@@ -145,9 +208,9 @@ export function reduce(s: Session, a: Action): Session {
     case 'openMap':
       return screenFor(s, s.current) === 'map' ? { ...s, screen: 'map' } : s;
     case 'showScanScreen':
-      return { ...s, screen: 'scan' };
+      return s.locked ? s : { ...s, screen: 'scan' };
     case 'scanStarted':
-      if (!s.drives.some((d) => d.mountPoint === a.mountPoint)) return s;
+      if (s.locked || !s.drives.some((d) => d.mountPoint === a.mountPoint)) return s;
       return {
         ...s,
         scans: { ...s.scans, [a.mountPoint]: { phase: 'scanning', run: a.run, update: null, preview: [] } },
@@ -167,6 +230,7 @@ export function reduce(s: Session, a: Action): Session {
               proposals: a.outcome.proposals,
               plan: a.outcome.proposals.filter((p) => p.defaultOn).map((p) => p.id),
               at: a.at,
+              planRun: null,
             }
           : IDLE,
       );
@@ -182,11 +246,45 @@ export function reduce(s: Session, a: Action): Session {
     }
     case 'plan': {
       const scan = scanOf(s, a.mountPoint);
-      if (scan.phase !== 'done' || !scan.proposals.some((p) => p.id === a.id)) return s;
+      if (scan.phase !== 'done' || !scan.proposals.some((p) => p.id === a.id) || ranPlan(scan)) return s;
       if (scan.plan.includes(a.id) === a.on) return s;
       const plan = a.on ? [...scan.plan, a.id] : scan.plan.filter((id) => id !== a.id);
       return { ...s, scans: { ...s.scans, [a.mountPoint]: { ...scan, plan } } };
     }
+    case 'runStarted': {
+      if (s.locked || a.plan.mountPoint !== a.mountPoint) return s;
+      const next = onPlanRun(s, a.mountPoint, (run) =>
+        run === null || run.phase === 'failed'
+          ? { phase: 'running', plan: a.plan, view: startRun(a.plan), stopping: false }
+          : run,
+      );
+      return next === s ? s : { ...next, locked: true };
+    }
+    case 'runEvents':
+      return onPlanRun(s, a.mountPoint, (run) =>
+        run?.phase === 'running' && run.plan.id === a.planId ? { ...run, view: foldEvents(run.view, a.events) } : run,
+      );
+    case 'runStopping':
+      return onPlanRun(s, a.mountPoint, (run) =>
+        run?.phase === 'running' && !run.stopping ? { ...run, stopping: true } : run,
+      );
+    case 'runEnded':
+    case 'runFailed': {
+      const next = onPlanRun(s, a.mountPoint, (run) => {
+        if (run?.phase !== 'running' || run.plan.id !== a.planId) return run;
+        return a.type === 'runEnded'
+          ? { phase: 'ended', plan: run.plan, view: settleRun(run.view, a.report), report: a.report }
+          : { phase: 'failed', plan: run.plan, view: run.view, message: a.message };
+      });
+      // The run is over either way, even if its drive has gone since: unlock.
+      return next.locked ? { ...next, locked: false } : next;
+    }
+    case 'showSummary':
+      return onPlanRun(s, a.mountPoint, (run) =>
+        run?.phase === 'ended' ? { phase: 'summary', plan: run.plan, report: run.report } : run,
+      );
+    case 'leaveRun':
+      return onPlanRun(s, a.mountPoint, (run) => (run?.phase === 'failed' ? null : run));
     case 'lock':
       return a.locked === s.locked ? s : { ...s, locked: a.locked };
     case 'dismissGone':

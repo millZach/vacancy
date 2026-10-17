@@ -43,6 +43,17 @@ export function percentOf(part: number, whole: number): string {
   return p < 1 ? '<1' : p.toFixed(0);
 }
 
+/** How long something took: "0.4 s", "8.2 s", "38 s", "2 min 5 s", "1 h 4 min". */
+export function formatDuration(ms: number): string {
+  const s = Math.max(0, ms) / 1000;
+  if (s < 10) return `${s.toFixed(1)}${NBSP}s`;
+  const whole = Math.round(s);
+  if (whole < 60) return `${whole}${NBSP}s`;
+  const m = Math.floor(whole / 60);
+  if (m < 60) return `${m}${NBSP}min ${whole % 60}${NBSP}s`;
+  return `${Math.floor(m / 60)}${NBSP}h ${m % 60}${NBSP}min`;
+}
+
 /** How long ago something happened this session, to the minute: "just now", "4 min ago", "2 h ago", then as `ago`. */
 export function timeAgo(whenMs: number, nowMs = Date.now()): string {
   const minutes = Math.floor((nowMs - whenMs) / 60_000);
