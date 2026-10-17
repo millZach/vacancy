@@ -7,7 +7,8 @@ use std::path::Path;
 use std::{io, ptr};
 
 use windows_sys::Win32::Storage::FileSystem::{
-    GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW, GetVolumePathNameW,
+    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDriveStringsW, GetVolumeInformationW,
+    GetVolumePathNameW, QueryDosDeviceW,
 };
 use windows_sys::Win32::System::SystemInformation::GetSystemWindowsDirectoryW;
 use windows_sys::Win32::System::WindowsProgramming::{
@@ -20,6 +21,52 @@ use super::{VolumeError, VolumeInfo};
 const LONGEST_PATH: u32 = 32_768;
 /// Volume labels are at most 32 characters; the API asks for `MAX_PATH + 1`.
 const LABEL_LEN: u32 = 261;
+/// File systems of local disks. A volume with any other (a cloud drive's virtual file system) is not offered.
+const LOCAL_FILE_SYSTEMS: [&str; 5] = ["NTFS", "ReFS", "exFAT", "FAT32", "FAT"];
+
+/// Local drives: fixed and removable disks with a disk file system. Network shares, CD and RAM drives, `subst`
+/// aliases of folders and cloud services' virtual drives are left out.
+pub(super) fn list_volumes() -> Vec<VolumeInfo> {
+    let mut buf = vec![0u16; 1024];
+    // SAFETY: `buf` holds `buf.len()` writable units.
+    let n = unsafe { GetLogicalDriveStringsW(buf.len() as u32, buf.as_mut_ptr()) } as usize;
+    if n == 0 || n > buf.len() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for root in buf[..n].split(|&c| c == 0).filter(|r| !r.is_empty()) {
+        let root_w: Vec<u16> = root.iter().copied().chain(Some(0)).collect();
+        // SAFETY: `root_w` is a NUL-terminated drive root.
+        let kind = unsafe { GetDriveTypeW(root_w.as_ptr()) };
+        if kind != DRIVE_FIXED && kind != DRIVE_REMOVABLE {
+            continue;
+        }
+        if is_subst(root) {
+            continue;
+        }
+        let (label, fs) = label_and_file_system(&root_w);
+        let local = LOCAL_FILE_SYSTEMS
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case(&fs));
+        if !local || label.trim().eq_ignore_ascii_case("Google Drive") {
+            continue;
+        }
+        if let Ok(v) = volume_info(Path::new(&OsString::from_wide(root))) {
+            out.push(v);
+        }
+    }
+    out
+}
+
+/// Whether a drive letter is a `subst` alias for a folder on another drive (its DOS device names a path).
+fn is_subst(root: &[u16]) -> bool {
+    let device: Vec<u16> = root.iter().copied().take(2).chain(Some(0)).collect();
+    let mut target = vec![0u16; 1024];
+    // SAFETY: `device` is a NUL-terminated "X:"; `target` holds `target.len()` writable units.
+    let n = unsafe { QueryDosDeviceW(device.as_ptr(), target.as_mut_ptr(), target.len() as u32) };
+    let prefix: Vec<u16> = r"\??\".encode_utf16().collect();
+    n > 0 && target.starts_with(&prefix)
+}
 
 pub(super) fn volume_info(path: &Path) -> Result<VolumeInfo, VolumeError> {
     let fail = |source| VolumeError::Io {
@@ -81,25 +128,31 @@ fn volume_root(path: &Path) -> io::Result<String> {
 
 /// The volume's label, or an empty string when it has none or Windows won't say.
 fn volume_label(root_w: &[u16]) -> String {
-    let mut buf = [0u16; LABEL_LEN as usize];
-    // SAFETY: `root_w` is a NUL-terminated volume root; `buf` holds `LABEL_LEN` writable units; every other out
-    // parameter may be null.
+    label_and_file_system(root_w).0
+}
+
+/// The volume's label and its file system's name ("NTFS"), each empty when Windows won't say.
+fn label_and_file_system(root_w: &[u16]) -> (String, String) {
+    let mut label = [0u16; LABEL_LEN as usize];
+    let mut fs = [0u16; LABEL_LEN as usize];
+    // SAFETY: `root_w` is a NUL-terminated volume root; both buffers hold `LABEL_LEN` writable units; the other
+    // out parameters may be null.
     let ok = unsafe {
         GetVolumeInformationW(
             root_w.as_ptr(),
-            buf.as_mut_ptr(),
+            label.as_mut_ptr(),
             LABEL_LEN,
             ptr::null_mut(),
             ptr::null_mut(),
             ptr::null_mut(),
-            ptr::null_mut(),
-            0,
+            fs.as_mut_ptr(),
+            LABEL_LEN,
         )
     };
     if ok == 0 {
-        String::new()
+        (String::new(), String::new())
     } else {
-        from_wide(&buf)
+        (from_wide(&label), from_wide(&fs))
     }
 }
 

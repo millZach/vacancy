@@ -281,7 +281,7 @@ impl Snapshot {
     }
 
     /// Every folder, parents before children.
-    pub fn dirs(&self) -> impl ExactSizeIterator<Item = DirId> + use<> {
+    pub fn dirs(&self) -> impl ExactSizeIterator<Item = DirId> + DoubleEndedIterator + use<> {
         (0..self.dirs.len() as u32).map(DirId)
     }
 
@@ -310,7 +310,10 @@ impl Snapshot {
     }
 
     /// The folder's subfolders, including ones that were not entered (links, unreadable, other volumes).
-    pub fn children(&self, dir: DirId) -> impl ExactSizeIterator<Item = DirId> + use<> {
+    pub fn children(
+        &self,
+        dir: DirId,
+    ) -> impl ExactSizeIterator<Item = DirId> + DoubleEndedIterator + use<> {
         let d = self.dir(dir);
         (d.first_child..d.first_child + d.child_count).map(DirId)
     }

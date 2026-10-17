@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use vacancy_core::{VolumeError, machine_name, system_volume, volume_info};
+use vacancy_core::{VolumeError, list_volumes, machine_name, system_volume, volume_info};
 
 #[test]
 fn reads_the_volume_a_temp_dir_lives_on() {
@@ -93,4 +93,23 @@ fn reads_the_system_volume() {
 #[test]
 fn names_this_machine() {
     assert!(!machine_name().trim().is_empty());
+}
+
+/// Read-only: lists the local volumes, the system volume first.
+#[test]
+fn lists_local_volumes_with_the_system_volume_first() {
+    let volumes = list_volumes();
+    let system = system_volume().expect("system volume");
+    assert_eq!(
+        volumes.first().map(|v| v.mount_point.as_str()),
+        Some(system.mount_point.as_str()),
+        "{volumes:?}"
+    );
+    for v in &volumes {
+        assert!(v.total_bytes > 0 && v.used_bytes <= v.total_bytes, "{v:?}");
+        assert!(!v.name.trim().is_empty(), "{v:?}");
+    }
+    let mut mounts: Vec<_> = volumes.iter().map(|v| &v.mount_point).collect();
+    mounts.dedup();
+    assert_eq!(mounts.len(), volumes.len(), "each volume once");
 }

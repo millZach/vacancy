@@ -9,7 +9,7 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use vacancy_core::{CancelToken, ScanOptions, scan, volume_info};
+use vacancy_core::{CancelToken, Env, ItemRef, ScanOptions, categorize, scan, volume_info};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -68,6 +68,29 @@ fn main() {
     unreadable.sort_by_key(|p| p.components().count());
     for p in unreadable.iter().take(25) {
         println!("  unreadable    {}", p.display());
+    }
+    let started = std::time::Instant::now();
+    let cats = categorize(&snapshot, &Env::detect(&path));
+    println!(
+        "categorized in {:.0} ms",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    for cat in cats.list().iter().filter(|c| c.bytes > 0) {
+        println!(
+            "{:<28} {:>9.2} GB  {:>6} items{}",
+            cat.name,
+            cat.bytes as f64 / 1e9,
+            cat.items.len(),
+            if cat.protected { "  (protected)" } else { "" }
+        );
+        for item in cat.items.iter().take(6) {
+            let name = match item.at {
+                ItemRef::Dir(d) => snapshot.path(d).display().to_string(),
+                ItemRef::File(f) => snapshot.file_path(f).display().to_string(),
+                ItemRef::FilesIn(d) => format!("files in {}", snapshot.path(d).display()),
+            };
+            println!("    {:>9.2} GB  {name}", item.bytes as f64 / 1e9);
+        }
     }
     peak_memory();
 }
