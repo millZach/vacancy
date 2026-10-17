@@ -95,7 +95,9 @@ fn seed_tool_presence(env: &Env) {
             env.home.join("Library/Caches/Homebrew"),
         ],
     };
-    for path in paths { write(&path.join("fixture-presence.txt"), "passive presence only"); }
+    for path in paths {
+        write(&path.join("fixture-presence.txt"), "passive presence only");
+    }
 }
 const MANIFEST: &str = r#""AppState" { "appid" "42" "name" "Fixture game" "LastPlayed" "100000" "SizeOnDisk" "123456789" }"#;
 
@@ -303,7 +305,12 @@ fn mixed_cleanup_and_advice_keep_only_real_deletions_in_the_totals() {
     let plan = vacancy_core::plan(
         &scanned,
         &env,
-        &[cleanup.id.clone(), "hint-steam-42".into(), "hint-windows-cleanup".into(), "hint-docker-cache".into()],
+        &[
+            cleanup.id.clone(),
+            "hint-steam-42".into(),
+            "hint-windows-cleanup".into(),
+            "hint-docker-cache".into(),
+        ],
     )
     .unwrap();
     assert_eq!(plan.summary().bytes, cleanup.bytes);
@@ -588,18 +595,30 @@ fn passive_guides_require_current_scanned_nofollow_presence_and_never_fall_back_
         let snap = fx.snapshot();
         let hints = hints::discover_until(&env, &snap, moment().now, &|| false).unwrap();
         assert_eq!(hints.len(), 4);
-        assert!(hints.iter().all(|h| h.reported_bytes.is_none() && h.action.external_uri().is_some_and(|u| u.starts_with("https://"))));
+        assert!(hints.iter().all(|h| {
+            h.reported_bytes.is_none()
+                && h.action
+                    .external_uri()
+                    .is_some_and(|u| u.starts_with("https://"))
+        }));
         let outside = Fixture::new();
         let outside_env = outside.env(platform);
         seed_tool_presence(&outside_env);
         let before = fixture::inventory(&outside.root).unwrap();
         let mut wrong_env = outside_env.clone();
         wrong_env.confined_to = Some(fx.root.clone());
-        assert!(hints::discover_until(&wrong_env, &snap, moment().now, &|| false).unwrap().is_empty());
+        assert!(
+            hints::discover_until(&wrong_env, &snap, moment().now, &|| false)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(fixture::inventory(&outside.root).unwrap(), before);
 
-        let evidence = if platform == Platform::Windows { env.local_app_data.join("Docker") }
-            else { env.home.join("Library/Containers/com.docker.docker") };
+        let evidence = if platform == Platform::Windows {
+            env.local_app_data.join("Docker")
+        } else {
+            env.home.join("Library/Containers/com.docker.docker")
+        };
         let moved = evidence.with_file_name("docker-old");
         fs::rename(&evidence, &moved).unwrap();
         #[cfg(windows)]
@@ -607,14 +626,24 @@ fn passive_guides_require_current_scanned_nofollow_presence_and_never_fall_back_
         #[cfg(unix)]
         std::os::unix::fs::symlink(&moved, &evidence).unwrap();
         let found = hints::discover_until(&env, &snap, moment().now, &|| false).unwrap();
-        assert!(found.iter().all(|h| !h.id.starts_with("hint-docker")), "replaced/link evidence is omitted");
-        assert_eq!(fs::read_to_string(moved.join("fixture-presence.txt")).unwrap(), "passive presence only");
+        assert!(
+            found.iter().all(|h| !h.id.starts_with("hint-docker")),
+            "replaced/link evidence is omitted"
+        );
+        assert_eq!(
+            fs::read_to_string(moved.join("fixture-presence.txt")).unwrap(),
+            "passive presence only"
+        );
         #[cfg(windows)]
         fs::remove_dir(&evidence).unwrap();
         #[cfg(unix)]
         fs::remove_file(&evidence).unwrap();
 
         // Even a snapshot listing of a different profile cannot bypass positive confinement.
-        assert!(hints::discover_until(&wrong_env, &outside.snapshot(), moment().now, &|| false).unwrap().is_empty());
+        assert!(
+            hints::discover_until(&wrong_env, &outside.snapshot(), moment().now, &|| false)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

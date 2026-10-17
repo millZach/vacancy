@@ -1,20 +1,31 @@
-// Mock-only Edge proof: node tools/tool-guidance-proof.mjs --out <directory>. Starts/stops its own Vite server.
+// Mock-only Edge proof: npm run build, then node tools/tool-guidance-proof.mjs --out <directory>. Serves built dist.
 // Run through Invoke-HeavyJob.ps1. Never attaches to an installed app or executes a real plan.
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { resolve, join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { createServer } from 'vite';
+import { spawn } from 'node:child_process';
+import { preview } from 'vite';
 import { chromium } from 'playwright';
 
-const { values } = parseArgs({ options: { out: { type: 'string', default: 'shots/tool-guidance' } } });
+const { values } = parseArgs({ options: { out: { type: 'string', default: 'shots/tool-guidance' }, 'map-ripple': { type: 'boolean', default: false } } });
 const out = resolve(values.out);
 await mkdir(out, { recursive: true });
-const server = await createServer({ server: { host: '127.0.0.1', port: 1438, strictPort: true } });
+const server = await preview({ preview: { host: '127.0.0.1', port: 1438, strictPort: true } });
 const errors = [];
 const observations = { pid: process.pid, mockOnly: true, startedAt: new Date().toISOString(), journeys: [] };
 let browser;
 try {
-  await server.listen();
+  const index = await readFile('dist/index.html');
+  const assetPaths = ['index.html', ...Array.from(index.toString().matchAll(/(?:src|href)="(\/assets\/[^"?#]+)"/g), match => match[1].slice(1))];
+  observations.builtAssets = [];
+  for (const path of assetPaths) {
+    const disk = await readFile(join('dist', path));
+    const response = await fetch(`http://127.0.0.1:1438/${path}`);
+    const served = Buffer.from(await response.arrayBuffer());
+    if (!response.ok || !disk.equals(served)) throw new Error(`Preview differs from built asset: ${path}`);
+    observations.builtAssets.push({ path, bytes: disk.length, sha256: createHash('sha256').update(disk).digest('hex'), modifiedAt: (await stat(join('dist', path))).mtime.toISOString() });
+  }
   browser = await chromium.launch({ channel: 'msedge' });
   for (const platform of ['windows', 'macos']) {
     for (const mixed of [false, true]) {
@@ -90,11 +101,22 @@ try {
       await page.close();
     }
   }
+  await browser.close();
+  browser = null;
+  if (values['map-ripple']) {
+    for (const platform of ['windows', 'macos']) for (const tool of ['ripple-strip', 'map-shots']) {
+      await new Promise((done, reject) => {
+        const child = spawn(process.execPath, [`tools/${tool}.mjs`, '--url', `http://127.0.0.1:1438/?fixture=${platform}&fda=granted&run=1500&scan=2500`, '--out', out, '--name', `${platform}-${tool}`], { stdio: 'inherit' });
+        child.once('error', reject);
+        child.once('exit', code => code === 0 ? done() : reject(new Error(`${platform} ${tool} exited ${code}`)));
+      });
+    }
+  }
   if (errors.length) throw new Error(errors.join('\n'));
   observations.finishedAt = new Date().toISOString();
   observations.errors = errors;
   await writeFile(join(out, 'observations.json'), JSON.stringify(observations, null, 2));
 } finally {
   await browser?.close();
-  await server.close();
+  await new Promise((done, reject) => server.httpServer.close(error => error ? reject(error) : done()));
 }

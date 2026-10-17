@@ -498,8 +498,11 @@ fn build_options(root: &Path, bulk: usize, advice: bool) -> io::Result<Profile> 
         )?;
         advice_files.push(manifest);
         // Passive instruction evidence only. No installed tools or host app data are consulted.
-        let docker = if windows { env.local_app_data.join("Docker") }
-            else { env.home.join("Library/Containers/com.docker.docker") };
+        let docker = if windows {
+            env.local_app_data.join("Docker")
+        } else {
+            env.home.join("Library/Containers/com.docker.docker")
+        };
         let marker = docker.join("fixture-presence.txt");
         write_file(&marker, KIB)?;
         advice_files.push(marker);

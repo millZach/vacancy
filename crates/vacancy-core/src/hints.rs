@@ -40,7 +40,8 @@ impl HintAction {
     }
     /// Only compiled guide URLs or a numeric Steam URI can leave the app. No UI/history URL is accepted.
     pub fn external_uri(&self) -> Option<String> {
-        self.steam_uri().or_else(|| guidance::guide(self).map(|g| g.source_url.clone()))
+        self.steam_uri()
+            .or_else(|| guidance::guide(self).map(|g| g.source_url.clone()))
     }
     /// Only a known Steam id can produce an external URI. Logic is an in-app instruction.
     pub fn steam_uri(&self) -> Option<String> {
@@ -412,7 +413,8 @@ pub fn open_external_hint(action: &HintAction) -> io::Result<()> {
             "fixture mode never opens host apps",
         ));
     }
-    let uri = action.external_uri()
+    let uri = action
+        .external_uri()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid external advice"))?;
     #[cfg(windows)]
     {
@@ -470,11 +472,15 @@ impl Hint {
             category: match self.action {
                 HintAction::SteamUninstall { .. } => crate::CategoryId::Apps,
                 HintAction::LogicInstructions => crate::CategoryId::Media,
-                HintAction::WindowsCleanupInstructions | HintAction::WindowsDeliveryInstructions => crate::CategoryId::System,
+                HintAction::WindowsCleanupInstructions
+                | HintAction::WindowsDeliveryInstructions => crate::CategoryId::System,
                 _ => crate::CategoryId::Dev,
             },
             title: self.title.clone(),
-            summary: guidance::guide(&self.action).map_or_else(|| "Advice only · no space counted".into(), |g| g.summary.clone()),
+            summary: guidance::guide(&self.action).map_or_else(
+                || "Advice only · no space counted".into(),
+                |g| g.summary.clone(),
+            ),
             why: self.why.clone(),
             bytes: 0,
             item_count: 0,

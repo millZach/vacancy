@@ -26,8 +26,8 @@ export function HintActionButton({ mountPoint, proposalId, guide, label = 'Open 
     );
   };
   return <span className="hint-action">
-    <button type="button" className="btn" onClick={open} disabled={pending}>
-      <ExternalLink size={12} aria-hidden /> {pending ? 'Opening…' : label}
+    <button type="button" className={guide ? 'hint-link' : 'btn'} onClick={open} disabled={pending}>
+      {!guide && <ExternalLink size={12} aria-hidden />} {pending ? 'Opening…' : label}
     </button>
     {error && <span className="hint-action-error" role="alert">{error}</span>}
   </span>;

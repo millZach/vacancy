@@ -92,10 +92,15 @@ impl Mode {
 
     /// Vendor documentation is independent of disk state and stays useful from history after restart.
     /// Only a closed compiled guide identity is accepted; fixture modes refuse before host dispatch.
-    fn open_guide_with(&self, guide: vacancy_core::hints::GuideId,
-        launch: impl FnOnce(vacancy_core::hints::HintAction) -> Result<(), String>) -> Result<(), String> {
+    fn open_guide_with(
+        &self,
+        guide: vacancy_core::hints::GuideId,
+        launch: impl FnOnce(vacancy_core::hints::HintAction) -> Result<(), String>,
+    ) -> Result<(), String> {
         if !matches!(self, Mode::Real) {
-            return Err("Vendor references can't be opened from fixture mode. No app was launched.".into());
+            return Err(
+                "Vendor references can't be opened from fixture mode. No app was launched.".into(),
+            );
         }
         launch(guide.action())
     }
@@ -404,8 +409,15 @@ async fn open_hint(mount_point: String, proposal_id: String, app: AppHandle) -> 
 
 /// A fixed vendor reference needs no new scan. No URL, executable, command or filesystem path is accepted.
 #[tauri::command]
-async fn open_guide(guide: vacancy_core::hints::GuideId, session: State<'_, Session>) -> Result<(), String> {
-    session.mode.open_guide_with(guide, |action| vacancy_core::hints::open_external_hint(&action).map_err(|e| e.to_string()))
+async fn open_guide(guide: vacancy_core::hints::GuideId, app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = app.state::<Session>();
+        session.mode.open_guide_with(guide, |action| {
+            vacancy_core::hints::open_external_hint(&action).map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Scans a volume, read-only, streaming the HUD's numbers to `on_update`, and returns the overview map with the
@@ -797,19 +809,37 @@ mod tests {
         use vacancy_core::hints::GuideId;
         // A fresh session has no retained scans, just as after reopening a saved report on restart.
         let session = Session::new(Mode::Real);
-        for guide in [GuideId::WindowsCleanup, GuideId::WindowsDelivery,
-            GuideId::DockerImages, GuideId::DockerCache, GuideId::Xcode, GuideId::Homebrew] {
+        for guide in [
+            GuideId::WindowsCleanup,
+            GuideId::WindowsDelivery,
+            GuideId::DockerImages,
+            GuideId::DockerCache,
+            GuideId::Xcode,
+            GuideId::Homebrew,
+        ] {
             let expected = guide.action().external_uri().unwrap();
             assert!(expected.starts_with("https://"));
             let mut launched = false;
-            session.mode.open_guide_with(guide, |actual| {
+            session
+                .mode
+                .open_guide_with(guide, |actual| {
                     launched = true;
                     assert_eq!(actual.external_uri().as_deref(), Some(expected.as_str()));
                     Ok(())
-                }).unwrap();
+                })
+                .unwrap();
             assert!(launched);
-            for mode in [Mode::Fixture { root: PathBuf::from("fixture"), capacity: 1 }, Mode::Refused("bad fixture".into())] {
-                assert!(mode.open_guide_with(guide, |_| panic!("no host launcher")).is_err());
+            for mode in [
+                Mode::Fixture {
+                    root: PathBuf::from("fixture"),
+                    capacity: 1,
+                },
+                Mode::Refused("bad fixture".into()),
+            ] {
+                assert!(
+                    mode.open_guide_with(guide, |_| panic!("no host launcher"))
+                        .is_err()
+                );
             }
         }
     }
