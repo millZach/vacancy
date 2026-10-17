@@ -12,9 +12,11 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::categorize::{Categories, CategoryId, Env, Item, ItemRef, Platform, categorize};
+use crate::categorize::{
+    CHECK_EVERY, Categories, CategoryId, Env, Item, ItemRef, Platform, categorize_until,
+};
 use crate::scan::{CancelToken, ScanError, ScanOptions, ScanProgress, scan};
-use crate::snapshot::{RootKind, Snapshot, UnixTime};
+use crate::snapshot::{DirFlags, RootKind, Snapshot, UnixTime};
 use crate::text::group_digits;
 use crate::volume::{VolumeInfo, volume_info};
 
@@ -252,35 +254,19 @@ pub fn scan_for_map(
         &mut |progress| {
             let preview = (progress.elapsed >= next_preview).then(|| {
                 let started = Instant::now();
-                let categories = progress.preview(|partial| categorize(partial, env));
+                let categories = progress
+                    .preview(|partial| categorize_until(partial, env, &|| cancel.is_cancelled()));
                 next_preview =
                     progress.elapsed + (started.elapsed() * 10).max(Duration::from_millis(700));
                 categories
             });
-            on_update(scan_update(progress, preview.as_ref()));
+            on_update(scan_update(progress, preview.flatten().as_ref()));
         },
         cancel,
     )?;
-    // Building the map takes a moment on a big drive; a cancel during it still means no map.
-    let stop = || {
-        if cancel.is_cancelled() {
-            Err(ScanError::Cancelled)
-        } else {
-            Ok(())
-        }
-    };
-    stop()?;
-    let categories = categorize(&snapshot, env);
-    stop()?;
-    let scanned = snapshot.stats().bytes;
-    let info = volume_info(volume).unwrap_or_else(|_| VolumeInfo {
-        name: volume.display().to_string(),
-        mount_point: volume.display().to_string(),
-        total_bytes: scanned,
-        used_bytes: scanned,
-    });
-    let overview = overview(&snapshot, &categories, info);
-    stop()?;
+    // Building the map takes a moment on a big drive; a cancel during it stops it and means no map.
+    let (categories, overview) =
+        build_map(&snapshot, env, volume, &|| cancel.is_cancelled()).ok_or(ScanError::Cancelled)?;
     Ok(ScannedVolume {
         snapshot,
         categories,
@@ -288,49 +274,89 @@ pub fn scan_for_map(
     })
 }
 
+/// Categorizes a finished scan and builds its overview against the volume's own numbers, read now. Gives up
+/// (`None`) as soon as `stop` says so; it is asked all along the way, not only between the steps.
+pub(crate) fn build_map(
+    snapshot: &Snapshot,
+    env: &Env,
+    volume: &Path,
+    stop: &dyn Fn() -> bool,
+) -> Option<(Categories, Overview)> {
+    if stop() {
+        return None;
+    }
+    let categories = categorize_until(snapshot, env, stop)?;
+    let scanned = snapshot.stats().bytes;
+    let info = volume_info(volume).unwrap_or_else(|_| VolumeInfo {
+        name: volume.display().to_string(),
+        mount_point: volume.display().to_string(),
+        total_bytes: scanned,
+        used_bytes: scanned,
+    });
+    let overview = overview_until(snapshot, &categories, info, stop)?;
+    Some((categories, overview))
+}
+
 /// The overview map of a finished scan. `volume` is the OS's view of the volume, read when the scan finished.
 pub fn overview(snapshot: &Snapshot, categories: &Categories, volume: VolumeInfo) -> Overview {
+    overview_until(snapshot, categories, volume, &|| false)
+        .expect("an overview that is never stopped finishes")
+}
+
+/// [`overview`], giving up (`None`) as soon as `stop` says so.
+fn overview_until(
+    snapshot: &Snapshot,
+    categories: &Categories,
+    volume: VolumeInfo,
+    stop: &dyn Fn() -> bool,
+) -> Option<Overview> {
     let stats = snapshot.stats();
     let scanned = categories.list().iter().map(|c| c.bytes).sum::<u64>();
     let hidden = volume.used_bytes.saturating_sub(scanned);
     let over = scanned.saturating_sub(volume.used_bytes);
-    let mut unreadable: Vec<String> = snapshot
-        .unreadable()
-        .map(|d| snapshot.path(d).display().to_string())
-        .collect();
+    let mut unreadable: Vec<String> = Vec::new();
+    for dir in snapshot.dirs() {
+        if dir.index() % CHECK_EVERY == 0 && stop() {
+            return None;
+        }
+        if snapshot.flags(dir).contains(DirFlags::UNREADABLE) {
+            unreadable.push(snapshot.path(dir).display().to_string());
+        }
+    }
     unreadable.sort_by_key(|p| (Path::new(p).components().count(), p.clone()));
     unreadable.truncate(UNREADABLE_SAMPLES);
     let mac = categories.platform() == Platform::MacOs;
 
-    let mut list: Vec<MapCategory> = categories
-        .list()
-        .iter()
-        .map(|cat| {
-            let mut items = fold(
-                cat.items.iter().map(|i| map_item(snapshot, categories, i)),
-                CATEGORY_ITEMS,
-                &format!("more:{:?}", cat.id).to_ascii_lowercase(),
-            );
-            let mut bytes = cat.bytes;
-            if cat.id == CategoryId::System && hidden > 0 {
-                items.push(hidden_item(hidden, stats.unreadable, &unreadable, mac));
-                items.sort_by_key(|i| std::cmp::Reverse(i.bytes));
-                bytes += hidden;
-            }
-            MapCategory {
+    let mut list: Vec<MapCategory> = Vec::new();
+    for cat in categories.list() {
+        let mut items = fold(
+            snapshot,
+            categories,
+            &cat.items,
+            CATEGORY_ITEMS,
+            &format!("more:{:?}", cat.id).to_ascii_lowercase(),
+            stop,
+        )?;
+        let mut bytes = cat.bytes;
+        if cat.id == CategoryId::System && hidden > 0 {
+            items.push(hidden_item(hidden, stats.unreadable, &unreadable, mac));
+            items.sort_by_key(|i| std::cmp::Reverse(i.bytes));
+            bytes += hidden;
+        }
+        if bytes > 0 {
+            list.push(MapCategory {
                 id: cat.id,
                 name: cat.name.clone(),
                 blurb: cat.blurb.clone(),
                 protected: cat.protected,
                 bytes,
                 items,
-            }
-        })
-        .filter(|c| c.bytes > 0)
-        .collect();
+            });
+        }
+    }
     list.sort_by_key(|c| std::cmp::Reverse(c.bytes));
 
-    Overview {
+    Some(Overview {
         free_bytes: volume.total_bytes.saturating_sub(volume.used_bytes),
         volume,
         scan: ScanSummary {
@@ -346,7 +372,7 @@ pub fn overview(snapshot: &Snapshot, categories: &Categories, volume: VolumeInfo
             duration_ms: u64::try_from(stats.elapsed.as_millis()).unwrap_or(u64::MAX),
         },
         categories: list,
-    }
+    })
 }
 
 /// Opens a folder tile: what it holds within its item.
@@ -364,13 +390,14 @@ pub fn browse(
         .item_of(dir)
         .ok_or_else(|| MapError::NoSuchFolder(id.to_owned()))?;
     let children = fold(
-        categories
-            .contents(snapshot, dir)
-            .iter()
-            .map(|i| map_item(snapshot, categories, i)),
+        snapshot,
+        categories,
+        &categories.contents(snapshot, dir),
         FOLDER_ITEMS,
         &format!("more:{id}"),
-    );
+        &|| false,
+    )
+    .unwrap_or_default();
     Ok(MapFolder {
         item: map_item(snapshot, categories, &item),
         category: categories.category_of(dir),
@@ -402,26 +429,48 @@ pub fn scan_update(progress: &ScanProgress<'_>, preview: Option<&Categories>) ->
     }
 }
 
-/// Keeps the biggest `keep` items and folds the rest into one, unless only one would be folded.
-fn fold(items: impl Iterator<Item = MapItem>, keep: usize, more_id: &str) -> Vec<MapItem> {
-    let mut items: Vec<MapItem> = items.filter(|i| i.bytes > 0).collect();
-    if items.len() <= keep + 1 {
-        return items;
+/// Items mapped between checks for a stop request (each may look into its folder).
+const CHECK_EVERY_ITEMS: usize = 64;
+
+/// Keeps the biggest `keep` items (sorted biggest first) and folds the rest into one tile, unless only one would
+/// be folded. Only the kept items are mapped; the folded ones are just summed. `None` if `stop` says so.
+fn fold(
+    snapshot: &Snapshot,
+    categories: &Categories,
+    items: &[Item],
+    keep: usize,
+    more_id: &str,
+    stop: &dyn Fn() -> bool,
+) -> Option<Vec<MapItem>> {
+    let shown: Vec<&Item> = items.iter().filter(|i| i.bytes > 0).collect();
+    let cut = if shown.len() <= keep + 1 {
+        shown.len()
+    } else {
+        keep
+    };
+    let mut out = Vec::with_capacity(cut + 1);
+    for (n, item) in shown[..cut].iter().enumerate() {
+        if n % CHECK_EVERY_ITEMS == 0 && stop() {
+            return None;
+        }
+        out.push(map_item(snapshot, categories, item));
     }
-    let rest = items.split_off(keep);
-    items.push(MapItem {
-        id: more_id.to_owned(),
-        name: format!("{} smaller items", group_digits(rest.len() as u64)),
-        path: String::new(),
-        bytes: rest.iter().map(|i| i.bytes).sum(),
-        files: rest.iter().map(|i| i.files).sum(),
-        count: rest.len() as u64,
-        last_used: rest.iter().filter_map(|i| i.last_used).max(),
-        kind: ItemKind::More,
-        browsable: false,
-        note: None,
-    });
-    items
+    let rest = &shown[cut..];
+    if !rest.is_empty() {
+        out.push(MapItem {
+            id: more_id.to_owned(),
+            name: format!("{} smaller items", group_digits(rest.len() as u64)),
+            path: String::new(),
+            bytes: rest.iter().map(|i| i.bytes).sum(),
+            files: rest.iter().map(|i| i.files).sum(),
+            count: rest.len() as u64,
+            last_used: rest.iter().filter_map(|i| millis(i.last_used)).max(),
+            kind: ItemKind::More,
+            browsable: false,
+            note: None,
+        });
+    }
+    Some(out)
 }
 
 fn map_item(snapshot: &Snapshot, categories: &Categories, item: &Item) -> MapItem {
@@ -528,4 +577,78 @@ fn hidden_item(bytes: u64, unreadable: u64, samples: &[String], mac: bool) -> Ma
 
 fn millis(t: UnixTime) -> Option<i64> {
     (t > 0).then(|| t.saturating_mul(1000))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::fs;
+
+    use super::*;
+
+    /// A fixture tree with enough folders for several stop checks per pass.
+    fn tree(folders: usize) -> (tempfile::TempDir, Snapshot) {
+        let fx = tempfile::tempdir().unwrap();
+        for i in 0..folders {
+            let dir = fx
+                .path()
+                .join(format!("d{:02}", i % 40))
+                .join(format!("e{i}"));
+            fs::create_dir_all(&dir).unwrap();
+            if i % 10 == 0 {
+                fs::write(dir.join("f.bin"), [1u8; 4096]).unwrap();
+            }
+        }
+        let snapshot = scan(
+            fx.path(),
+            &ScanOptions::default(),
+            &mut |_| {},
+            &CancelToken::new(),
+        )
+        .unwrap();
+        (fx, snapshot)
+    }
+
+    /// A cancel that arrives while the map is being built stops it at the next check, inside categorizing or
+    /// the overview, not only once each step has run to the end.
+    #[test]
+    fn building_the_map_stops_part_way_when_cancelled() {
+        let (fx, snapshot) = tree(3000);
+        let env = Env::windows(fx.path(), "alex");
+        let checks = Cell::new(0u32);
+        let count = || {
+            checks.set(checks.get() + 1);
+            false
+        };
+        let (categories, overview) =
+            build_map(&snapshot, &env, fx.path(), &count).expect("the map");
+        let all = checks.get();
+        assert!(
+            all >= 9,
+            "checked inside categorizing and the overview, not only between them: {all}"
+        );
+        assert!(!overview.categories.is_empty());
+        assert_eq!(
+            categories.list().iter().map(|c| c.bytes).sum::<u64>(),
+            snapshot.stats().bytes
+        );
+
+        // The cancel lands at different points: right away, inside categorizing, inside the overview.
+        for cancel_at in [1, 2, all / 2, all - 1] {
+            checks.set(0);
+            let stop = || {
+                checks.set(checks.get() + 1);
+                checks.get() >= cancel_at
+            };
+            assert!(
+                build_map(&snapshot, &env, fx.path(), &stop).is_none(),
+                "cancelled at check {cancel_at}"
+            );
+            assert_eq!(
+                checks.get(),
+                cancel_at,
+                "nothing more was built after the cancel"
+            );
+        }
+    }
 }

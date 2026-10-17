@@ -243,8 +243,21 @@ impl Categories {
     }
 }
 
+/// Folders between checks for a stop request while categorizing or building the map.
+pub(crate) const CHECK_EVERY: usize = 1024;
+
 /// Sorts `snapshot` into categories. Works on a finished snapshot or a scan's preview.
 pub fn categorize(snapshot: &Snapshot, env: &Env) -> Categories {
+    categorize_until(snapshot, env, &|| false).expect("categorizing that is never stopped finishes")
+}
+
+/// [`categorize`], giving up (`None`) as soon as `stop` says so. `stop` is asked every [`CHECK_EVERY`] folders
+/// of each pass, so a cancelled scan's map stops being built within a few milliseconds.
+pub(crate) fn categorize_until(
+    snapshot: &Snapshot,
+    env: &Env,
+    stop: &dyn Fn() -> bool,
+) -> Option<Categories> {
     let rules = catalog::rules(env);
     let trie = Trie::build(&rules);
     let n = snapshot.dir_count();
@@ -293,6 +306,9 @@ pub fn categorize(snapshot: &Snapshot, env: &Env) -> Categories {
     // Parents come before children, so one pass decides every folder.
     for dir in snapshot.dirs() {
         let i = dir.index();
+        if i % CHECK_EVERY == 0 && stop() {
+            return None;
+        }
         let Some(parent) = snapshot.parent(dir) else {
             continue;
         };
@@ -350,6 +366,9 @@ pub fn categorize(snapshot: &Snapshot, env: &Env) -> Categories {
 
     // Files the catalog names (Windows' page file): their own items, wherever their folder is.
     for dir in snapshot.dirs() {
+        if dir.index() % CHECK_EVERY == 0 && stop() {
+            return None;
+        }
         let ctx = at[dir.index()];
         let Some(t) = ctx.trie else { continue };
         if !trie.has_children(t) {
@@ -371,6 +390,9 @@ pub fn categorize(snapshot: &Snapshot, env: &Env) -> Categories {
     let mut items: Vec<Vec<Item>> = vec![Vec::new(); CategoryId::ALL.len()];
     for dir in snapshot.dirs().rev() {
         let i = dir.index();
+        if i % CHECK_EVERY == 0 && stop() {
+            return None;
+        }
         let me = node[i];
         let own = snapshot.own(dir);
         let mut own_sums = Sums {
@@ -439,13 +461,13 @@ pub fn categorize(snapshot: &Snapshot, env: &Env) -> Categories {
         })
         .collect();
 
-    Categories {
+    Some(Categories {
         platform: env.platform,
         list,
         node,
         residual,
         file_rules,
-    }
+    })
 }
 
 /// What a folder passes down to its subfolders while categorizing.
