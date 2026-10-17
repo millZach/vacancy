@@ -1,6 +1,30 @@
+import type { CategoryId } from '../bindings/CategoryId';
+import type { CategoryTotal } from '../bindings/CategoryTotal';
+import type { FullDiskAccess } from '../bindings/FullDiskAccess';
+import type { ItemKind } from '../bindings/ItemKind';
+import type { MapCategory } from '../bindings/MapCategory';
+import type { MapFolder } from '../bindings/MapFolder';
+import type { MapItem } from '../bindings/MapItem';
+import type { Overview } from '../bindings/Overview';
+import type { ScanOutcome } from '../bindings/ScanOutcome';
+import type { ScanSummary } from '../bindings/ScanSummary';
+import type { ScanUpdate } from '../bindings/ScanUpdate';
 import type { VolumeInfo } from '../bindings/VolumeInfo';
 
-export type { VolumeInfo };
+export type {
+  CategoryId,
+  CategoryTotal,
+  FullDiskAccess,
+  ItemKind,
+  MapCategory,
+  MapFolder,
+  MapItem,
+  Overview,
+  ScanOutcome,
+  ScanSummary,
+  ScanUpdate,
+  VolumeInfo,
+};
 
 /** Which desktop the UI is running on. It decides the window chrome (macOS draws traffic lights over the header). */
 export type Platform = 'windows' | 'macos';
@@ -17,4 +41,19 @@ export interface Bridge {
   systemVolume(): Promise<VolumeInfo>;
   /** This computer's name, as the OS shows it. */
   machineName(): Promise<string>;
+  /** Local volumes for the drive picker, the system volume first. Read-only. */
+  listVolumes(): Promise<VolumeInfo[]>;
+  /** Whether macOS lets Vacancy see everything ("notApplicable" on Windows). */
+  fullDiskAccess(): Promise<FullDiskAccess>;
+  /** Opens System Settings at Full Disk Access (macOS). */
+  openFullDiskAccessSettings(): Promise<void>;
+  /**
+   * Scans a volume, read-only. `onUpdate` gets the HUD's numbers about ten times a second, now and then with a
+   * preview of the categories. Resolves with the map, or with `{ status: 'cancelled' }` after `cancelScan`.
+   */
+  scan(mountPoint: string, onUpdate: (update: ScanUpdate) => void): Promise<ScanOutcome>;
+  /** Stops the running scan. */
+  cancelScan(): Promise<void>;
+  /** Opens a folder tile of the last finished scan. */
+  browse(id: string): Promise<MapFolder>;
 }

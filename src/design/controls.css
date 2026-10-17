@@ -55,3 +55,46 @@
 .pill.is-muted {
   opacity: 0.7;
 }
+
+/* A quiet button, beside or instead of the neon one. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 14px 7px;
+  border: 1px solid var(--color-line-2);
+  border-radius: var(--radius-md);
+  background: var(--color-raise);
+  font: 600 var(--text-base) / 1.2 var(--font-sans);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+}
+.btn:hover:not(:disabled) {
+  background: var(--color-raise-hover);
+  border-color: var(--color-line-hover);
+}
+.btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.btn--sm {
+  padding: 5px 10px 4px;
+  font-size: var(--text-ui);
+}
+
+/* A button that reads as a link inside a sentence. */
+.link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-text);
+  font: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}

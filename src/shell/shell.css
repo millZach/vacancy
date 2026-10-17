@@ -52,11 +52,16 @@
   left: 0;
   background: var(--color-meter);
 }
-.head-disk-nums {
+.head-disk-nums,
+.head-disk-free {
   font-size: var(--text-sm);
   color: var(--color-text-3);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+.head-disk-free::before {
+  content: '·';
+  margin-right: 9px;
 }
 
 .head-right {

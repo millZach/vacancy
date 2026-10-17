@@ -1,0 +1,301 @@
+/* The space map (variant D's Atlas map): regions with a header band, tiles inside them, free space, the hover
+   card and the key. Colours come from the tokens: each category's hue mixed with the map's lightness and chroma. */
+
+[data-cat='apps'] {
+  --h: var(--hue-apps);
+}
+[data-cat='dev'] {
+  --h: var(--hue-dev);
+}
+[data-cat='media'] {
+  --h: var(--hue-media);
+}
+[data-cat='photos'] {
+  --h: var(--hue-photos);
+}
+[data-cat='system'] {
+  --h: var(--hue-system);
+}
+[data-cat='downloads'] {
+  --h: var(--hue-downloads);
+}
+[data-cat='caches'] {
+  --h: var(--hue-caches);
+}
+[data-cat='cloud'] {
+  --h: var(--hue-cloud);
+}
+[data-cat='other'] {
+  --h: var(--hue-other);
+}
+
+.map {
+  position: absolute;
+  inset: 0;
+}
+
+.map-region,
+.map-tile {
+  position: absolute;
+  transition:
+    left var(--map-move),
+    top var(--map-move),
+    width var(--map-move),
+    height var(--map-move),
+    opacity 0.35s ease;
+  animation: map-in 0.4s ease backwards;
+}
+@keyframes map-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.map-region {
+  border-radius: 5px;
+  background: oklch(var(--map-region-l) var(--map-region-c) var(--h));
+}
+.map-region.is-free {
+  background: none;
+}
+.map-region.is-locked {
+  background-image: var(--hatch);
+}
+
+.map-region-head {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 2px var(--space-3) 0;
+  border: 0;
+  border-radius: 5px 5px 0 0;
+  background: none;
+  color: oklch(var(--map-head-l) var(--map-head-c) var(--h));
+  font: 700 var(--text-sm) / 1 var(--font-sans);
+  letter-spacing: 0.005em;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+}
+.map-region-head:disabled {
+  cursor: default;
+}
+.map-region-head svg {
+  flex: none;
+  opacity: 0.85;
+}
+.map-region-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.map-region-size {
+  margin-left: auto;
+  padding-left: var(--space-3);
+  color: oklch(var(--map-size-l) var(--map-size-c) var(--h));
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.map-region.is-locked .map-region-head {
+  color: oklch(var(--map-head-locked-l) var(--map-head-locked-c) var(--h));
+}
+
+.map-tile {
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--ground);
+}
+.map-tile::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  border-radius: inherit;
+  pointer-events: none;
+}
+.map-fill {
+  position: absolute;
+  inset: 0;
+  background: oklch(
+    calc(var(--map-tile-l) + var(--shade, 0) * var(--map-tile-step)) var(--map-tile-c) var(--h)
+  );
+  transition: filter 0.15s;
+}
+.map-tile.is-locked .map-fill {
+  background: oklch(
+    calc(var(--map-tile-l) + var(--shade, 0) * var(--map-tile-step)) var(--map-tile-c-locked) var(--h)
+  );
+}
+.map-tile.is-locked .map-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--hatch);
+}
+.map-label {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 100%;
+  padding: var(--space-2) var(--space-3);
+  pointer-events: none;
+}
+.map-name {
+  font: 600 var(--text-sm) / 1.25 var(--font-sans);
+  color: var(--color-tile-text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: break-word;
+}
+.map-label.is-1line .map-name {
+  display: block;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.map-size {
+  font: 500 var(--text-xs) / 1.2 var(--font-sans);
+  color: var(--color-tile-size);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Free space: the dotted ground with a hairline. */
+.map-tile--free {
+  box-shadow: inset 0 0 0 1px var(--color-line-2);
+}
+.map-tile--free .map-name {
+  color: var(--color-text-2);
+}
+.map-tile--free .map-size {
+  color: var(--color-text-3);
+}
+
+.map-tile.is-clickable {
+  cursor: pointer;
+}
+.map-tile.is-clickable:hover .map-fill,
+.map-tile.is-hot .map-fill {
+  filter: brightness(1.25) saturate(1.1);
+}
+.map-tile.is-hot {
+  z-index: 6;
+}
+.map-tile.is-hot::after {
+  box-shadow: inset 0 0 0 2px var(--color-tile-hot);
+}
+
+/* ---------- hover card ---------- */
+.map-tip {
+  position: absolute;
+  z-index: 50;
+  pointer-events: none;
+  padding: 11px 13px 10px;
+  border: 1px solid var(--color-line-2);
+  border-radius: var(--radius-lg);
+  background: var(--color-tip);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  box-shadow: var(--shadow-float);
+  font-size: var(--text-sm);
+  color: var(--color-text-2);
+}
+.map-tip-name {
+  font: 700 13.5px / 1.3 var(--font-sans);
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+.map-tip-path {
+  margin: 3px 0 7px;
+  font: 400 var(--text-2xs) / 1.45 var(--font-mono);
+  color: var(--color-text-3);
+  word-break: break-all;
+}
+.map-tip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-6);
+  margin-top: var(--space-1);
+}
+.map-tip-row b {
+  font-size: var(--text-md);
+  font-weight: 700;
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+}
+.map-tip-status {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--color-line);
+  line-height: 1.45;
+}
+.map-tip-note {
+  margin: 0 0 var(--space-2);
+}
+.map-tip-blurb {
+  margin: var(--space-2) 0 0;
+  line-height: 1.45;
+}
+.map-tip-lock {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-text-2);
+}
+.map-tip-region {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--color-text-3);
+}
+.map-tip-region i {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: oklch(var(--map-chip-l) var(--map-chip-c) var(--h));
+}
+
+/* ---------- key ---------- */
+.legend {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+  font-size: var(--text-xs);
+  color: var(--color-text-2);
+  white-space: nowrap;
+}
+.key {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.key i {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+}
+.key-locked {
+  background: var(--hatch), var(--color-key-locked);
+}
+.key-free {
+  background: var(--ground);
+  box-shadow: inset 0 0 0 1px var(--color-line-2);
+}
+.key-scale i {
+  border-radius: 0;
+  border: 1px solid var(--color-key-scale);
+  background: var(--color-key-scale-fill);
+}

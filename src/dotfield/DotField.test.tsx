@@ -171,3 +171,47 @@ describe('the dot field', () => {
     expect(frames.waiting).toBe(0);
   });
 });
+
+describe('the dot field while scanning', () => {
+  let drawn: ReturnType<typeof fakeContext>;
+
+  beforeEach(() => {
+    clock = 0;
+    drawn = fakeContext();
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(drawn.ctx);
+    vi.spyOn(HTMLCanvasElement.prototype, 'getBoundingClientRect').mockReturnValue(
+      DOMRect.fromRect({ x: 0, y: 0, width: 800, height: 600 }),
+    );
+    designTokens({ '--dot-rgb': '196, 205, 219', '--neon-rgb': '255, 79, 179' });
+  });
+
+  /** Fill colours other than the resting dot colour: dots tinted by a ripple's neon wavefront. */
+  const tinted = () => [...drawn.fills].filter((f) => !f.startsWith('rgba(196,205,219,'));
+
+  // Frames run on a clock that only moves forward, as in a browser.
+  let clock = 0;
+  function runFor(frames: ReturnType<typeof manualFrames>, ms: number) {
+    for (const end = clock + ms; clock < end; ) frames.run((clock += 16));
+  }
+
+  it('drops droplets as the scan sweeps across, and none without a scan', () => {
+    prefersReducedMotion(false);
+    const frames = manualFrames();
+    const { rerender } = render(<DotField scan={null} />);
+    runFor(frames, 800);
+    expect(tinted()).toEqual([]);
+
+    rerender(<DotField scan={0.4} />);
+    runFor(frames, 800);
+    expect(tinted().length).toBeGreaterThan(0);
+  });
+
+  it('fades out when the map has covered it', () => {
+    prefersReducedMotion(false);
+    manualFrames();
+    const { container, rerender } = render(<DotField scan={0.5} />);
+    expect(container.querySelector('canvas')).not.toHaveClass('is-out');
+    rerender(<DotField scan={0.9} out />);
+    expect(container.querySelector('canvas')).toHaveClass('is-out');
+  });
+});
