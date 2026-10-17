@@ -1837,15 +1837,32 @@ mod tests {
     #[test]
     fn a_mount_that_cant_be_read_skips_everything() {
         let fx = Fx::new();
+        // Planned while mounts can be read, so the plan holds the cache; run while they can't.
+        let plan = crate::plan::plan(&fx.scanned, &fx.env, &[cache().to_owned()]).unwrap();
+        let planned = plan.summary();
+        assert!(
+            planned.items > 0 && planned.refused.is_empty(),
+            "{planned:#?}"
+        );
         crate::fsid::test_hooks::set_fail_mount(true);
-        let report = fx.run(cache(), &Hooks::default(), &CancelToken::new());
+        let report = execute_inner(
+            &plan,
+            &fx.env,
+            &|| None,
+            &mut |_| {},
+            &CancelToken::new(),
+            &Hooks::default(),
+        );
         crate::fsid::test_hooks::set_fail_mount(false);
         assert_eq!(report.deleted_items, 0, "{:#?}", report.steps);
+        assert_eq!(report.freed_bytes, 0);
         assert!(fx.profile.cache.join("f_000001").exists());
+        let skipped = skips(&report);
         assert!(
-            skips(&report)
-                .iter()
-                .all(|k| k.reason.contains("which volume it is on can't be read")),
+            !skipped.is_empty()
+                && skipped
+                    .iter()
+                    .all(|k| k.reason.contains("which volume it is on can't be read")),
             "{:#?}",
             report.steps
         );
