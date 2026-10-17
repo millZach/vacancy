@@ -4,7 +4,7 @@ import { useBridge, type CategoryId, type MapFolder, type VolumeInfo } from '../
 import { DotField, type DotFieldHandle } from '../dotfield/DotField';
 import type { DrivesState } from '../drives';
 import { errorMessage } from '../errors';
-import { formatCount } from '../format';
+import { formatBytes, formatCount } from '../format';
 import { Legend } from '../map/Legend';
 import { MapView } from '../map/MapView';
 import { folderModel, overviewModel, scanModel, type Leaf, type Region } from '../map/model';
@@ -204,6 +204,8 @@ export function Atlas({ drives, selected, onSelect, scan, agent }: Props) {
             <ScanNotes
               unreadable={overview.scan.unreadable}
               samples={overview.scan.unreadableSamples}
+              overCount={overview.scan.overCountBytes}
+              os={bridge.platform === 'macos' ? 'macOS' : 'Windows'}
               missingAccess={drives.fullDiskAccess === 'missing'}
               onOpenAccess={() => void bridge.openFullDiskAccessSettings()}
             />
@@ -251,11 +253,34 @@ export function Atlas({ drives, selected, onSelect, scan, agent }: Props) {
   );
 }
 
-/** After a scan: how many folders could not be read, and on a Mac without Full Disk Access, the way to fix it. */
-function ScanNotes(p: { unreadable: number; samples: string[]; missingAccess: boolean; onOpenAccess: () => void }) {
-  if (p.unreadable === 0 && !p.missingAccess) return null;
+interface NotesProps {
+  unreadable: number;
+  samples: string[];
+  /** Bytes the scan counted beyond what the OS reports in use. */
+  overCount: number;
+  /** "Windows" or "macOS", for the over-count note. */
+  os: string;
+  missingAccess: boolean;
+  onOpenAccess: () => void;
+}
+
+/**
+ * After a scan: how many folders could not be read; if the scan counted more than the OS says is in use (files
+ * that grew or appeared while it ran), by how much, since the map then holds more than the header's used figure;
+ * and on a Mac without Full Disk Access, the way to fix it.
+ */
+function ScanNotes(p: NotesProps) {
+  if (p.unreadable === 0 && p.overCount <= 0 && !p.missingAccess) return null;
   return (
     <div className="scan-notes">
+      {p.overCount > 0 && (
+        <span
+          className="scan-note"
+          title={`The map adds up to more than ${p.os} reports as used. Files changed while the scan ran; scan again for exact figures.`}
+        >
+          Counted {formatBytes(p.overCount)} more than {p.os} says is in use: files changed during the scan
+        </span>
+      )}
       {p.unreadable > 0 && (
         <span className="scan-note" title={`Couldn’t read:\n${p.samples.join('\n')}`}>
           {formatCount(p.unreadable)} {p.unreadable === 1 ? 'folder' : 'folders'} couldn’t be read

@@ -195,6 +195,23 @@ describe('the map', () => {
     expect(screen.getByLabelText('Map key')).toHaveTextContent('Protected');
   });
 
+  it('says so when the scan counted more than the OS reports in use', async () => {
+    const fixture = structuredClone(fixtures.windows);
+    fixture.overview.scan.overCountBytes = 2e9;
+    renderApp(createMockBridge(fixture, { scanMs: 0 }));
+    await scanToMap();
+
+    expect(
+      screen.getByText((text) => plain(text) === 'Counted 2.0 GB more than Windows says is in use: files changed during the scan'),
+    ).toBeInTheDocument();
+  });
+
+  it('adds no over-count note when the scan fits in the used space', async () => {
+    renderApp(windows());
+    await scanToMap();
+    expect(screen.queryByText(/more than Windows says is in use/)).toBeNull();
+  });
+
   it('shows a tile’s path, size and last use on hover', async () => {
     const { container } = renderApp(windows());
     await scanToMap();
