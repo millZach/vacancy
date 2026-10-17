@@ -26,10 +26,12 @@ try {
     if (!response.ok || !disk.equals(served)) throw new Error(`Preview differs from built asset: ${path}`);
     observations.builtAssets.push({ path, bytes: disk.length, sha256: createHash('sha256').update(disk).digest('hex'), modifiedAt: (await stat(join('dist', path))).mtime.toISOString() });
   }
+  await writeFile(join(out, 'asset-attestation.json'), JSON.stringify(observations.builtAssets, null, 2));
   browser = await chromium.launch({ channel: 'msedge' });
   for (const platform of ['windows', 'macos']) {
     for (const mixed of [false, true]) {
       const name = `${platform}-${mixed ? 'mixed' : 'reminders'}`;
+      const journeyStarted = performance.now();
       const page = await browser.newPage({ viewport: { width: 1280, height: 820 }, reducedMotion: 'reduce' });
       page.on('pageerror', error => errors.push(`${name}: ${error}`));
       page.on('console', message => { if (message.type() === 'error') errors.push(`${name}: ${message.text()}`); });
@@ -37,6 +39,10 @@ try {
       await page.getByRole('button', { name: /^Scan / }).click();
       await page.getByRole('button', { name: 'Build a plan' }).click();
       const tray = page.getByRole('complementary', { name: 'Plan' });
+      const boxes = tray.getByRole('region', { name: 'Delete' }).getByRole('checkbox');
+      if (!mixed) for (const box of await boxes.all()) {
+        if (await box.getAttribute('aria-checked') === 'true') await box.click();
+      }
       const names = platform === 'windows'
         ? ['Review Windows cleanup', 'Review Delivery Optimization', 'Review Docker images', 'Review Docker build cache']
         : ['Review Docker images', 'Review Docker build cache', 'Review Xcode simulators and runtimes', 'Preview Homebrew cleanup'];
@@ -49,13 +55,10 @@ try {
         if (await row.locator('ol > li').count() !== 3) throw new Error(`Missing ordered steps: ${title}`);
         await row.getByRole('button', { name: /↗/ }).click();
         await row.getByRole('alert').filter({ hasText: 'No app was launched.' }).waitFor();
+        await row.locator('.hint-action').screenshot({ path: join(out, `${name}-reference-${i + 1}.png`) });
         await checkbox.click();
         await row.screenshot({ path: join(out, `${name}-guide-${i + 1}.png`) });
         await tray.getByRole('button', { name: title, exact: true }).click();
-      }
-      const boxes = tray.getByRole('region', { name: 'Delete' }).getByRole('checkbox');
-      if (!mixed) for (const box of await boxes.all()) {
-        if (await box.getAttribute('aria-checked') === 'true') await box.click();
       }
       await tray.screenshot({ path: join(out, `${name}-plan.png`) });
       await tray.getByRole('button', { name: mixed ? /^Free / : 'Review reminders' }).click();
@@ -69,7 +72,9 @@ try {
       const kept = page.locator('.slide--kept');
       await kept.waitFor();
       await page.setViewportSize({ width: 1100, height: 620 });
+      const keyboardReferenceReachMs = [];
       for (const disclosure of await kept.locator('summary').all()) {
+        const interactionStarted = performance.now();
         await disclosure.focus();
         await page.keyboard.press('Space');
         if (!await disclosure.locator('..').getAttribute('open').then(value => value !== null)) throw new Error('Space did not open guide');
@@ -79,6 +84,7 @@ try {
         await page.keyboard.press('Tab');
         const focused = await page.evaluate(() => ({ label: document.activeElement?.textContent, rect: document.activeElement?.getBoundingClientRect().toJSON() }));
         if (!focused.label?.includes('↗') || focused.rect.top < 0 || focused.rect.bottom > 620) throw new Error(`Keyboard reference not reachable: ${JSON.stringify(focused)}`);
+        keyboardReferenceReachMs.push(performance.now() - interactionStarted);
       }
       if (await kept.locator('ol > li').count() !== 12) throw new Error('Highlights lost instructions');
       const scroll = await kept.evaluate(el => ({ height: el.clientHeight, content: el.scrollHeight, overflow: getComputedStyle(el).overflowY }));
@@ -86,9 +92,10 @@ try {
       await page.screenshot({ path: join(out, `${name}-short-highlights.png`) });
       await page.setViewportSize({ width: 1280, height: 820 });
       await page.getByRole('button', { name: 'Skip to recap' }).click();
-      for (const toggle of await page.getByText('Instructions and reference', { exact: true }).all()) await toggle.click();
       const summary = page.getByRole('complementary', { name: 'What Vacancy did' });
       await summary.waitFor();
+      await page.locator('.wrap').waitFor({ state: 'detached' });
+      for (const toggle of await summary.getByText('Instructions and reference', { exact: true }).all()) await toggle.click();
       if (await summary.locator('ol > li').count() !== 12) throw new Error('Recap lost guide steps');
       await page.screenshot({ path: join(out, `${name}-recap.png`) });
       const summaryText = await summary.innerText();
@@ -97,7 +104,7 @@ try {
       await page.getByRole('menuitem').click();
       if (await page.getByText('Instructions and reference', { exact: true }).count() !== 4) throw new Error('History lost guides');
       await page.screenshot({ path: join(out, `${name}-history.png`) });
-      observations.journeys.push({ platform, mixed, guides: names, summaryText, orderedSteps: 12, fixtureReferencesRefused: 4, shortHighlights: scroll, keyboardReferencesReached: 4 });
+      observations.journeys.push({ platform, mixed, guides: names, summaryText, orderedSteps: 12, fixtureReferencesRefused: 4, shortHighlights: scroll, keyboardReferencesReached: 4, keyboardReferenceReachMs, elapsedMs: performance.now() - journeyStarted });
       await page.close();
     }
   }
