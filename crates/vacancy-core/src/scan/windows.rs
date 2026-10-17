@@ -12,11 +12,13 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::{io, mem, ptr};
 
+use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+use windows_sys::Wdk::Storage::FileSystem::NtOpenFile;
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_CANT_ACCESS_FILE, ERROR_DIRECTORY,
     ERROR_FILE_NOT_FOUND, ERROR_INVALID_LEVEL, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES,
     ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND, ERROR_PRIVILEGE_NOT_HELD, ERROR_SHARING_VIOLATION,
-    GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+    GetLastError, HANDLE, INVALID_HANDLE_VALUE, UNICODE_STRING,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE,
@@ -28,6 +30,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FileIdExtdDirectoryInfo, FileIdInfo, FileStandardInfo, GetFileInformationByHandleEx,
     GetVolumeInformationW, GetVolumePathNameW, OPEN_EXISTING, SYNCHRONIZE,
 };
+use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
 use super::{Collector, Entry, EntryKind, LinkKey, ListError, RootSpec};
 use crate::snapshot::{RootKind, UnixTime};
@@ -134,7 +137,6 @@ pub(crate) struct Lister {
 /// The parts of a lister an entry is built in, apart from the listing buffer the entry is read from.
 #[derive(Default)]
 struct Scratch {
-    file: Vec<u16>,
     name: String,
 }
 
@@ -180,6 +182,7 @@ impl Lister {
                 None => return Err(ListError::Failed),
             }
         }
+        out.opened(dir);
         let mut first = true;
         loop {
             if out.cancelled() {
@@ -219,7 +222,7 @@ impl Lister {
                 }
             }
             first = false;
-            read_batch(&self.buf, class, dir, volume, &mut self.scratch, out);
+            read_batch(&self.buf, class, &handle, volume, &mut self.scratch, out);
         }
     }
 }
@@ -271,11 +274,72 @@ fn identity_of(handle: &Handle) -> Option<(u64, u128)> {
     })
 }
 
+/// The allocation the OS reports through a handle for the file `name` in the open folder `dir`, for files whose
+/// listing says none. The file is opened relative to the folder's handle, never by path, so a folder above it
+/// swapped for a junction after the listing can't send the query elsewhere; and with `FILE_OPEN_REPARSE_POINT`, a
+/// file swapped for a link opens as the link. Attribute access only: the file's data is never read or recalled.
+fn allocation_in(dir: &Handle, name: &[u16]) -> Option<u64> {
+    const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
+    const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
+    const FILE_OPEN_FOR_BACKUP_INTENT: u32 = 0x0000_4000;
+    const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let bytes = u16::try_from(name.len() * 2).ok()?;
+    let object_name = UNICODE_STRING {
+        Length: bytes,
+        MaximumLength: bytes,
+        Buffer: name.as_ptr().cast_mut(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: dir.0,
+        ObjectName: &object_name,
+        // No OBJ_CASE_INSENSITIVE: the name is exactly as listed, and a case-sensitive folder may hold another
+        // name that differs only by case.
+        Attributes: 0,
+        SecurityDescriptor: ptr::null(),
+        SecurityQualityOfService: ptr::null(),
+    };
+    // SAFETY: an all-zero IO_STATUS_BLOCK is valid.
+    let mut status_block: IO_STATUS_BLOCK = unsafe { mem::zeroed() };
+    let mut file: HANDLE = ptr::null_mut();
+    // SAFETY: every pointer is valid for the call: `object_name` borrows `name`, which outlives it, and `dir` is
+    // an open folder handle.
+    let status = unsafe {
+        NtOpenFile(
+            &mut file,
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            &attributes,
+            &mut status_block,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_SYNCHRONOUS_IO_NONALERT
+                | FILE_NON_DIRECTORY_FILE
+                | FILE_OPEN_FOR_BACKUP_INTENT
+                | FILE_OPEN_REPARSE_POINT,
+        )
+    };
+    if status < 0 || file.is_null() {
+        return None;
+    }
+    let file = Handle(file);
+    // SAFETY: an all-zero FILE_STANDARD_INFO is valid.
+    let mut info: FILE_STANDARD_INFO = unsafe { mem::zeroed() };
+    // SAFETY: `info` is writable and sized as passed; the handle is open.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.0,
+            FileStandardInfo,
+            (&raw mut info).cast(),
+            mem::size_of::<FILE_STANDARD_INFO>() as u32,
+        )
+    };
+    (ok != 0).then(|| u64::try_from(info.AllocationSize).unwrap_or(0))
+}
+
 /// Walks one buffer of entries.
 fn read_batch(
     buf: &[u64],
     class: FILE_INFO_BY_HANDLE_CLASS,
-    dir: &Path,
+    dir: &Handle,
     volume: &Volume,
     scratch: &mut Scratch,
     out: &mut Collector<'_>,
@@ -305,7 +369,7 @@ fn read_batch(
 }
 
 impl Scratch {
-    fn entry<'n>(&'n mut self, raw: &RawEntry<'_>, dir: &Path, volume: &Volume) -> Entry<'n> {
+    fn entry<'n>(&'n mut self, raw: &RawEntry<'_>, dir: &Handle, volume: &Volume) -> Entry<'n> {
         let is_dir = raw.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
         let reparse = raw.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
         let tag = if reparse { raw.reparse_tag } else { 0 };
@@ -321,7 +385,7 @@ impl Scratch {
             && allocated == 0
             && raw.end_of_file > 0
             && raw.attributes & SPARSE_LIKE == 0
-            && let Some(real) = self.allocation_by_handle(dir)
+            && let Some(real) = allocation_in(dir, raw.name)
         {
             allocated = real;
         }
@@ -346,41 +410,6 @@ impl Scratch {
             link_key,
             identity,
         }
-    }
-
-    /// The allocation the OS reports for `dir\{self.name}` through a handle, for files whose listing says none.
-    /// Opens for attributes only, which never reads or recalls the file's data.
-    fn allocation_by_handle(&mut self, dir: &Path) -> Option<u64> {
-        verbatim(&dir.join(&self.name), &mut self.file);
-        self.file.push(0);
-        // SAFETY: `self.file` is NUL-terminated; attribute-only access with OPEN_REPARSE_POINT.
-        let handle = unsafe {
-            CreateFileW(
-                self.file.as_ptr(),
-                FILE_READ_ATTRIBUTES,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                ptr::null(),
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-                ptr::null_mut(),
-            )
-        };
-        if handle == INVALID_HANDLE_VALUE {
-            return None;
-        }
-        let handle = Handle(handle);
-        // SAFETY: an all-zero FILE_STANDARD_INFO is valid.
-        let mut info: FILE_STANDARD_INFO = unsafe { mem::zeroed() };
-        // SAFETY: `info` is writable and sized as passed; the handle is open.
-        let ok = unsafe {
-            GetFileInformationByHandleEx(
-                handle.0,
-                FileStandardInfo,
-                (&raw mut info).cast(),
-                mem::size_of::<FILE_STANDARD_INFO>() as u32,
-            )
-        };
-        (ok != 0).then(|| u64::try_from(info.AllocationSize).unwrap_or(0))
     }
 
     /// Decodes a UTF-16 name into `self.name`. False if it is not valid UTF-16.

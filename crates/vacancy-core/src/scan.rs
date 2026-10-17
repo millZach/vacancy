@@ -145,16 +145,25 @@ pub fn scan(
     progress: &mut dyn FnMut(&ScanProgress<'_>),
     cancel: &CancelToken,
 ) -> Result<Snapshot, ScanError> {
-    scan_inner(volume, options, progress, cancel, None)
+    scan_inner(volume, options, progress, cancel, &Hooks::default())
 }
 
-/// [`scan`], with a hook the tests use to change the tree just before a folder is opened.
+/// Points where the tests change the tree mid-scan, to check that a change can't redirect the walk.
+#[derive(Default)]
+pub(crate) struct Hooks<'h> {
+    /// Just before a folder is opened.
+    pub(crate) before_enter: Option<&'h (dyn Fn(&Path) + Sync)>,
+    /// Just after a folder is opened and checked, before its entries are read.
+    pub(crate) after_open: Option<&'h (dyn Fn(&Path) + Sync)>,
+}
+
+/// [`scan`], with [`Hooks`].
 pub(crate) fn scan_inner(
     volume: &Path,
     options: &ScanOptions,
     progress: &mut dyn FnMut(&ScanProgress<'_>),
     cancel: &CancelToken,
-    before_enter: Option<&(dyn Fn(&Path) + Sync)>,
+    hooks: &Hooks<'_>,
 ) -> Result<Snapshot, ScanError> {
     let started = Instant::now();
     let fail = |source| ScanError::Root {
@@ -194,7 +203,8 @@ pub(crate) fn scan_inner(
         bytes: AtomicU64::new(0),
         unreadable: AtomicU64::new(0),
         current: Mutex::new(tasks.first().map(|t| t.path.clone()).unwrap_or_default()),
-        before_enter,
+        before_enter: hooks.before_enter,
+        after_open: hooks.after_open,
     };
 
     std::thread::scope(|threads| {
@@ -287,6 +297,7 @@ struct Shared<'a> {
     unreadable: AtomicU64,
     current: Mutex<PathBuf>,
     before_enter: Option<&'a (dyn Fn(&Path) + Sync)>,
+    after_open: Option<&'a (dyn Fn(&Path) + Sync)>,
 }
 
 /// Why a folder could not be listed.
@@ -370,6 +381,7 @@ pub(crate) struct Collector<'a> {
     keep_from: u64,
     now: UnixTime,
     cancel: &'a CancelToken,
+    after_open: Option<&'a (dyn Fn(&Path) + Sync)>,
 }
 
 impl Collector<'_> {
@@ -435,6 +447,13 @@ impl Collector<'_> {
             .with(DirFlags::INCOMPLETE);
     }
 
+    /// Called by the listers once a folder is open and checked, before reading it (a test hook).
+    pub(crate) fn opened(&self, dir: &Path) {
+        if let Some(hook) = self.after_open {
+            hook(dir);
+        }
+    }
+
     /// Whether the scan was cancelled. Listers check it between batches of entries.
     pub(crate) fn cancelled(&self) -> bool {
         self.cancel.is_cancelled()
@@ -474,6 +493,7 @@ fn walk<'s>(s: &rayon::Scope<'s>, shared: &'s Shared<'s>, task: Task) {
             keep_from: shared.keep_from,
             now: shared.now,
             cancel: shared.cancel,
+            after_open: shared.after_open,
         };
         let listed = w
             .lister
@@ -607,7 +627,10 @@ mod tests {
             &ScanOptions::default(),
             &mut |_| {},
             &CancelToken::new(),
-            Some(&hook),
+            &Hooks {
+                before_enter: Some(&hook),
+                ..Hooks::default()
+            },
         )
         .expect("scan");
 
@@ -621,6 +644,81 @@ mod tests {
             .expect("the queued folder is recorded");
         assert!(snap.flags(inner).contains(DirFlags::CHANGED));
         assert_eq!(snap.children(inner).len(), 0, "never listed");
+    }
+
+    /// A file compressed by the Windows Overlay Filter lists as empty, so its size is asked again by handle. If its
+    /// folder is swapped for a junction after being opened, a by-path query would measure a file elsewhere; the
+    /// query is anchored to the opened folder instead.
+    #[cfg(windows)]
+    #[test]
+    fn the_size_query_stays_in_the_opened_folder_when_it_is_swapped() {
+        let fx = tempfile::tempdir().unwrap();
+        let root = fx.path().join("scanned");
+        let outside = fx.path().join("outside");
+        let wof = root.join("cache").join("inner").join("big.txt");
+        fs::create_dir_all(wof.parent().unwrap()).unwrap();
+        fs::write(&wof, b"vacancy compresses well ".repeat(80_000)).unwrap();
+        write(&outside.join("inner").join("big.txt"), 4 * MIB as usize);
+        let compacted = std::process::Command::new("compact")
+            .args(["/c", "/exe:xpress4k"])
+            .arg(&wof)
+            .output()
+            .expect("run compact")
+            .status
+            .success();
+        let plain = scan_inner(
+            &root,
+            &ScanOptions::default(),
+            &mut |_| {},
+            &CancelToken::new(),
+            &Hooks::default(),
+        )
+        .expect("scan");
+        let measured = plain.tree(plain.roots()[0].dir).bytes;
+        if !compacted || measured >= 1_900_000 {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI can compress a file with compact /exe"
+            );
+            eprintln!("skipped: compact /exe is not available here");
+            return;
+        }
+
+        let swapped = AtomicBool::new(false);
+        let hook = |path: &Path| {
+            if path.ends_with(Path::new("cache").join("inner"))
+                && !swapped.swap(true, Ordering::SeqCst)
+            {
+                let folder = root.join("cache").join("inner");
+                fs::rename(&folder, root.join("cache").join("inner-moved"))
+                    .expect("move the opened folder");
+                link_dir(&folder, &outside.join("inner"));
+                assert_eq!(
+                    fs::metadata(folder.join("big.txt")).unwrap().len(),
+                    4 * MIB,
+                    "the file's path now leads outside the scan"
+                );
+            }
+        };
+        let snap = scan_inner(
+            &root,
+            &ScanOptions::default(),
+            &mut |_| {},
+            &CancelToken::new(),
+            &Hooks {
+                after_open: Some(&hook),
+                ..Hooks::default()
+            },
+        )
+        .expect("scan");
+
+        assert!(swapped.load(Ordering::SeqCst), "the hook ran");
+        let total = snap.tree(snap.roots()[0].dir).bytes;
+        assert_eq!(
+            total, measured,
+            "the compressed file, measured in the folder that was listed"
+        );
+        assert!(total < MIB, "the outside file is not measured: {total}");
     }
 
     /// A cancel lands while a big folder is being listed: the listing stops early instead of reading it all.
@@ -647,6 +745,7 @@ mod tests {
             keep_from: u64::MAX,
             now: i64::MAX,
             cancel: &cancel,
+            after_open: None,
         };
         assert!(
             lister
@@ -663,6 +762,7 @@ mod tests {
             keep_from: u64::MAX,
             now: i64::MAX,
             cancel: &cancel,
+            after_open: None,
         };
         let result = lister.list(fx.path(), None, &roots[0].volume, &mut collector);
         assert!(matches!(result, Err(ListError::Cancelled)), "{result:?}");

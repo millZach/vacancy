@@ -181,6 +181,7 @@ impl Lister {
             unsafe { libc::close(fd) };
             return Err(ListError::Changed);
         }
+        out.opened(dir);
         // SAFETY: `fd` is an open directory; on success the stream owns it.
         let stream = unsafe { libc::fdopendir(fd) };
         if stream.is_null() {
@@ -340,6 +341,7 @@ mod tests {
             keep_from: u64::MAX,
             now: i64::MAX,
             cancel: &cancel,
+            after_open: None,
         };
         Lister::default().list(Path::new(dir), None, volume, &mut collector)
     }

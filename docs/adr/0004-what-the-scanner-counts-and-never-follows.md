@@ -12,7 +12,7 @@ The scanner reads a whole volume without admin rights, fast enough for a drive o
 
 ## Sizes
 
-- **Allocated, not logical**, from the listing itself: it already reflects NTFS compression, sparse files and cloud placeholders. One case lists wrong: files compressed by the Windows Overlay Filter (CompactOS, `compact /exe`) list with nothing allocated, so files with a length, no allocation and none of the sparse, compressed or cloud attributes are asked again through a handle opened for attributes only.
+- **Allocated, not logical**, from the listing itself: it already reflects NTFS compression, sparse files and cloud placeholders. One case lists wrong: files compressed by the Windows Overlay Filter (CompactOS, `compact /exe`) list with nothing allocated, so files with a length, no allocation and none of the sparse, compressed or cloud attributes are asked again through a handle opened for attributes only. That file is opened relative to the already verified folder handle (`NtOpenFile` with `RootDirectory`), never by path, so a folder swapped for a junction after it was opened can't send the query to a file elsewhere.
 - **Hard links once.** On NTFS a file id is a record number in a dense range, so "seen" is one bit per record (half a megabyte for four million files). On macOS the listing gives the link count, and only multi-link files go in a set.
 - **The OS's used figure is the truth.** The map shows the scan reconciled with it: used space the scan couldn't count (folders it may not open, restore points, swap, snapshots, file-system metadata) is one item in System, "Space Vacancy can't see", with the reason in its hover card. Nothing is invented to fill the gap.
 
