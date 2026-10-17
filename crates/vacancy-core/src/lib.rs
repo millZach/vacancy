@@ -4,6 +4,7 @@
 //! Types the UI sees derive [`ts_rs::TS`]. `cargo test` writes their TypeScript to `src/bindings/` at the repo
 //! root, and CI fails if the checked-in copy is stale.
 
+pub mod advisor;
 mod categorize;
 mod exec;
 pub mod fixture;
