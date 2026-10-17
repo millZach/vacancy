@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use super::Risk;
 use crate::categorize::{CategoryId, Env, Platform};
+use crate::guard::WINDOWS_DRIVE_SYSTEM;
 use crate::pathkey::PathKey;
 use crate::snapshot::Markers;
 
@@ -48,11 +49,12 @@ pub(super) enum Act {
 pub(super) enum Find {
     /// Known places. After the root, a name may be `*` (any folder) or `*.ext` (any folder ending so).
     Places(Vec<Place>),
-    /// Folders with one of these names (any case) anywhere below `under`, not inside another match or inside code
-    /// libraries.
+    /// Folders with one of these names (any case) anywhere below `under`, not inside another match, code
+    /// libraries or `prune`.
     Named {
         names: &'static [&'static str],
         under: Vec<PathBuf>,
+        prune: Vec<PathBuf>,
     },
     /// A project's dependency or build folder: a folder named `folder` (any case) whose parent has the `project`
     /// marker and the `proof`, in a project nobody has used for `idle_days`. Looked for below `under`, never
@@ -152,26 +154,51 @@ const APP_CACHES: &[&str] = &[
     "CachedData",
 ];
 
-/// Where to look for projects: the home folder on the drive that holds it, or the whole of any other drive. These
-/// are the Guard's allowed roots; temp folders are left to the temp rule.
+/// The temp folders the temp rule empties: those in the home folder, and others only if they are called `Temp` or
+/// `tmp`. A `%TEMP%` pointed at some other folder (`C:\Tools`) is not a reason to empty it.
+fn temp_places(env: &Env) -> Vec<Place> {
+    let home = PathKey::of(&env.home);
+    env.temp
+        .iter()
+        .filter(|t| {
+            let Some(key) = PathKey::of(t) else {
+                return false;
+            };
+            home.as_ref().is_some_and(|h| key.is_inside(h))
+                || key
+                    .names_from_last()
+                    .next()
+                    .is_some_and(|n| n == "temp" || n == "tmp")
+        })
+        .cloned()
+        .map(unlabelled)
+        .collect()
+}
+
+/// Where to look for projects, as the Guard allows: the home folder on the drive that holds it (and on Windows
+/// the folders at that drive's root, like `C:\Dev`), or the whole of any other drive. Temp folders are left to the
+/// temp rule.
 fn project_roots(env: &Env) -> Vec<PathBuf> {
     let home_here = match (PathKey::of(&env.home), PathKey::of(&env.root)) {
         (Some(home), Some(root)) => home.starts_with(&root),
         _ => false,
     };
-    vec![if home_here {
-        env.home.clone()
-    } else {
-        env.root.clone()
-    }]
+    match (home_here, env.platform) {
+        (true, Platform::Windows) => vec![env.home.clone(), env.root.clone()],
+        (true, Platform::MacOs) => vec![env.home.clone()],
+        (false, _) => vec![env.root.clone()],
+    }
 }
 
 /// Where never to look for projects: app data and the Library (apps ship their own `node_modules`), cloud-sync
-/// roots and the Recycle Bin. Tools' dot-folders in the home folder are skipped as well, by name.
+/// roots, the users' folder (the home folder is searched on its own) and what Windows keeps at a drive's root.
+/// Tools' dot-folders in the home folder are skipped as well, by name.
 fn project_prune(env: &Env, mut places: Vec<PathBuf>) -> Vec<PathBuf> {
     places.extend(env.cloud.iter().map(|c| c.path.clone()));
-    places.push(env.root.join("$Recycle.Bin"));
-    places.push(env.root.join("System Volume Information"));
+    places.extend(env.home.parent().map(Path::to_path_buf));
+    if env.platform == Platform::Windows {
+        places.extend(WINDOWS_DRIVE_SYSTEM.iter().map(|n| env.root.join(n)));
+    }
     places
 }
 
@@ -261,11 +288,7 @@ fn windows(env: &Env) -> Vec<Rule> {
             }
         }
         p.push(place(local, "Mozilla/Firefox/Profiles/*/cache2", "Firefox"));
-        p.push(place(
-            local,
-            "Microsoft/Windows/INetCache",
-            "Internet Explorer",
-        ));
+        p.push(place(local, "Microsoft/Windows/INetCache", "Windows"));
         p
     };
 
@@ -277,7 +300,7 @@ fn windows(env: &Env) -> Vec<Rule> {
             regenerable: true,
             default_on: None,
             action: Act::Contents,
-            find: Find::Places(env.temp.iter().cloned().map(unlabelled).collect()),
+            find: Find::Places(temp_places(env)),
             skip: Skip {
                 idle_days: 1,
                 ..Skip::default()
@@ -360,6 +383,8 @@ fn windows(env: &Env) -> Vec<Rule> {
             find: Find::Named {
                 names: APP_CACHES,
                 under: app_data,
+                // Temp belongs to the temp rule, which leaves alone what was used in the last day.
+                prune: env.temp.clone(),
             },
             skip: Skip::default(),
             text: Text {
@@ -544,6 +569,7 @@ fn macos(env: &Env) -> Vec<Rule> {
             find: Find::Named {
                 names: APP_CACHES,
                 under: vec![support.clone()],
+                prune: env.temp.clone(),
             },
             skip: Skip {
                 running_apps: true,

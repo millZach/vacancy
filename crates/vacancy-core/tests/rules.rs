@@ -754,6 +754,8 @@ mod guard {
 
     #[test]
     fn outside_the_allowed_roots() {
+        // Windows: another user's home is never searched, and a %TEMP% pointed at a folder at the drive's root
+        // doesn't empty it. Only a project inside it is found, as in any folder people make there (`C:\Dev`).
         let fx = Fixture::new();
         bait(&fx, "Tools");
         bait(&fx, "Users/bob/code");
@@ -761,12 +763,24 @@ mod guard {
         let mut env = win(&fx);
         env.temp = vec![fx.path("Tools")];
         let (snap, proposals) = run(&fx, &env, &moment(&[]));
-        let all = all_targets(&fx, &snap, &proposals);
-        assert!(
-            all.iter().all(|t| t.starts_with("Users/alex/")),
-            "nothing outside alex's home: {all:?}"
+        assert_eq!(
+            all_targets(&fx, &snap, &proposals),
+            vec![
+                "Tools/proj/node_modules".to_owned(),
+                "Users/alex/code/proj/node_modules".to_owned(),
+            ]
         );
-        assert!(!all.is_empty(), "the control");
+
+        // macOS: only the home folder.
+        let fx = Fixture::new();
+        bait(&fx, "code");
+        bait(&fx, "Users/bob/code");
+        bait(&fx, "Users/alex/code"); // the control
+        let (snap, proposals) = run(&fx, &mac(&fx), &moment(&[]));
+        assert_eq!(
+            all_targets(&fx, &snap, &proposals),
+            vec!["Users/alex/code/proj/node_modules".to_owned()]
+        );
     }
 }
 

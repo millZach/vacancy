@@ -10,8 +10,9 @@
 //! - **Protected names**, wherever they appear on the path: Photos libraries, Time Machine backups, macOS app bundles,
 //!   Windows' Store and game install folders.
 //!
-//! The allowed roots are the user's home and temp folders on the volume that holds the home folder, and the whole
-//! volume (below its root) on any other drive.
+//! The allowed roots are, on the drive that holds the home folder, the home folder, temp folders (outside the home
+//! folder only if they are called `Temp` or `tmp`) and, on Windows, the folders people make at the drive's root
+//! (`C:\Dev`; never `C:\Users`); on any other drive, the whole drive below its root.
 //!
 //! Places are compared as [`PathKey`]s, so case, `\\?\` prefixes, trailing separators and 8.3 short names don't
 //! change the answer. A path that can't be pinned to one place (relative, with `..`, with a stream, or with a short
@@ -62,6 +63,9 @@ struct Entry {
 pub struct Guard {
     platform: Platform,
     allowed: Vec<PathKey>,
+    /// On the Windows drive that holds the home folder, the drive's root: what is inside the folders people make
+    /// there (`C:\Dev`) is allowed too, except in `Users`.
+    drive_folders: Option<PathKey>,
     entries: Vec<Entry>,
 }
 
@@ -72,6 +76,7 @@ impl Guard {
             allowed: Vec::new(),
             entries: Vec::new(),
         };
+        let mut drive_folders = None;
         let root = PathKey::of(volume_root);
         let home = PathKey::of(&env.home);
         let home_here = match (&home, &root) {
@@ -93,6 +98,9 @@ impl Guard {
                 if named_temp {
                     g.allow(t);
                 }
+            }
+            if env.platform == Platform::Windows {
+                drive_folders = root.clone();
             }
         } else {
             g.allow(volume_root);
@@ -123,6 +131,7 @@ impl Guard {
         Self {
             platform: env.platform,
             allowed: g.allowed,
+            drive_folders,
             entries: g.entries,
         }
     }
@@ -148,7 +157,11 @@ impl Guard {
         if let Some(what) = key.names_from_last().find_map(|n| self.protected_name(n)) {
             return Err(Denied::Protected(what.to_owned()));
         }
-        if !self.allowed.iter().any(|a| key.is_inside(a)) {
+        let in_drive_folder = self.drive_folders.as_ref().is_some_and(|root| {
+            let n = root.keys().len();
+            key.keys().len() >= n + 2 && key.starts_with(root) && key.keys()[n] != "users"
+        });
+        if !in_drive_folder && !self.allowed.iter().any(|a| key.is_inside(a)) {
             return Err(Denied::OutsideAllowedRoots);
         }
         Ok(())
@@ -227,6 +240,32 @@ fn sub(base: &Path, rel: &str) -> std::path::PathBuf {
         .fold(base.to_path_buf(), |p, part| p.join(part))
 }
 
+/// What Windows and installers keep at the root of a drive. Protected on every drive; the rules never look there.
+pub(crate) const WINDOWS_DRIVE_SYSTEM: &[&str] = &[
+    "Windows",
+    "Windows.old",
+    "Program Files",
+    "Program Files (x86)",
+    "ProgramData",
+    "System Volume Information",
+    "$Recycle.Bin",
+    "Recovery",
+    "$WinREAgent",
+    "$Windows.~BT",
+    "$Windows.~WS",
+    "$SysReset",
+    "$GetCurrent",
+    "Config.Msi",
+    "Boot",
+    "EFI",
+    "MSOCache",
+    "PerfLogs",
+    "OneDriveTemp",
+    "pagefile.sys",
+    "hiberfil.sys",
+    "swapfile.sys",
+];
+
 fn windows(env: &Env, volume_root: &Path, g: &mut Builder) {
     let local = &env.local_app_data;
     let roaming = &env.app_data;
@@ -250,29 +289,7 @@ fn windows(env: &Env, volume_root: &Path, g: &mut Builder) {
     g.subtree(&sub(roaming, "Microsoft/Credentials"), "saved sign-ins");
 
     // Every drive's own system folders, wherever Windows is installed.
-    for name in [
-        "Windows",
-        "Windows.old",
-        "Program Files",
-        "Program Files (x86)",
-        "ProgramData",
-        "System Volume Information",
-        "$Recycle.Bin",
-        "Recovery",
-        "$WinREAgent",
-        "$Windows.~BT",
-        "$Windows.~WS",
-        "$SysReset",
-        "$GetCurrent",
-        "Config.Msi",
-        "Boot",
-        "EFI",
-        "MSOCache",
-        "PerfLogs",
-        "pagefile.sys",
-        "hiberfil.sys",
-        "swapfile.sys",
-    ] {
+    for name in WINDOWS_DRIVE_SYSTEM {
         g.subtree(&volume_root.join(name), "Windows");
     }
     g.exact(&volume_root.join("Users"), "the folder of user accounts");
@@ -389,8 +406,14 @@ mod tests {
             "another user's home"
         );
         assert_eq!(
-            g.check(&at("Tools/cache")),
-            Err(Denied::OutsideAllowedRoots)
+            g.check(&at("Tools")),
+            Err(Denied::OutsideAllowedRoots),
+            "a folder at the drive's root is never removed whole"
+        );
+        assert_eq!(
+            g.check(&at("Dev/app/node_modules")),
+            Ok(()),
+            "but what is inside a folder people made there may be"
         );
         assert_eq!(g.check(Path::new("relative/x")), Err(Denied::Unclear));
         assert_eq!(

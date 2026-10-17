@@ -133,6 +133,9 @@ pub struct Categories {
     carve: Option<Carve>,
 }
 
+/// One proposal as the carve sees it: its category and what it takes.
+pub(crate) type Claim<'a> = (CategoryId, &'a [ItemRef]);
+
 /// What each proposal takes, by place. A value is the proposal's index plus one.
 #[derive(Debug, Default)]
 struct Carve {
@@ -305,7 +308,7 @@ impl Categories {
     pub(crate) fn carve(
         mut self,
         snapshot: &Snapshot,
-        claims: &[(CategoryId, &[ItemRef])],
+        claims: &[Claim<'_>],
         stop: &dyn Fn() -> bool,
     ) -> Option<Self> {
         let mut carve = Carve {
@@ -544,7 +547,7 @@ fn build_items(
     snapshot: &Snapshot,
     node: &[Node],
     file_rules: &HashMap<FileId, CategoryId>,
-    carve: Option<(&Carve, &[(CategoryId, &[ItemRef])])>,
+    carve: Option<(&Carve, &[Claim<'_>])>,
     stop: &dyn Fn() -> bool,
 ) -> Option<Built> {
     let n = snapshot.dir_count();

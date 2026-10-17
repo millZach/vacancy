@@ -2,7 +2,7 @@
 //! rules propose and the process's peak memory. Read-only: nothing is deleted. Used to measure the scanner on a real drive:
 //!
 //! ```text
-//! cargo run --release -p vacancy-core --example scan -- C:\ [--threads N]
+//! cargo run --release -p vacancy-core --example scan -- C:\ [--threads N] [--list <folder>]...
 //! ```
 
 use std::num::NonZeroUsize;
@@ -17,9 +17,12 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let mut path = PathBuf::from(".");
     let mut options = ScanOptions::default();
+    let mut list: Vec<PathBuf> = Vec::new();
     while let Some(arg) = args.next() {
         if arg == "--threads" {
             options.threads = args.next().and_then(|n| n.parse::<NonZeroUsize>().ok());
+        } else if arg == "--list" {
+            list.extend(args.next().map(PathBuf::from));
         } else {
             path = PathBuf::from(arg);
         }
@@ -117,6 +120,36 @@ fn main() {
             };
             println!("    {:>9.2} GB  {name}", item.bytes as f64 / 1e9);
         }
+    }
+    // `--list <folder>`: what the folder holds, biggest first, and how long ago each was last used.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    for folder in &list {
+        let Some(dir) = snapshot.find(folder) else {
+            println!("not in the scan: {}", folder.display());
+            continue;
+        };
+        let mut children: Vec<_> = snapshot.children(dir).collect();
+        children.sort_by_key(|&c| std::cmp::Reverse(snapshot.tree(c).bytes));
+        println!("{}", folder.display());
+        for c in children.into_iter().take(25) {
+            let t = snapshot.tree(c);
+            println!(
+                "  {:>9.2} GB  {:>6.1} days  {}",
+                t.bytes as f64 / 1e9,
+                (now - t.last_used) as f64 / 86_400.0,
+                snapshot.name(c).to_string_lossy()
+            );
+        }
+        let own = snapshot.own(dir);
+        println!(
+            "  {:>9.2} GB  {:>6.1} days  ({} files directly in it)",
+            own.bytes as f64 / 1e9,
+            (now - own.last_used) as f64 / 86_400.0,
+            own.files
+        );
     }
     peak_memory();
 }

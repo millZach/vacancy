@@ -441,6 +441,10 @@ struct Engine<'a> {
     checks: usize,
 }
 
+/// Something a rule turned up: the place, what it belongs to (for the text), and for rules that skip running apps,
+/// the folder its owner is named in.
+type Candidate = (ItemRef, Option<String>, Option<DirId>);
+
 /// A place a rule looks in, and what to call what it finds there.
 struct Spot {
     dir: DirId,
@@ -485,9 +489,9 @@ impl Engine<'_> {
 
     /// Everything the rule's finder turns up, as targets with a label and (for rules that skip running apps) the
     /// folder their owner is named in.
-    fn candidates(&mut self, rule: &Rule) -> Option<Vec<(ItemRef, Option<String>, Option<DirId>)>> {
+    fn candidates(&mut self, rule: &Rule) -> Option<Vec<Candidate>> {
         let mut spots: Vec<Spot> = Vec::new();
-        let mut direct: Vec<(ItemRef, Option<String>, Option<DirId>)> = Vec::new();
+        let mut direct: Vec<Candidate> = Vec::new();
         match &rule.find {
             Find::Places(places) => {
                 for place in places {
@@ -505,12 +509,17 @@ impl Engine<'_> {
                     }
                 }
             }
-            Find::Named { names, under } => {
+            Find::Named {
+                names,
+                under,
+                prune,
+            } => {
+                let prune: Vec<DirId> = prune.iter().filter_map(|p| self.locate(p)).collect();
                 for base in under {
                     let Some(base_dir) = self.locate(base) else {
                         continue;
                     };
-                    for dir in self.named_below(base_dir, names)? {
+                    for dir in self.named_below(base_dir, names, &prune)? {
                         spots.push(Spot {
                             dir,
                             label: Some(self.owner(base_dir, dir)),
@@ -641,10 +650,37 @@ impl Engine<'_> {
         }
     }
 
-    /// The owner of a folder found below `base`, for the proposal's text.
+    /// The owner of a folder found below `base`, for the proposal's text: the app's folder, or for a vendor's
+    /// folder (`Microsoft`, `Google`), the product's folder inside it.
     fn owner(&self, base: DirId, dir: DirId) -> String {
-        self.owner_of(base, ItemRef::Dir(dir))
-            .unwrap_or_else(|| self.snap.name(dir).to_string_lossy().into_owned())
+        let Some(first) = self.owner_of(base, ItemRef::Dir(dir)) else {
+            return self.snap.name(dir).to_string_lossy().into_owned();
+        };
+        const VENDORS: [&str; 7] = [
+            "microsoft",
+            "google",
+            "adobe",
+            "apple",
+            "mozilla",
+            "jetbrains",
+            "nvidia",
+        ];
+        if !VENDORS.contains(&first.to_lowercase().as_str()) {
+            return first;
+        }
+        // Walk up to the folder two below `base`: the vendor's product.
+        let mut d = dir;
+        while let Some(parent) = self.snap.parent(d) {
+            if self.snap.parent(parent) == Some(base) {
+                return if d == dir {
+                    first
+                } else {
+                    self.snap.name(d).to_string_lossy().into_owned()
+                };
+            }
+            d = parent;
+        }
+        first
     }
 
     fn last_used(&self, at: ItemRef) -> UnixTime {
@@ -746,14 +782,14 @@ impl Engine<'_> {
         out
     }
 
-    /// Folders below `base` named one of `names`, not looking inside a match or inside code libraries.
-    fn named_below(&mut self, base: DirId, names: &[&str]) -> Option<Vec<DirId>> {
+    /// Folders below `base` named one of `names`, not looking inside a match, code libraries or `prune`.
+    fn named_below(&mut self, base: DirId, names: &[&str], prune: &[DirId]) -> Option<Vec<DirId>> {
         let mut out = Vec::new();
         let mut stack = vec![base];
         while let Some(d) = stack.pop() {
             self.tick()?;
             for c in self.snap.children(d) {
-                if !self.snap.flags(c).entered() {
+                if !self.snap.flags(c).entered() || prune.contains(&c) {
                     continue;
                 }
                 let name = self.snap.name(c);
