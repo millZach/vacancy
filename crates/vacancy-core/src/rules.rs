@@ -129,12 +129,13 @@ pub struct Proposal {
 pub struct Moment {
     /// Seconds since the Unix epoch.
     pub now: UnixTime,
-    /// Running apps' names and bundle ids, as the OS reports them.
-    pub running_apps: Vec<String>,
+    /// Running apps' names and bundle ids, as the OS reports them; `None` when Vacancy couldn't find out. Rules
+    /// that leave running apps' caches alone then propose nothing, rather than guess that nothing runs.
+    pub running_apps: Option<Vec<String>>,
 }
 
 impl Moment {
-    /// The clock, and the apps running now (macOS; none are looked for on Windows).
+    /// The clock, and the apps running now (macOS; unknown elsewhere, where no rule needs them).
     pub fn detect() -> Self {
         Self {
             now: unix_now(),
@@ -245,9 +246,8 @@ pub(crate) fn propose_until(
         moment,
         running: moment
             .running_apps
-            .iter()
-            .map(|a| a.to_lowercase())
-            .collect(),
+            .as_ref()
+            .map(|apps| apps.iter().map(|a| a.to_lowercase()).collect()),
         stop,
         checks: 0,
     };
@@ -472,8 +472,8 @@ struct Engine<'a> {
     personal: Vec<(PathKey, bool)>,
     claims: Claims,
     moment: &'a Moment,
-    /// Running apps, lowercased.
-    running: Vec<String>,
+    /// Running apps, lowercased; `None` if unknown.
+    running: Option<Vec<String>>,
     stop: &'a dyn Fn() -> bool,
     checks: usize,
 }
@@ -508,6 +508,9 @@ fn kept_data(snap: &Snapshot, stop: &dyn Fn() -> bool) -> Option<Vec<bool>> {
     Some(keep)
 }
 
+/// No running apps, for rules that don't ask.
+static NONE: Vec<String> = Vec::new();
+
 /// Something a rule turned up: the place, what it belongs to (for the text), and for rules that skip running apps,
 /// the folder its owner is named in.
 type Candidate = (ItemRef, Option<String>, Option<DirId>);
@@ -525,11 +528,20 @@ impl Engine<'_> {
     /// takes the rest. `None` if stopped.
     fn run(&mut self, rule: &Rule) -> Option<Found> {
         let mut found = Found::default();
+        let needs_apps = rule.skip.running_apps || !rule.skip.unless_running.is_empty();
+        let Some(running) = self
+            .running
+            .as_ref()
+            .or_else(|| (!needs_apps).then_some(&NONE))
+        else {
+            // Which apps run is unknown: a rule that must leave running apps' places alone can't tell which.
+            return Some(found);
+        };
         if rule
             .skip
             .unless_running
             .iter()
-            .any(|app| self.running.iter().any(|r| r == &app.to_lowercase()))
+            .any(|app| running.iter().any(|r| r == &app.to_lowercase()))
         {
             return Some(found);
         }
@@ -715,7 +727,10 @@ impl Engine<'_> {
     /// Whether an app folder named `owner` (`com.spotify.client`, `Slack`, `Google`) belongs to a running app.
     fn is_running(&self, owner: &str) -> bool {
         let owner = owner.to_lowercase();
-        self.running.iter().any(|r| {
+        let Some(running) = &self.running else {
+            return true; // unknown: anything may be running
+        };
+        running.iter().any(|r| {
             *r == owner
                 || r.starts_with(&format!("{owner} "))
                 || owner.starts_with(&format!("{r}."))

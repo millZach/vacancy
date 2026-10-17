@@ -25,7 +25,7 @@ fn now() -> i64 {
 fn moment(running: &[&str]) -> Moment {
     Moment {
         now: now(),
-        running_apps: running.iter().map(|s| (*s).to_owned()).collect(),
+        running_apps: Some(running.iter().map(|s| (*s).to_owned()).collect()),
     }
 }
 
@@ -502,6 +502,22 @@ fn the_mac_rules_find_what_the_prototype_proposes() {
     // While Xcode is open, DerivedData is left alone.
     let (_, with_xcode) = run(&fx, &env, &moment(&["Xcode"]));
     assert!(get(&with_xcode, "m-derived").is_none());
+
+    // When which apps run can't be told, the rules that leave running apps alone propose nothing; the others do.
+    let unknown = Moment {
+        now: now(),
+        running_apps: None,
+    };
+    let (_, blind) = run(&fx, &env, &unknown);
+    for id in ["m-caches", "m-appcache", "m-appcache-other", "m-derived"] {
+        assert!(get(&blind, id).is_none(), "{id} with running apps unknown");
+    }
+    for id in ["m-brew", "m-logs", "m-trash", "m-node", "m-dmgs"] {
+        assert!(
+            get(&blind, id).is_some(),
+            "{id} doesn't depend on running apps"
+        );
+    }
 }
 
 /// JetBrains IDEs keep their local history of every edit in their cache folders. It never goes; the caches beside

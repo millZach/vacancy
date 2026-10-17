@@ -1,24 +1,26 @@
 //! Which apps are running, for rules that leave running apps' caches alone. On macOS Vacancy asks Launch Services
 //! through `lsappinfo`, which lists the apps in the user's session with their names and bundle ids. Nothing is
-//! looked for elsewhere. If the answer can't be had, no app counts as running; the executor (ticket 04) still skips
-//! files that are busy.
+//! looked for elsewhere. If the answer can't be had, or makes no sense (a session always runs the Finder and the
+//! Dock), the answer is "unknown", and the rules that depend on it propose nothing.
 
-/// The running apps' names and bundle ids.
+/// The running apps' names and bundle ids, or `None` if they couldn't be read.
 #[cfg(target_os = "macos")]
-pub(super) fn apps() -> Vec<String> {
+pub(super) fn apps() -> Option<Vec<String>> {
     match std::process::Command::new("/usr/bin/lsappinfo")
         .arg("list")
         .output()
     {
-        Ok(out) if out.status.success() => parse(&String::from_utf8_lossy(&out.stdout)),
-        _ => Vec::new(),
+        Ok(out) if out.status.success() => {
+            Some(parse(&String::from_utf8_lossy(&out.stdout))).filter(|apps| !apps.is_empty())
+        }
+        _ => None,
     }
 }
 
-/// The running apps' names and bundle ids: none looked for off macOS.
+/// Off macOS no rule needs to know which apps run, so nothing is looked for: unknown.
 #[cfg(not(target_os = "macos"))]
-pub(super) fn apps() -> Vec<String> {
-    Vec::new()
+pub(super) fn apps() -> Option<Vec<String>> {
+    None
 }
 
 /// Names and bundle ids from `lsappinfo list`, whose entries look like:
@@ -87,7 +89,8 @@ mod tests {
     #[test]
     fn asks_launch_services() {
         // CI's Mac has a session, but what runs in it isn't ours to promise; the answer just has to be clean.
-        let apps = apps();
-        assert!(apps.iter().all(|a| !a.is_empty()), "{apps:?}");
+        if let Some(apps) = apps() {
+            assert!(apps.iter().all(|a| !a.is_empty()), "{apps:?}");
+        }
     }
 }
