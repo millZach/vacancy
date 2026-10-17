@@ -65,7 +65,8 @@ pub enum ProposalAction {
     Hint,
 }
 
-/// How a rule acts on what it finds. The UI sees [`ProposalAction`]; this says what a delete takes.
+/// How a rule acts on what it finds: the catalog's action kind. The UI sees [`ProposalAction`]; this also says
+/// what a delete takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ActionKind {
     /// Deletes what is inside each place found, and keeps the place itself.
@@ -244,7 +245,7 @@ pub(crate) fn propose_until(
         out.list.push(proposal(snapshot, &rule, &found));
         out.targets
             .push(found.targets.into_iter().map(|t| t.at).collect());
-        out.kinds.push(rule.action.into());
+        out.kinds.push(rule.action);
     }
     // Biggest first; the targets travel with their proposal.
     let mut order: Vec<usize> = (0..out.list.len()).collect();
@@ -563,19 +564,24 @@ impl Engine<'_> {
             }
         }
         for spot in spots {
-            if rule.action == catalog::Act::Contents && self.holds_personal(spot.dir, None) {
-                continue; // a temp folder pointed at the home folder empties nothing
-            }
             match rule.action {
-                catalog::Act::Contents => {
+                ActionKind::DeleteContents => {
+                    if self.holds_personal(spot.dir, None) {
+                        continue; // a temp folder pointed at the home folder empties nothing
+                    }
                     for at in self.contents(spot.dir) {
                         direct.push((at, spot.label.clone(), spot.owners_in));
                     }
                 }
-                catalog::Act::Directory => {
+                ActionKind::DeleteDirectory => {
                     direct.push((ItemRef::Dir(spot.dir), spot.label, spot.owners_in));
                 }
+                // Tools and advice act on nothing directly; their rules arrive in ticket 06.
+                ActionKind::Tool | ActionKind::Hint => {}
             }
+        }
+        if matches!(rule.action, ActionKind::Tool | ActionKind::Hint) {
+            direct.clear();
         }
         Some(direct)
     }
@@ -976,7 +982,9 @@ fn proposal(snap: &Snapshot, rule: &Rule, found: &Found) -> Proposal {
         source: ProposalSource::Rule,
         ai_note: None,
         action: match rule.action {
-            catalog::Act::Contents | catalog::Act::Directory => ProposalAction::Delete,
+            ActionKind::DeleteContents | ActionKind::DeleteDirectory => ProposalAction::Delete,
+            ActionKind::Tool => ProposalAction::Tool,
+            ActionKind::Hint => ProposalAction::Hint,
         },
         regenerable: rule.regenerable,
         sample_paths: samples,
@@ -995,15 +1003,6 @@ fn list(names: &[&str]) -> String {
         [a, b] => format!("{a} and {b}"),
         [a, b, c] => format!("{a}, {b} and {c}"),
         [a, b, c, rest @ ..] => format!("{a}, {b}, {c} and {} more", rest.len()),
-    }
-}
-
-impl From<catalog::Act> for ActionKind {
-    fn from(act: catalog::Act) -> Self {
-        match act {
-            catalog::Act::Contents => ActionKind::DeleteContents,
-            catalog::Act::Directory => ActionKind::DeleteDirectory,
-        }
     }
 }
 

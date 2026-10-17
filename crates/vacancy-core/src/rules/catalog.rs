@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::Risk;
+use super::{ActionKind, Risk};
 use crate::categorize::{CategoryId, Env, Platform};
 use crate::guard::WINDOWS_DRIVE_SYSTEM;
 use crate::pathkey::PathKey;
@@ -29,19 +29,12 @@ pub(super) struct Rule {
     pub(super) regenerable: bool,
     /// Whether a new plan includes it; `None` means only if it is safe.
     pub(super) default_on: Option<bool>,
-    pub(super) action: Act,
+    /// What it does with each place it finds: deletes what is inside, deletes it whole, runs a tool, or gives advice.
+    /// Tool and hint rules arrive in ticket 06; until then the engine makes no proposals for them.
+    pub(super) action: ActionKind,
     pub(super) find: Find,
     pub(super) skip: Skip,
     pub(super) text: Text,
-}
-
-/// How a delete rule acts on each place it finds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Act {
-    /// Deletes what is inside, keeping the place.
-    Contents,
-    /// Deletes the place, whole.
-    Directory,
 }
 
 /// How a rule finds places.
@@ -213,7 +206,7 @@ fn node_modules(env: &Env, prune: Vec<PathBuf>) -> Rule {
         risk: Risk::Safe,
         regenerable: true,
         default_on: None,
-        action: Act::Directory,
+        action: ActionKind::DeleteDirectory,
         find: Find::Projects {
             folder: "node_modules",
             project: Markers::PACKAGE_JSON,
@@ -243,7 +236,7 @@ fn rust_targets(env: &Env, prune: Vec<PathBuf>) -> Rule {
         risk: Risk::Safe,
         regenerable: true,
         default_on: None,
-        action: Act::Directory,
+        action: ActionKind::DeleteDirectory,
         find: Find::Projects {
             folder: "target",
             project: Markers::CARGO_TOML,
@@ -299,7 +292,7 @@ fn windows(env: &Env) -> Vec<Rule> {
             risk: Risk::Safe,
             regenerable: true,
             default_on: None,
-            action: Act::Contents,
+            action: ActionKind::DeleteContents,
             find: Find::Places(temp_places(env)),
             skip: Skip {
                 idle_days: 1,
@@ -318,7 +311,7 @@ fn windows(env: &Env) -> Vec<Rule> {
             risk: Risk::Safe,
             regenerable: true,
             default_on: None,
-            action: Act::Contents,
+            action: ActionKind::DeleteContents,
             find: Find::Places(browsers),
             skip: Skip::default(),
             text: Text {
@@ -334,7 +327,7 @@ fn windows(env: &Env) -> Vec<Rule> {
             risk: Risk::Safe,
             regenerable: true,
             default_on: None,
-            action: Act::Contents,
+            action: ActionKind::DeleteContents,
             find: Find::Places(vec![
                 place(local, "npm-cache", "npm"),
                 place(roaming, "npm-cache", "npm"),
@@ -360,7 +353,7 @@ fn windows(env: &Env) -> Vec<Rule> {
             risk: Risk::Safe,
             regenerable: false,
             default_on: None,
-            action: Act::Contents,
+            action: ActionKind::DeleteContents,
             find: Find::Places(vec![
                 unlabelled(local.join("CrashDumps")),
                 unlabelled(sub(local, "Microsoft/Windows/WER/ReportArchive")),
@@ -379,7 +372,7 @@ fn windows(env: &Env) -> Vec<Rule> {
             risk: Risk::Safe,
             regenerable: true,
             default_on: None,
-            action: Act::Contents,
+            action: ActionKind::DeleteContents,
             find: Find::Named {
                 names: APP_CACHES,
                 under: app_data,
@@ -400,7 +393,7 @@ fn windows(env: &Env) -> Vec<Rule> {
             risk: Risk::Safe,
             regenerable: true,
             default_on: None,
-            action: Act::Contents,
+            action: ActionKind::DeleteContents,
             find: Find::Places(vec![
                 place(local, "D3DSCache", "DirectX"),
                 place(local, "NVIDIA/DXCache", "NVIDIA"),
@@ -423,7 +416,7 @@ fn windows(env: &Env) -> Vec<Rule> {
             risk: Risk::Review,
             regenerable: false,
             default_on: Some(true),
-            action: Act::Directory,
+            action: ActionKind::DeleteDirectory,
             find: Find::Files {
                 under: env.known.downloads.clone(),
                 anywhere: &["msi", "msix", "msixbundle", "appx", "appxbundle"],
@@ -454,7 +447,7 @@ fn macos(env: &Env) -> Vec<Rule> {
             risk: Risk::Safe,
             regenerable: true,
             default_on: None,
-            action: Act::Contents,
+            action: ActionKind::DeleteContents,
             find: Find::Places(vec![
                 place(&lib, "Caches/Homebrew", "Homebrew"),
                 place(home, ".npm/_cacache", "npm"),
@@ -477,7 +470,7 @@ fn macos(env: &Env) -> Vec<Rule> {
             risk: Risk::Safe,
             regenerable: true,
             default_on: None,
-            action: Act::Directory,
+            action: ActionKind::DeleteDirectory,
             find: Find::Places(vec![unlabelled(sub(&lib, "Developer/Xcode/DerivedData/*"))]),
             skip: Skip {
                 unless_running: &["Xcode", "com.apple.dt.Xcode"],
@@ -496,7 +489,7 @@ fn macos(env: &Env) -> Vec<Rule> {
             risk: Risk::Review,
             regenerable: false,
             default_on: None,
-            action: Act::Directory,
+            action: ActionKind::DeleteDirectory,
             find: Find::Places(vec![unlabelled(sub(
                 &lib,
                 "Developer/Xcode/Archives/*/*.xcarchive",
@@ -517,7 +510,7 @@ fn macos(env: &Env) -> Vec<Rule> {
             risk: Risk::Safe,
             regenerable: false,
             default_on: None,
-            action: Act::Contents,
+            action: ActionKind::DeleteContents,
             find: Find::Places(vec![unlabelled(lib.join("Logs"))]),
             skip: Skip::default(),
             text: Text {
@@ -532,7 +525,7 @@ fn macos(env: &Env) -> Vec<Rule> {
             risk: Risk::Safe,
             regenerable: true,
             default_on: None,
-            action: Act::Contents,
+            action: ActionKind::DeleteContents,
             find: Find::Places(vec![unlabelled(sub(
                 &lib,
                 "Containers/com.apple.mail/Data/Library/Mail Downloads",
@@ -550,7 +543,7 @@ fn macos(env: &Env) -> Vec<Rule> {
             risk: Risk::Safe,
             regenerable: false,
             default_on: None,
-            action: Act::Contents,
+            action: ActionKind::DeleteContents,
             find: Find::Places(vec![unlabelled(home.join(".Trash"))]),
             skip: Skip::default(),
             text: Text {
@@ -565,7 +558,7 @@ fn macos(env: &Env) -> Vec<Rule> {
             risk: Risk::Safe,
             regenerable: true,
             default_on: None,
-            action: Act::Contents,
+            action: ActionKind::DeleteContents,
             find: Find::Named {
                 names: APP_CACHES,
                 under: vec![support.clone()],
@@ -588,7 +581,7 @@ fn macos(env: &Env) -> Vec<Rule> {
             risk: Risk::Safe,
             regenerable: true,
             default_on: None,
-            action: Act::Contents,
+            action: ActionKind::DeleteContents,
             find: Find::Places(vec![unlabelled(sub(&lib, "Caches/*"))]),
             skip: Skip {
                 running_apps: true,
@@ -616,7 +609,7 @@ fn macos(env: &Env) -> Vec<Rule> {
             risk: Risk::Review,
             regenerable: false,
             default_on: Some(true),
-            action: Act::Directory,
+            action: ActionKind::DeleteDirectory,
             find: Find::Files {
                 under: env.known.downloads.clone(),
                 anywhere: &["dmg", "pkg", "mpkg"],
