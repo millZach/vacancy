@@ -9,10 +9,18 @@ Vacancy is in early development. Releases before 1.0 are previews, and each rele
 ## What Vacancy does
 
 - **Maps your drive.** You see where the space goes as a map you can explore.
-- **Proposes cleanups.** Built-in rules find known junk offline: caches, temp files, old installers, build folders, duplicates, and leftovers from Docker, Xcode and package managers. Each proposal shows its size, why it is safe, and how risky it is.
+- **Proposes cleanups.** Built-in rules find known junk offline: caches, temp files, old installers, build folders, duplicates, and leftovers from Xcode and package managers. Each proposal shows its size, why it is safe, and how risky it is.
 - **Proposes tidier folders.** If the [Claude Code](https://claude.com/claude-code) CLI or the Codex CLI is installed, Vacancy asks it to explain big folders the rules don't recognize and to suggest a tidier layout for messy folders like Downloads. You need no API key, because your own subscription runs it.
 - **Runs only what you approve.** You pick the items and confirm once, then watch the space come back.
 - **Shows what it did.** The run ends with a report: space freed, what was deleted, what was moved, and what was skipped and why.
+
+### Cleanup tools and reminders
+
+Cleanup tools that choose their own targets are advice only. Vacancy does not run Docker pruning, simulator removal, Homebrew cleanup commands, or Windows system cleanup tools, and it does not request administrator permission to run them. Its file executor still acts only on the exact items you approved, with the Guard checked again before deletion.
+
+The current advice covers Steam games with a known last-played date at least six months ago, and the Logic Pro sound library. You can open a game's uninstall screen in Steam, or follow the instructions inside Logic. Selecting advice saves a reminder under **Left for you** in the report; it does not uninstall anything or count as freed space.
+
+Advice for Docker images and build cache, Xcode simulators and runtimes, Homebrew cleanup commands, and Windows system cleanup is not yet available. Cleaning known user-level package caches or Xcode build folders through an approved file plan is separate from running those tools.
 
 ## What Vacancy never touches
 
