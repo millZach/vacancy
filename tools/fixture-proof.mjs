@@ -1,8 +1,13 @@
 // Installed Windows fixture proof: node tools/fixture-proof.mjs --fixture D:\tmp\vacancy-fixture-new --out shots --cdp http://127.0.0.1:9333
 // Requires the app already started with VACANCY_FIXTURE_ROOT and a held-open fixture file.
+// Build the handle-pinned mutation helper first: cargo build -p vacancy-core --example fixture_mutator
+// --mutator <exe> overrides target/debug/examples/fixture_mutator.exe (VACANCY_FIXTURE_MUTATOR also works).
 // Drives scan/plan/confirm/run with UI clicks; stops on the completed run for wrapped-shots (without --run).
 import assert from 'node:assert/strict';
-import { appendFile, lstat, mkdir, realpath, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, realpath, writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { createInterface } from 'node:readline';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -11,7 +16,9 @@ import { chromium } from 'playwright';
 const { values: o } = parseArgs({ options: {
   fixture: { type: 'string' }, out: { type: 'string' },
   cdp: { type: 'string', default: 'http://127.0.0.1:9333' },
+  mutator: { type: 'string', default: process.env.VACANCY_FIXTURE_MUTATOR || resolve('target/debug/examples/fixture_mutator.exe') },
 } });
+assert.equal(process.platform, 'win32', 'Installed fixture proof is Windows only');
 assert(o.fixture && o.out, '--fixture and --out are required');
 const root = resolve(o.fixture);
 const contains = (parent, child) => {
@@ -39,6 +46,8 @@ page.on('pageerror', e => errors.push(String(e)));
 page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
 const saveText = async (name, text) => writeFile(join(o.out, name), text);
 const shot = name => page.screenshot({ path: join(o.out, `${name}.png`) });
+let mutation = null;
+let mutationLines = null;
 try {
   const scan = page.locator('button.cta', { hasText: /^\s*Scan / });
   await scan.waitFor({ timeout: 30_000 });
@@ -49,11 +58,31 @@ try {
   assert.equal(volumes.length, 1);
   assert.equal(resolve(volumes[0].mountPoint).toLowerCase(), root.toLowerCase(), 'App is not confined to this fixture');
   await saveText('fixture-volume.json', JSON.stringify(volumes, null, 2));
+  // Arm before Scan: the helper pins every real ancestor and opens this existing file exclusively, then keeps
+  // those exact handles until its change command. Node never reopens or creates the target by path.
+  mutation = spawn(o.mutator, [root], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  console.log(`Fixture mutation helper PID ${mutation.pid}`);
+  let mutationError = '';
+  mutation.stderr.on('data', chunk => { mutationError += chunk; });
+  const exited = new Promise((done, reject) => {
+    mutation.once('error', reject);
+    mutation.once('exit', code => code === 0 ? done() : reject(new Error(`Mutation helper exited ${code}: ${mutationError}`)));
+  });
+  mutationLines = createInterface({ input: mutation.stdout });
+  const [readyLine] = await Promise.race([
+    once(mutationLines, 'line'),
+    exited.then(() => { throw new Error('Mutation helper exited before READY'); }),
+  ]);
+  const ready = JSON.parse(readyLine);
+  assert.equal(ready.state, 'READY');
+  assert.equal(resolve(ready.path).toLowerCase(), modify.toLowerCase(), 'Mutation helper armed the wrong file');
+  await saveText('mutation-ready.json', JSON.stringify(ready, null, 2));
   await shot('installed-1-plate');
   await scan.click();
   await page.locator('.atlas.is-map').waitFor({ timeout: 120_000 });
   await shot('installed-2-map');
-  await appendFile(modify, 'written after the scan\n');
+  mutation.stdin.end('change\n');
+  await exited; // It has written via the held handle and released every pin before planning.
   await page.getByRole('button', { name: 'Build a plan' }).click();
   const rows = page.locator('.tray-row');
   for (const row of await rows.all()) {
@@ -76,6 +105,8 @@ try {
   assert.equal(errors.length, 0, errors.join('\n'));
   console.log('Fixture run completed; capture finish with wrapped-shots --cdp (NO --run).');
 } finally {
+  mutationLines?.close();
+  if (mutation && mutation.exitCode === null) mutation.kill();
   await saveText('page-errors.json', JSON.stringify(errors));
   await browser.close();
 }

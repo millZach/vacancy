@@ -185,6 +185,7 @@
   --finish-control-ms: 150ms; /* highlight, replay and history controls */
   --history-pop-ms: 160ms;
   --history-spin-ms: 900ms;
+  --color-history-stopped-line: rgba(var(--review-rgb), 0.4);
   --ease-fade: cubic-bezier(0.4, 0, 0.2, 1);
   --rise: 0.6s cubic-bezier(0.2, 0.7, 0.2, 1); /* the summary's sections rising in after the flight */
   --rise-words: 0.5s; /* when each part of the summary starts to rise */
