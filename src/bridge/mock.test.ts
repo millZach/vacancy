@@ -122,12 +122,14 @@ describe('the mock bridge', () => {
       expect(started).toEqual(plan.steps.map((s) => s.id));
       expect(events.filter((e) => e.kind === 'deleted')).toHaveLength(plan.places);
       const skips = events.flatMap((e) => (e.kind === 'skipped' ? [e.skip] : []));
-      expect(skips.map((k) => k.kind).sort()).toEqual(['changed', 'inUse']);
+      // Left in place: one changed since the scan, one in use. Deleted, its space still in use: hard links.
+      expect(skips.map((k) => k.kind).sort()).toEqual(['changed', 'hardLinked', 'inUse']);
 
       expect(report.cancelled).toBe(false);
       expect(report.steps.map((s) => s.outcome)).toContain('partial');
+      // The hard-linked names were deleted; only their space stays in use.
       expect(report.deletedItems).toBe(plan.items - 212);
-      expect(report.freedBytes).toBeCloseTo(plan.bytes - 0.41e9, -3);
+      expect(report.freedBytes).toBeCloseTo(plan.bytes - 0.41e9 - 0.09e9, -3);
       // What the confirm dialog showed: the place refused while planning is a skip, not part of the plan.
       expect(report.plannedBytes).toBeCloseTo(plan.bytes, -3);
       expect(report.skippedItems).toBe(213);
@@ -136,7 +138,22 @@ describe('the mock bridge', () => {
       // The drive's own figures: a little less than what was freed, since other apps write too.
       expect(report.freeChange).toBeLessThan(report.freedBytes);
       expect(report.freeAfter - report.freeBefore).toBe(report.freeChange);
-      expect(await bridge.listRuns()).toEqual([report]);
+      // Kept in the history, newest first, with everything the finish shows.
+      const history = await bridge.listRuns();
+      expect(history.unreadable).toBe(0);
+      expect(history.runs[0]).toEqual({
+        id: report.id,
+        mountPoint: 'C:\\',
+        volumeName: 'Local Disk (C:)',
+        startedAt: report.startedAt,
+        freedBytes: report.freedBytes,
+        deletedItems: report.deletedItems,
+        movedItems: 0,
+        cancelled: false,
+      });
+      expect(await bridge.openRun(report.id)).toEqual(report);
+      expect(report.map.volume.mountPoint).toBe('C:\\');
+      expect(report.steps[0]!.why).toBe(fixtures.windows.proposals.find((p) => p.id === 'w-node')!.why);
       const c = (await bridge.listVolumes())[0]!;
       expect(c.freeBytes).toBe(report.freeAfter);
     });

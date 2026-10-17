@@ -10,7 +10,7 @@ const overview = fixtures.windows.overview;
 const panel = () => screen.getByRole('complementary', { name: 'What Vacancy did' });
 
 function renderPanel(r: RunReport = report, onScanAgain = () => {}) {
-  return render(<SummaryPanel overview={overview} report={r} os="Windows" onHot={() => {}} onScanAgain={onScanAgain} />);
+  return render(<SummaryPanel report={r} os="Windows" onHot={() => {}} onReplay={() => {}} onScanAgain={onScanAgain} />);
 }
 
 beforeEach(() => {

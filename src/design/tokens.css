@@ -163,6 +163,105 @@
   --color-seg: #171c23; /* the Before/After switch */
   --color-seg-on: #2a323e;
 
+  /* ---------- the finish: the highlight slides ---------- */
+  /* Timing. The slides' script reads these too (src/wrapped/motion.ts), so they are the only copy. */
+  --slide-ms: 6500ms; /* how long a slide stays before the next one */
+  --slide-last-ms: 3400ms; /* the checkout, before it hands off to the map */
+  --slide-move-ms: 320ms; /* a slide leaving, then the next arriving */
+  --slide-shift: 48px; /* how far a slide travels as it goes */
+  --ease-slide: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --fly-ms: 980ms; /* the freed number flying into the summary */
+  --fly-stat-ms: 860ms; /* each count after it */
+  --fly-delay-ms: 90ms; /* before the first count follows */
+  --fly-stagger-ms: 55ms; /* between the counts */
+  --ease-fly: cubic-bezier(0.65, 0, 0.25, 1);
+  --fade-out-ms: 480ms; /* Skip to recap, and the hand-off with reduced motion */
+  --fade-in-ms: 400ms; /* Replay highlights */
+  --ease-fade: cubic-bezier(0.4, 0, 0.2, 1);
+  --rise: 0.6s cubic-bezier(0.2, 0.7, 0.2, 1); /* the summary's sections rising in after the flight */
+  --wrap-chrome-fade: 0.24s; /* the slides' controls and words fading as the numbers fly */
+  --wrap-bg-fade: 0.75s; /* the slides' ground giving way to the map */
+  --dot-grow: 0.25s; /* a dot widening into the lit one */
+  --sign-flick: 1.1s; /* each letter of the sign catching */
+  --sign-start: 160ms;
+  --sign-gap: 95ms; /* between letters */
+  --sign-glow: 1.6s; /* the halo behind it warming up */
+  --board-flip: 0.7s; /* each letterboard tile dropping into place */
+  --board-start: 0.9s;
+  --board-row-gap: 0.45s;
+  --board-tile-gap: 60ms;
+  --fob-swing: 1.4s; /* the key fob dropping in and swinging to rest */
+  --bar-move: 0.9s; /* the disk bars' categories shrinking */
+  --bar-start: 0.55s;
+  --bar-gap: 50ms;
+  --chart-grow: 0.8s; /* the category chart's bars */
+  --chart-start: 0.25s;
+  --chart-gap: 80ms;
+  --ease-grow: cubic-bezier(0.3, 0.7, 0.2, 1);
+  /* Surfaces. */
+  --wrap-bg: radial-gradient(80% 60% at 50% 120%, rgba(var(--neon-rgb), 0.05), transparent 70%),
+    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.05) 1px, transparent 1.5px) 0 0 / 18px 18px,
+    var(--color-bg);
+  --wrap-haze: radial-gradient(55% 45% at 50% 18%, rgba(var(--neon-rgb), 0.06), transparent 70%);
+  --wrap-haze-sign: radial-gradient(48% 40% at 50% 30%, rgba(var(--neon-rgb), 0.13), transparent 70%);
+  --color-dot: var(--color-line-2); /* a slide's dot */
+  --color-dot-past: rgba(var(--neon-rgb), 0.5);
+  --color-dot-on: rgba(255, 255, 255, 0.12);
+  --color-link: #ff9fd4; /* Skip to recap */
+  /* The neon sign: the tube when off, and lit. */
+  --color-sign-off: rgba(255, 196, 228, 0.12);
+  --glow-sign-off: 0 0 1px rgba(255, 255, 255, 0.06);
+  --glow-sign: 0 0 2px #fff, 0 0 6px var(--color-neon), 0 0 16px rgba(var(--neon-rgb), 0.9),
+    0 0 36px rgba(var(--neon-rgb), 0.6), 0 0 80px rgba(var(--neon-rgb), 0.35);
+  --glow-sign-halo: radial-gradient(closest-side, rgba(var(--neon-rgb), 0.15), transparent);
+  /* The letterboard under it. */
+  --board-bg: repeating-linear-gradient(180deg, #181d25 0 6px, #11151b 6px 8px);
+  --board-edge: inset 0 0 0 1px var(--color-line-2), inset 0 0 0 7px #12161c, inset 0 0 0 8px var(--color-line-2),
+    0 24px 60px rgba(0, 0, 0, 0.45);
+  --color-board-tile: #f1f4f8;
+  --color-board-tile-2: #c5ccd6;
+  --shadow-board-tile: 0 2px 0 rgba(0, 0, 0, 0.45);
+  /* The disk bars: each category's segment, a locked one, and the vacant lot. */
+  --map-seg-l: 0.47;
+  --map-seg-c: 0.075;
+  --color-seg-locked: #262c35;
+  --color-vacant-lot: rgba(var(--neon-rgb), 0.05);
+  --edge-vacant-lot: inset 0 0 22px rgba(var(--neon-rgb), 0.25), 0 0 16px -4px rgba(var(--neon-rgb), 0.6);
+  --glow-vacant-text: 0 0 4px var(--color-neon), 0 0 14px rgba(var(--neon-rgb), 0.8);
+  --glow-free-after: 0 0 14px rgba(var(--neon-rgb), 0.6);
+  /* The key fob. */
+  --fob-fill: linear-gradient(155deg, #ff7ac7 0%, #ff4fb3 42%, #b8197a 100%);
+  --fob-sheen: linear-gradient(120deg, rgba(255, 255, 255, 0.2), transparent 40%);
+  --color-fob-text: #fff;
+  --color-fob-edge: rgba(255, 255, 255, 0.35);
+  --color-fob-ring: #aeb6c2;
+  --shadow-fob: drop-shadow(0 22px 30px rgba(0, 0, 0, 0.55)) drop-shadow(0 0 34px rgba(var(--neon-rgb), 0.3));
+  --emboss-fob: 0 1px 0 rgba(255, 255, 255, 0.3), 0 -1px 0 rgba(0, 0, 0, 0.3);
+  /* The category chart's bars. */
+  --color-chart-fill: rgba(var(--neon-rgb), 0.2);
+  --edge-chart: inset 0 0 0 1.5px var(--color-neon), 0 0 12px rgba(var(--neon-rgb), 0.45);
+  /* The checkout's freed number: the summary's glow in em, so it still matches after it scales down there. */
+  --glow-hero-em: 0 0 0.023em rgba(var(--neon-rgb), 0.9), 0 0 0.205em rgba(var(--neon-rgb), 0.65),
+    0 0 0.545em rgba(var(--neon-rgb), 0.35);
+  /* Type. Slides fill the window, so they scale with it (vw). */
+  --text-sign: clamp(112px, 13vw, 184px);
+  --text-sign-short: clamp(96px, 11vw, 150px);
+  --text-slide-title: clamp(30px, 3.5vw, 50px);
+  --text-board: clamp(42px, 5vw, 72px);
+  --text-board-2: clamp(20px, 2.2vw, 30px);
+  --text-slide: 16px;
+  --text-slide-lead: 17px;
+  --text-slide-row: 15.5px;
+  --text-slide-note: 13.5px;
+  --text-slide-num: 26px;
+  --text-fob: 64px;
+  --text-checkout: clamp(104px, 11.5vw, 152px);
+  --text-checkout-short: clamp(96px, 10vw, 128px);
+  --text-checkout-stat: 38px;
+
+  /* ---------- the run history ---------- */
+  --history-w: 380px;
+
   /* ---------- surfaces ---------- */
   --ground: radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.085) 1px, transparent 1.5px) 0 0 / 9px 9px,
     var(--color-head);

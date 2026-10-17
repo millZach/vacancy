@@ -4,6 +4,7 @@ import type { CategoryTotal } from '../bindings/CategoryTotal';
 import type { DriveKind } from '../bindings/DriveKind';
 import type { FullDiskAccess } from '../bindings/FullDiskAccess';
 import type { ItemKind } from '../bindings/ItemKind';
+import type { LeftForYou } from '../bindings/LeftForYou';
 import type { MapCategory } from '../bindings/MapCategory';
 import type { MapFolder } from '../bindings/MapFolder';
 import type { MapItem } from '../bindings/MapItem';
@@ -14,8 +15,11 @@ import type { PlanSummary } from '../bindings/PlanSummary';
 import type { Proposal } from '../bindings/Proposal';
 import type { ProposalAction } from '../bindings/ProposalAction';
 import type { ProposalSource } from '../bindings/ProposalSource';
+import type { Reorganized } from '../bindings/Reorganized';
 import type { Risk } from '../bindings/Risk';
 import type { RunEvent } from '../bindings/RunEvent';
+import type { RunHistory } from '../bindings/RunHistory';
+import type { RunListing } from '../bindings/RunListing';
 import type { RunReport } from '../bindings/RunReport';
 import type { ScanOutcome } from '../bindings/ScanOutcome';
 import type { ScanSummary } from '../bindings/ScanSummary';
@@ -32,6 +36,7 @@ export type {
   DriveKind,
   FullDiskAccess,
   ItemKind,
+  LeftForYou,
   MapCategory,
   MapFolder,
   MapItem,
@@ -42,8 +47,11 @@ export type {
   Proposal,
   ProposalAction,
   ProposalSource,
+  Reorganized,
   Risk,
   RunEvent,
+  RunHistory,
+  RunListing,
   RunReport,
   ScanOutcome,
   ScanSummary,
@@ -105,6 +113,11 @@ export interface Bridge {
   runPlan(mountPoint: string, planId: string, onEvent: (event: RunEvent) => void): Promise<RunReport>;
   /** Stops the running plan after the file being deleted. Its report says what was done and what was left. */
   cancelRun(): Promise<void>;
-  /** The run history, newest first. */
-  listRuns(): Promise<RunReport[]>;
+  /**
+   * The run history: every kept run, newest first, and how many kept runs couldn't be read (they are passed over).
+   * Never rejects for a damaged history file.
+   */
+  listRuns(): Promise<RunHistory>;
+  /** A kept run, as it was saved: everything its highlight slides and summary show. */
+  openRun(id: string): Promise<RunReport>;
 }

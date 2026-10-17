@@ -1,10 +1,12 @@
-import type { Fixture, RunSkip } from './fixtures';
-import { makePlan, play, type MockPlan, type Playback } from './mockRun';
+import type { Fixture, PastRun, RunSkip } from './fixtures';
+import { makePlan, pastReport, play, type MockPlan, type Playback } from './mockRun';
 import type {
   Bridge,
   CategoryTotal,
   MapFolder,
+  Overview,
   Proposal,
+  RunListing,
   RunReport,
   ScanOutcome,
   ScanUpdate,
@@ -24,6 +26,15 @@ export interface MockOptions {
   unplugMs?: number;
   /** How long a mock run of a plan takes. Default: two seconds a step. Zero finishes on the next tick. */
   runMs?: number;
+  /** How many kept runs the history says it couldn't read. Default: none. */
+  unreadableRuns?: number;
+  /**
+   * Runs also report the fixture's reorganizations as done, to preview the finish's Moved slide before
+   * reorganizations arrive (ticket 08).
+   */
+  moves?: boolean;
+  /** Start with the fixture's past runs in the history. Default: yes. */
+  pastRuns?: boolean;
 }
 
 /** A mock run's length when `runMs` isn't given, per step. */
@@ -48,7 +59,8 @@ const ease = (t: number) => 1 - Math.pow(1 - t, 2.4);
  * Its plans come from a drive's proposals, and a run plays one back over `runMs` with the events the core sends:
  * the fixture's skips happen on the way (a place changed since the scan, which planning leaves out; one in use),
  * Stop is honoured, and the report's free-space figures are a little off what was freed, as other apps write too.
- * Each scan runs at most one plan; a run's report goes in the history and the drive's figures change.
+ * Each scan runs at most one plan; a run's report goes in the history and the drive's figures change. The history
+ * starts with the fixture's past runs.
  */
 export function createMockBridge(fixture: Fixture, options: MockOptions = {}): MockBridge {
   const answer = <T>(value: T) =>
@@ -63,15 +75,15 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
     new Promise<T>((_, reject) => setTimeout(() => reject(new Error(message)), options.delayMs ?? 0));
   const system = fixture.volumes[0]!;
   let volumes = [...fixture.volumes];
-  /** Drives with a finished scan, which `browse` can open, with the proposals and skips their runs work from. */
-  const mapped = new Map<string, { proposals: Proposal[]; skips: RunSkip[] }>();
+  /** Drives with a finished scan, which `browse` can open, with the map, proposals and skips their runs work from. */
+  const mapped = new Map<string, { map: Overview; proposals: Proposal[]; skips: RunSkip[] }>();
   let running: { mountPoint: string; timer: number; finish: (outcome: ScanOutcome) => void } | null = null;
   /** Plans made and not yet run, by id. A new scan of their drive drops them. */
   const plans = new Map<string, MockPlan & { mountPoint: string }>();
   /** Drives whose scan has run its plan. */
   const ran = new Set<string>();
   let playing: Playback | null = null;
-  const history: RunReport[] = [];
+  const history: RunReport[] = options.pastRuns === false ? [] : fixture.history.map((past, i) => pastRun(fixture, past, i));
   let made = 0;
   const forget = (mountPoint: string) => {
     mapped.delete(mountPoint);
@@ -117,7 +129,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
         const finish = (outcome: ScanOutcome) => {
           if (running) clearInterval(running.timer);
           running = null;
-          if (outcome.status === 'done') mapped.set(mountPoint, { proposals: structuredClone(proposals), skips });
+          if (outcome.status === 'done') mapped.set(mountPoint, { map: structuredClone(map), proposals: structuredClone(proposals), skips });
           resolve(outcome);
         };
         const tick = () => {
@@ -145,7 +157,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
       if (ran.has(mountPoint)) return failure(`this scan of ${mountPoint} already ran a plan: scan again first`);
       let plan: MockPlan;
       try {
-        plan = makePlan(`plan-${++made}`, mountPoint, scan.proposals, ids, scan.skips);
+        plan = makePlan(`plan-${++made}`, mountPoint, scan.map, scan.proposals, ids, scan.skips);
       } catch (error) {
         return failure(error instanceof Error ? error.message : String(error));
       }
@@ -165,7 +177,8 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
       const totalMs = options.runMs ?? STEP_MS * plan.steps.length;
       return new Promise<RunReport>((resolve) => {
         setTimeout(() => {
-          const playback = play({ id: `run-${++made}`, plan, volume, totalMs }, onEvent);
+          const moves = options.moves ? structuredClone(fixture.moves) : [];
+          const playback = play({ id: `run-${++made}`, plan, volume, totalMs, moves }, onEvent);
           playing = playback;
           void playback.done.then((report) => {
             playing = null;
@@ -182,9 +195,41 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
       playing?.cancel();
       return answer(undefined);
     },
-    listRuns: () => answer(history),
+    listRuns: () => answer({ runs: history.map(listing), unreadable: options.unreadableRuns ?? 0 }),
+    openRun: (id) => {
+      const run = history.find((r) => r.id === id);
+      return run ? answer(run) : failure(`This run can’t be opened: the history has no run ${id}.`);
+    },
     unplug,
   };
+}
+
+/** A run in the history list, as the core lists it. */
+function listing(r: RunReport): RunListing {
+  return {
+    id: r.id,
+    mountPoint: r.mountPoint,
+    volumeName: r.volumeName,
+    startedAt: r.startedAt,
+    freedBytes: r.freedBytes,
+    deletedItems: r.deletedItems,
+    movedItems: r.movedItems,
+    cancelled: r.cancelled,
+  };
+}
+
+/** One of the fixture's past runs, as its kept report: its drive's map and proposals, run to the end. */
+function pastRun(fixture: Fixture, past: PastRun, i: number): RunReport {
+  const system = fixture.volumes[0]!;
+  const volume = fixture.volumes.find((v) => v.mountPoint === past.mountPoint) ?? system;
+  const map = onDrive(structuredClone(fixture.overview), system, volume);
+  const proposals = proposalsOnDrive(structuredClone(fixture.proposals), system, volume);
+  const skips = skipsOnDrive(structuredClone(fixture.runSkips), system, volume).filter((s) => s.when === 'run');
+  const plan = makePlan(`plan-past-${i + 1}`, volume.mountPoint, map, proposals, past.proposals, skips);
+  const day = new Date();
+  day.setHours(past.hour, 0, 0, 0);
+  const startedAt = day.getTime() - past.daysAgo * 86_400_000 + i * 7 * 60_000;
+  return pastReport(`run-past-${i + 1}`, plan, volume, startedAt, past.durationMs);
 }
 
 /** The system drive's skips as another drive's: scaled like its proposals, their paths moved onto it. */

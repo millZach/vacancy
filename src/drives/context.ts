@@ -51,8 +51,10 @@ export interface ReadyDrives {
   runPlan: (plan: PlanSummary) => void;
   /** Stops the running plan after the file being deleted. The run then ends, saying it was stopped. */
   cancelRun: () => void;
-  /** From the ended run of the drive on screen to its summary ("See what changed"). */
+  /** From the ended run of the drive on screen to its finish ("See what changed"): the slides, then the summary. */
   showSummary: () => void;
+  /** The summary of the drive on screen came up; it opens there from now on, not at the slides. */
+  summarySeen: () => void;
   /** From a failed run of the drive on screen back to its plan. */
   leaveRun: () => void;
   dismissGone: () => void;

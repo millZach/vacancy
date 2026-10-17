@@ -8,6 +8,7 @@ import type {
   Overview,
   Platform,
   Proposal,
+  Reorganized,
   Risk,
   Skip,
   VolumeInfo,
@@ -34,13 +35,32 @@ export interface Fixture {
    * step runs, and one that changed since the scan, which planning finds and leaves out.
    */
   runSkips: RunSkip[];
+  /** Runs kept in the history before this session, newest first: when, on which drive, and what they ran. */
+  history: PastRun[];
+  /**
+   * Folders a run reorganizes, for previewing the finish's Moved slide with `?moves=1` before reorganizations
+   * arrive (ticket 08). No plan can include them yet.
+   */
+  moves: Reorganized[];
 }
 
-/** Something a mock run leaves in place: found when planning (`plan`) or while its step runs (`run`). */
+/**
+ * Something a mock run leaves in place, found when planning (`plan`) or while its step runs (`run`); or, for a note,
+ * something it deletes whose space stays in use.
+ */
 export interface RunSkip {
   proposal: string;
   when: 'plan' | 'run';
   skip: Skip;
+}
+
+/** A run kept in the mock's history: `daysAgo` days before the session, at `hour`, running `proposals`. */
+export interface PastRun {
+  mountPoint: string;
+  daysAgo: number;
+  hour: number;
+  durationMs: number;
+  proposals: string[];
 }
 
 const GB = 1e9;
@@ -714,6 +734,25 @@ export const fixtures = {
           items: 1,
         },
       },
+      {
+        proposal: 'w-pkgcache',
+        when: 'run',
+        skip: {
+          path: `${local}\\npm-cache\\_cacache`,
+          reason: '38 files are also kept elsewhere under other names (hard links), so their space is still in use',
+          kind: 'hardLinked',
+          bytes: 0.09 * GB,
+          items: 38,
+        },
+      },
+    ],
+    history: [
+      { mountPoint: 'C:\\', daysAgo: 12, hour: 18, durationMs: 41_600, proposals: ['w-temp', 'w-browser', 'w-dumps'] },
+      { mountPoint: 'D:\\', daysAgo: 37, hour: 21, durationMs: 128_300, proposals: ['w-node', 'w-rust'] },
+    ],
+    moves: [
+      { id: 'r-downloads', folder: 'Downloads', movedItems: 812 },
+      { id: 'r-desktop', folder: 'Desktop', movedItems: 216 },
     ],
   },
   macos: {
@@ -747,6 +786,25 @@ export const fixtures = {
           items: 1,
         },
       },
+      {
+        proposal: 'm-brew',
+        when: 'run',
+        skip: {
+          path: `${mhome}/.npm/_cacache/content-v2`,
+          reason: '14 files are also kept elsewhere under other names (hard links), so their space is still in use',
+          kind: 'hardLinked',
+          bytes: 0.06 * GB,
+          items: 14,
+        },
+      },
+    ],
+    history: [
+      { mountPoint: '/', daysAgo: 9, hour: 9, durationMs: 52_900, proposals: ['m-caches', 'm-logs'] },
+      { mountPoint: '/Volumes/Samsung T7', daysAgo: 44, hour: 20, durationMs: 23_100, proposals: ['m-node'] },
+    ],
+    moves: [
+      { id: 'r-downloads', folder: 'Downloads', movedItems: 640 },
+      { id: 'r-desktop', folder: 'Desktop', movedItems: 133 },
     ],
   },
 } satisfies Record<Platform, Fixture>;

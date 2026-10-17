@@ -59,13 +59,14 @@ export type DriveScan =
 
 /**
  * A drive's plan once it is confirmed: running, ended (the run panel says Done, or that it was stopped), failed
- * (the run panel says why), and then the summary of what changed.
+ * (the run panel says why), and then the finish: its highlight slides, then the summary of what changed. `fresh`
+ * until the summary has come up once; the drive opens at the summary after that.
  */
 export type PlanRun =
   | { phase: 'running'; plan: PlanSummary; view: RunView; stopping: boolean }
   | { phase: 'ended'; plan: PlanSummary; view: RunView; report: RunReport }
   | { phase: 'failed'; plan: PlanSummary; view: RunView; message: string }
-  | { phase: 'summary'; plan: PlanSummary; report: RunReport };
+  | { phase: 'summary'; plan: PlanSummary; report: RunReport; fresh: boolean };
 
 /** A drive that went away while it was on screen, and what went with it. */
 export interface Gone {
@@ -100,8 +101,10 @@ export type Action =
   | { type: 'runStopping'; mountPoint: string }
   | { type: 'runEnded'; mountPoint: string; planId: string; report: RunReport }
   | { type: 'runFailed'; mountPoint: string; planId: string; message: string }
-  /** From the ended run to the drive's summary ("See what changed"). */
+  /** From the ended run to the drive's finish ("See what changed"): the highlight slides, then the summary. */
   | { type: 'showSummary'; mountPoint: string }
+  /** The drive's summary came up: next time the drive opens at it, not at the slides. */
+  | { type: 'summarySeen'; mountPoint: string }
   /** From a failed run back to the drive's plan. */
   | { type: 'leaveRun'; mountPoint: string }
   | { type: 'lock'; locked: boolean }
@@ -281,8 +284,10 @@ export function reduce(s: Session, a: Action): Session {
     }
     case 'showSummary':
       return onPlanRun(s, a.mountPoint, (run) =>
-        run?.phase === 'ended' ? { phase: 'summary', plan: run.plan, report: run.report } : run,
+        run?.phase === 'ended' ? { phase: 'summary', plan: run.plan, report: run.report, fresh: true } : run,
       );
+    case 'summarySeen':
+      return onPlanRun(s, a.mountPoint, (run) => (run?.phase === 'summary' && run.fresh ? { ...run, fresh: false } : run));
     case 'leaveRun':
       return onPlanRun(s, a.mountPoint, (run) => (run?.phase === 'failed' ? null : run));
     case 'lock':

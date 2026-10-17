@@ -3,8 +3,11 @@
 import type { RunSkip } from './fixtures';
 import type {
   CategoryFreed,
+  LeftForYou,
+  Overview,
   PlanSummary,
   Proposal,
+  Reorganized,
   RunEvent,
   RunReport,
   Skip,
@@ -17,7 +20,10 @@ interface Place {
   path: string;
   bytes: number;
   items: number;
-  /** What the run finds in use there, and leaves. */
+  /**
+   * What the run finds there: something in use, which it leaves, or a note about something it deleted whose space
+   * stays in use (a hard link kept elsewhere).
+   */
   inUse: Skip | null;
 }
 
@@ -32,6 +38,10 @@ interface MockStep {
 export interface MockPlan {
   summary: PlanSummary;
   steps: MockStep[];
+  /** Advice in the selection, left for the user. */
+  advice: LeftForYou[];
+  /** The map of the scan it was made from, for the report. */
+  map: Overview;
 }
 
 /**
@@ -39,7 +49,14 @@ export interface MockPlan {
  * the proposal's sample paths. Places the fixture says changed since the scan are left out and listed in `refused`.
  * Advice and tools can't be carried out, so they are left for the user.
  */
-export function makePlan(id: string, mountPoint: string, proposals: Proposal[], ids: string[], skips: RunSkip[]): MockPlan {
+export function makePlan(
+  id: string,
+  mountPoint: string,
+  map: Overview,
+  proposals: Proposal[],
+  ids: string[],
+  skips: RunSkip[],
+): MockPlan {
   const unknown = ids.find((i) => !proposals.some((p) => p.id === i));
   if (unknown !== undefined) throw new Error(`there is no proposal ${unknown} in this scan`);
   const chosen = proposals.filter((p) => ids.includes(p.id));
@@ -67,8 +84,13 @@ export function makePlan(id: string, mountPoint: string, proposals: Proposal[], 
     items: sum(s.places, (pl) => pl.items),
     places: s.places.length,
   }));
+  const advice = chosen
+    .filter((p) => p.action !== 'delete')
+    .map((p): LeftForYou => ({ id: p.id, title: p.title, summary: p.summary, why: p.why, bytes: p.bytes }));
   return {
     steps,
+    advice,
+    map,
     summary: {
       id,
       mountPoint,
@@ -78,7 +100,7 @@ export function makePlan(id: string, mountPoint: string, proposals: Proposal[], 
       moves: 0,
       steps: planSteps,
       refused: steps.flatMap((s) => s.refused),
-      leftForYou: chosen.filter((p) => p.action !== 'delete').map((p) => p.id),
+      leftForYou: advice.map((a) => a.id),
     },
   };
 }
@@ -98,7 +120,7 @@ export interface Playback {
  * being deleted: what is left is reported skipped, like the core does.
  */
 export function play(
-  run: { id: string; plan: MockPlan; volume: VolumeInfo; totalMs: number },
+  run: { id: string; plan: MockPlan; volume: VolumeInfo; totalMs: number; moves?: Reorganized[] },
   onEvent: (event: RunEvent) => void,
 ): Playback {
   const { plan, volume } = run;
@@ -144,19 +166,21 @@ export function play(
   };
   const deletePlace = (place: Place) => {
     const freed = place.bytes - (place.inUse?.bytes ?? 0);
-    const items = place.items - (place.inUse?.items ?? 0);
+    // A name deleted while another keeps the file is deleted; only its space stays in use.
+    const items = place.items - (place.inUse && !isNote(place.inUse) ? place.inUse.items : 0);
     stepFreed += freed;
     stepDeleted += items;
-    onEvent({ kind: 'deleted', step: index, path: place.path, bytes: freed, items, whole: !place.inUse });
+    onEvent({ kind: 'deleted', step: index, path: place.path, bytes: freed, items, whole: !place.inUse || isNote(place.inUse) });
     if (place.inUse) skip(place.inUse);
   };
   const finish = () => {
     const step = plan.steps[index]!;
     const p = step.proposal;
-    const left = skipped.filter((s) => s.kind !== 'hardLinked');
+    const left = skipped.filter((s) => !isNote(s));
     const report: StepReport = {
       id: p.id,
       title: p.title,
+      why: p.why,
       category: p.category,
       regenerable: p.regenerable,
       // As the core reports: what the confirm dialog showed, not the places refused while planning.
@@ -206,7 +230,7 @@ export function play(
   const done = new Promise<RunReport>((resolve) => {
     const end = () => {
       clearInterval(timer);
-      resolve(runReport(run.id, plan, volume, reports, startedAt, cancelled));
+      resolve(runReport(run.id, plan, volume, reports, startedAt, Date.now() - startedAt, cancelled, run.moves ?? []));
     };
     if (plan.steps.length === 0) {
       setTimeout(end, 0);
@@ -259,13 +283,48 @@ function stopped(place: Place): Skip {
   };
 }
 
+/** A note about something deleted, not something left: its space stays in use (see the core's `SkipKind::is_note`). */
+export function isNote(s: Skip): boolean {
+  return s.kind === 'hardLinked' || s.kind === 'heldOpen';
+}
+
+/**
+ * The report of a plan run to the end at `startedAt`, taking `durationMs`: every place deleted but what the fixture
+ * finds in use there, for the history's past runs.
+ */
+export function pastReport(id: string, plan: MockPlan, volume: VolumeInfo, startedAt: number, durationMs: number): RunReport {
+  const steps = plan.steps.map((step): StepReport => {
+    const p = step.proposal;
+    const found = step.places.flatMap((pl) => (pl.inUse ? [pl.inUse] : []));
+    const left = found.filter((s) => !isNote(s));
+    const freed = sum(step.places, (pl) => pl.bytes) - sum(found, (s) => s.bytes);
+    return {
+      id: p.id,
+      title: p.title,
+      why: p.why,
+      category: p.category,
+      regenerable: p.regenerable,
+      plannedBytes: sum(step.places, (pl) => pl.bytes),
+      freedBytes: freed,
+      plannedItems: sum(step.places, (pl) => pl.items),
+      deletedItems: sum(step.places, (pl) => pl.items) - sum(left, (s) => s.items),
+      places: step.places.length,
+      outcome: left.length === 0 && step.refused.length === 0 ? 'done' : freed > 0 ? 'partial' : 'skipped',
+      skipped: [...step.refused, ...found],
+    };
+  });
+  return runReport(id, plan, volume, steps, startedAt, durationMs, false, []);
+}
+
 function runReport(
   id: string,
   plan: MockPlan,
   volume: VolumeInfo,
   steps: StepReport[],
   startedAt: number,
+  durationMs: number,
   cancelled: boolean,
+  moves: Reorganized[],
 ): RunReport {
   const freedBytes = sum(steps, (s) => s.freedBytes);
   const byCategory: CategoryFreed[] = [];
@@ -284,14 +343,16 @@ function runReport(
     mountPoint: volume.mountPoint,
     volumeName: volume.name,
     startedAt,
-    durationMs: Date.now() - startedAt,
+    durationMs,
     cancelled,
     steps,
     plannedBytes: sum(steps, (s) => s.plannedBytes),
     freedBytes,
     deletedItems: sum(steps, (s) => s.deletedItems),
+    movedItems: sum(moves, (m) => m.movedItems),
+    // Names deleted while other names keep the file were deleted, not skipped.
     skippedItems: sum(
-      steps.flatMap((s) => s.skipped),
+      steps.flatMap((s) => s.skipped.filter((k) => !isNote(k))),
       (k) => k.items,
     ),
     freedByCategory: byCategory,
@@ -302,7 +363,9 @@ function runReport(
     freeAfter: volume.freeBytes + freeChange,
     freeChange,
     biggestWin: win?.id ?? null,
-    leftForYou: plan.summary.leftForYou,
+    leftForYou: plan.advice,
+    reorganized: moves,
+    map: plan.map,
   };
 }
 

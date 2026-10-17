@@ -1,5 +1,5 @@
 // Plans and reports for tests, shaped like the core's (and the Windows fixture's): two steps, one of them partial.
-import type { PlanSummary, RunReport, Skip, StepReport } from '../bridge';
+import { fixtures, type PlanSummary, type RunReport, type Skip, type StepReport } from '../bridge';
 
 const GB = 1e9;
 
@@ -36,6 +36,7 @@ export const changed: Skip = {
 
 export function stepReport(over: Partial<StepReport> & Pick<StepReport, 'id' | 'title' | 'category'>): StepReport {
   return {
+    why: '',
     regenerable: true,
     plannedBytes: 0,
     freedBytes: 0,
@@ -51,6 +52,7 @@ export function stepReport(over: Partial<StepReport> & Pick<StepReport, 'id' | '
 export const nodeDone = stepReport({
   id: 'w-node',
   title: 'node_modules in 61 idle projects',
+  why: 'Run npm install in a project to bring them back. Projects you used in the last 90 days are left alone.',
   category: 'dev',
   plannedBytes: 21 * GB,
   freedBytes: 21 * GB,
@@ -62,6 +64,7 @@ export const nodeDone = stepReport({
 export const browserPartial = stepReport({
   id: 'w-browser',
   title: 'Browser caches',
+  why: 'Browsers download these again as you browse.',
   category: 'caches',
   plannedBytes: 6.3 * GB,
   freedBytes: 5.89 * GB,
@@ -85,6 +88,7 @@ export const report: RunReport = {
   plannedBytes: 27.3 * GB,
   freedBytes: 26.89 * GB,
   deletedItems: 460_216,
+  movedItems: 0,
   skippedItems: 212,
   freedByCategory: [
     { id: 'dev', bytes: 21 * GB },
@@ -98,4 +102,6 @@ export const report: RunReport = {
   freeChange: 26.62 * GB,
   biggestWin: 'w-node',
   leftForYou: [],
+  reorganized: [],
+  map: fixtures.windows.overview,
 };
