@@ -1,3 +1,4 @@
+import type { AdvisorStatus } from '../bindings/AdvisorStatus';
 import type { CategoryFreed } from '../bindings/CategoryFreed';
 import type { CategoryId } from '../bindings/CategoryId';
 import type { CategoryTotal } from '../bindings/CategoryTotal';
@@ -30,6 +31,7 @@ import type { StepReport } from '../bindings/StepReport';
 import type { VolumeInfo } from '../bindings/VolumeInfo';
 
 export type {
+  AdvisorStatus,
   CategoryFreed,
   CategoryId,
   CategoryTotal,
@@ -75,6 +77,8 @@ export interface Bridge {
   readonly platform: Platform;
   /** This computer's name, as the OS shows it. */
   machineName(): Promise<string>;
+  /** Passive or synthetic availability only. No CLI runs, no executable paths, AI always disabled. */
+  advisorStatus(): Promise<AdvisorStatus>;
   /**
    * The drives to offer for scanning: internal, USB and external ones, the system drive first. Read-only and fast,
    * so the UI asks again now and then to notice drives coming and going. Rejects if the drives can't be read.

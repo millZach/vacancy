@@ -20,6 +20,11 @@ use crate::{
     ProposalSource, Proposals, Risk, Snapshot,
 };
 
+mod discovery;
+pub use discovery::{
+    AdvisorDiscovery, AdvisorProviderStatus, AdvisorStatus, passive_status, passive_status_in,
+};
+
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_EXPLANATIONS: usize = 5;
 const MAX_REMOVALS: usize = 100;
@@ -50,8 +55,13 @@ impl AdvisorProvider {
 #[serde(tag = "state", rename_all = "camelCase")]
 #[ts(export)]
 pub enum AdvisorAvailability {
-    NotInstalled,
-    Unsupported { reason: String },
+    /// No executable was found in the locations searched. Custom/login-shell locations may still contain one.
+    NotDetected,
+    /// Fixture mode deliberately did not inspect the host installation.
+    NotChecked,
+    Unsupported {
+        reason: String,
+    },
 }
 
 /// User preferences. An installed but unsupported provider can never become enabled through settings.
@@ -101,7 +111,7 @@ pub fn detect_in(directories: &[PathBuf]) -> Vec<DetectedAdvisor> {
                     reason: isolation_reason().into(),
                 }
             } else {
-                AdvisorAvailability::NotInstalled
+                AdvisorAvailability::NotDetected
             };
             DetectedAdvisor {
                 provider,

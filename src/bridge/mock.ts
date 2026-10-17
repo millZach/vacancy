@@ -102,6 +102,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
   return {
     platform: fixture.platform,
     machineName: () => answer(fixture.machineName),
+    advisorStatus: () => answer({ ...fixture.advisorStatus, enabled: false, discovery: 'fixture' as const }),
     listVolumes: () => answer(volumes),
     forgetDrive: (mountPoint) => {
       if (running?.mountPoint === mountPoint) running.finish({ status: 'cancelled' });

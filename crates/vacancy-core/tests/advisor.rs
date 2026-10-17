@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use support::{Fixture, KIB};
 use vacancy_core::advisor::{
-    AdvisorAvailability, AdvisorControl, AdvisorError, AdvisorEvent, AdvisorProvider, CliAdvisor,
-    FakeAdvisor, SummaryLimits, apply_response, ask, detect_in, summarize,
+    AdvisorAvailability, AdvisorControl, AdvisorDiscovery, AdvisorError, AdvisorEvent,
+    AdvisorProvider, AdvisorStatus, CliAdvisor, FakeAdvisor, SummaryLimits, apply_response, ask,
+    detect_in, passive_status_in, summarize,
 };
 use vacancy_core::{
     CancelToken, CloudRoot, Env, Moment, ProposalSource, Proposals, Risk, categorize, propose,
@@ -532,6 +533,12 @@ fn detecting_a_cli_does_not_run_it_or_enable_metadata_dispatch() {
     #[cfg(not(windows))]
     let name = "codex";
     let script = fx.file(name, 10);
+    let marker = fx.path("cli-was-launched");
+    #[cfg(windows)]
+    let script_text = format!("@echo off\r\necho launched>\"{}\"\r\n", marker.display());
+    #[cfg(not(windows))]
+    let script_text = format!("#!/bin/sh\nprintf launched > '{}'\n", marker.display());
+    std::fs::write(&script, script_text).unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -547,7 +554,49 @@ fn detecting_a_cli_does_not_run_it_or_enable_metadata_dispatch() {
         codex.availability,
         AdvisorAvailability::Unsupported { .. }
     ));
-    assert_eq!(detected[0].availability, AdvisorAvailability::NotInstalled);
+    assert_eq!(detected[0].availability, AdvisorAvailability::NotDetected);
+    let status = passive_status_in(&[fx.root().to_path_buf()]);
+    assert!(!status.enabled);
+    assert_eq!(status.discovery, AdvisorDiscovery::Passive);
+    assert_eq!(
+        status.providers[0].availability,
+        AdvisorAvailability::NotDetected
+    );
+    assert!(matches!(
+        status.providers[1].availability,
+        AdvisorAvailability::Unsupported { .. }
+    ));
+    let serialized = serde_json::to_value(&status).unwrap();
+    assert_eq!(
+        serialized
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["discovery", "enabled", "providers"]
+    );
+    for provider in serialized["providers"].as_array().unwrap() {
+        assert_eq!(
+            provider
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["availability", "provider"]
+        );
+    }
+    assert!(!serialized.to_string().contains("executable"));
+    assert!(
+        !serialized
+            .to_string()
+            .contains(&fx.root().to_string_lossy().replace('\\', "\\\\"))
+    );
+    assert!(
+        !marker.exists(),
+        "discovery must not execute a CLI or its startup scripts"
+    );
     let (fx, env) = setup(false);
     let snap = fx.scan();
     let cats = categorize(&snap, &env);
@@ -569,6 +618,19 @@ fn detecting_a_cli_does_not_run_it_or_enable_metadata_dispatch() {
         );
     }
     assert!(proposals.list().is_empty());
+}
+
+#[test]
+fn native_fixture_status_is_disabled_and_makes_no_host_installation_claim() {
+    let status = AdvisorStatus::fixture_disabled();
+    assert!(!status.enabled);
+    assert_eq!(status.discovery, AdvisorDiscovery::Fixture);
+    assert!(
+        status
+            .providers
+            .iter()
+            .all(|provider| provider.availability == AdvisorAvailability::NotChecked)
+    );
 }
 
 #[test]

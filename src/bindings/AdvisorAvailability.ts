@@ -3,4 +3,4 @@
 /**
  * Availability is deliberately separate from executable discovery.
  */
-export type AdvisorAvailability = { "state": "notInstalled" } | { "state": "unsupported", reason: string, };
+export type AdvisorAvailability = { "state": "notDetected" } | { "state": "notChecked" } | { "state": "unsupported", reason: string, };

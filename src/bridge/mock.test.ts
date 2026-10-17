@@ -6,6 +6,25 @@ afterEach(() => {
 });
 
 describe('the mock bridge', () => {
+  it('reports synthetic disabled advisor availability without claiming live support', async () => {
+    for (const fixture of [fixtures.windows, fixtures.macos]) {
+      const bridge = createMockBridge(fixture);
+      const status = await bridge.advisorStatus();
+      expect(status).toEqual(fixture.advisorStatus);
+      expect(status.enabled).toBe(false);
+      expect(status.discovery).toBe('fixture');
+      expect(status.providers.map((provider) => provider.availability.state).sort()).toEqual(['notDetected', 'unsupported']);
+      expect(JSON.stringify(status)).not.toMatch(/executable|[A-Z]:\\|\/Users\//);
+      status.providers.length = 0;
+      expect((await bridge.advisorStatus()).providers).toHaveLength(2);
+    }
+  });
+
+  it('keeps mock advisor disabled even when passed an inconsistent synthetic preference', async () => {
+    const bridge = createMockBridge({ ...fixtures.windows, advisorStatus: { ...fixtures.windows.advisorStatus, enabled: true } });
+    expect((await bridge.advisorStatus()).enabled).toBe(false);
+  });
+
   it('replays a scan: counts climb, categories are found one by one, then the map', async () => {
     vi.useFakeTimers();
     const bridge = createMockBridge(fixtures.windows, { scanMs: 1000 });
