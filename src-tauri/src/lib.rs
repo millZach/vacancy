@@ -165,10 +165,14 @@ async fn machine_name() -> String {
     vacancy_core::machine_name()
 }
 
-/// The drives to offer for scanning, the system drive first. Read-only.
+/// The drives to offer for scanning, the system drive first. Read-only. Runs on a blocking thread: a drive slow to
+/// answer must not hold up the async workers that serve scans and the map.
 #[tauri::command]
 async fn list_volumes() -> Result<Vec<VolumeInfo>, String> {
-    vacancy_core::list_volumes().map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(vacancy_core::list_volumes)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
 }
 
 /// Forgets a drive that has gone away (an unplugged USB stick): its map, and its scan if one is running.

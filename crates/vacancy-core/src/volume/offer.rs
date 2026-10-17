@@ -38,6 +38,7 @@ mod tests {
         VolumeInfo {
             name: mount_point.to_owned(),
             mount_point: mount_point.to_owned(),
+            id: mount_point.to_owned(),
             kind: DriveKind::Internal,
             system,
             total_bytes: 100,

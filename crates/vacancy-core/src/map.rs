@@ -293,6 +293,7 @@ pub(crate) fn build_map(
     let info = volume_info(volume).unwrap_or_else(|_| VolumeInfo {
         name: volume.display().to_string(),
         mount_point: volume.display().to_string(),
+        id: String::new(),
         kind: DriveKind::Internal,
         system: false,
         total_bytes: scanned,
@@ -653,6 +654,7 @@ mod tests {
         let volume = || VolumeInfo {
             name: "Test".into(),
             mount_point: fx.path().display().to_string(),
+            id: String::new(),
             kind: DriveKind::Internal,
             system: false,
             total_bytes: 1 << 40,

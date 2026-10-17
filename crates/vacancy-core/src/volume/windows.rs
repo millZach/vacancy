@@ -14,6 +14,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     GetLogicalDriveStringsW, GetVolumeInformationW, GetVolumeNameForVolumeMountPointW,
     GetVolumePathNameW, OPEN_EXISTING, QueryDosDeviceW,
 };
+use windows_sys::Win32::System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SetThreadErrorMode};
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::Ioctl::{
     IOCTL_DISK_GET_PARTITION_INFO_EX, IOCTL_STORAGE_QUERY_PROPERTY, PARTITION_INFORMATION_EX,
@@ -43,7 +44,28 @@ const LABEL_LEN: u32 = 261;
 /// `\\?\Volume{GUID}\` and its NUL fit in 50 units.
 const VOLUME_NAME_LEN: u32 = 50;
 
+/// While alive, Windows reports a drive with no disk in it (a card reader with no card) as an error instead of
+/// asking the user to insert one. The thread's previous setting comes back when it is dropped.
+struct QuietErrors(u32);
+
+impl QuietErrors {
+    fn new() -> Self {
+        let mut old = 0u32;
+        // SAFETY: `old` is a valid `u32` for the previous mode.
+        unsafe { SetThreadErrorMode(SEM_FAILCRITICALERRORS, &mut old) };
+        Self(old)
+    }
+}
+
+impl Drop for QuietErrors {
+    fn drop(&mut self) {
+        // SAFETY: restores the mode saved in `new`; the old-mode pointer may be null.
+        unsafe { SetThreadErrorMode(self.0, ptr::null_mut()) };
+    }
+}
+
 pub(super) fn list_volumes() -> Result<Vec<VolumeInfo>, VolumeError> {
+    let _quiet = QuietErrors::new();
     let mut buf = vec![0u16; 1024];
     // SAFETY: `buf` holds `buf.len()` writable units.
     let n = unsafe { GetLogicalDriveStringsW(buf.len() as u32, buf.as_mut_ptr()) } as usize;
@@ -73,6 +95,7 @@ pub(super) fn volume_info(path: &Path) -> Result<VolumeInfo, VolumeError> {
         path: path.to_path_buf(),
         source,
     };
+    let _quiet = QuietErrors::new();
     let root = volume_root(path).map_err(fail)?;
     let root_w = to_wide(OsStr::new(&root));
     // SAFETY: `root_w` is a NUL-terminated volume root.
@@ -123,7 +146,7 @@ fn probe(root: &str, kind: u32, system: Option<&str>) -> io::Result<WindowsDrive
     if ok == 0 {
         return Err(io::Error::last_os_error());
     }
-    let (label, file_system, fs_flags) = label_and_file_system(&root_w);
+    let (label, serial, file_system, fs_flags) = label_and_file_system(&root_w);
     let (bus, partition) = match open_volume(&root_w) {
         Some(volume) => (bus_type(&volume), partition(&volume)),
         None => (None, None),
@@ -133,6 +156,7 @@ fn probe(root: &str, kind: u32, system: Option<&str>) -> io::Result<WindowsDrive
         drive_type: kind,
         subst: is_subst(&root_w),
         label,
+        serial,
         file_system,
         read_only: fs_flags & rules::READ_ONLY_VOLUME != 0,
         bus,
@@ -169,20 +193,21 @@ fn volume_root(path: &Path) -> io::Result<String> {
     Ok(from_wide(&buf))
 }
 
-/// The volume's label, its file system's name ("NTFS") and the file system's flags, each empty (or 0) when Windows
-/// won't say.
-fn label_and_file_system(root_w: &[u16]) -> (String, String, u32) {
+/// The volume's label, serial number, file system's name ("NTFS") and file system flags, each empty (or 0) when
+/// Windows won't say.
+fn label_and_file_system(root_w: &[u16]) -> (String, u32, String, u32) {
     let mut label = [0u16; LABEL_LEN as usize];
     let mut fs = [0u16; LABEL_LEN as usize];
+    let mut serial = 0u32;
     let mut flags = 0u32;
-    // SAFETY: `root_w` is a NUL-terminated volume root; both buffers hold `LABEL_LEN` writable units; `flags` is a
-    // valid `u32`; the other out parameters may be null.
+    // SAFETY: `root_w` is a NUL-terminated volume root; both buffers hold `LABEL_LEN` writable units; `serial` and
+    // `flags` are valid `u32`s; the longest-name out parameter may be null.
     let ok = unsafe {
         GetVolumeInformationW(
             root_w.as_ptr(),
             label.as_mut_ptr(),
             LABEL_LEN,
-            ptr::null_mut(),
+            &mut serial,
             ptr::null_mut(),
             &mut flags,
             fs.as_mut_ptr(),
@@ -190,9 +215,9 @@ fn label_and_file_system(root_w: &[u16]) -> (String, String, u32) {
         )
     };
     if ok == 0 {
-        (String::new(), String::new(), 0)
+        (String::new(), 0, String::new(), 0)
     } else {
-        (from_wide(&label), from_wide(&fs), flags)
+        (from_wide(&label), serial, from_wide(&fs), flags)
     }
 }
 

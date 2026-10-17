@@ -65,7 +65,8 @@ pub(super) fn list_volumes() -> Result<Vec<VolumeInfo>, VolumeError> {
     Ok(rules::drives(&found))
 }
 
-/// What macOS says about one mounted file system. Disk Arbitration is asked only about local devices.
+/// What macOS says about one mounted file system. Its name and device are asked for only when it might be offered
+/// (and always for `/`): a stale network share can block `getattrlist` for a long time.
 fn mount(st: &libc::statfs, arbitration: Option<&Arbitration>) -> MacMount {
     // SAFETY: the kernel NUL-terminates the three names within their arrays.
     let (on, from, fs) = unsafe {
@@ -78,15 +79,21 @@ fn mount(st: &libc::statfs, arbitration: Option<&Arbitration>) -> MacMount {
     let flags = st.f_flags;
     let local = flags & libc::MNT_LOCAL as u32 != 0;
     let mount_point = on.to_string_lossy().into_owned();
+    let file_system = fs.to_string_lossy().into_owned();
+    let ask = mount_point == "/" || rules::worth_asking(local, &file_system);
     let block = u64::from(st.f_bsize);
     let device = match arbitration {
-        Some(a) if local => a.device(from),
+        Some(a) if ask => a.device(from),
         _ => Device::default(),
     };
+    let name = if ask { volume_name(on) } else { None };
+    // SAFETY: `fsid_t` is two `i32`s (its field is private in `libc`); transmute checks the sizes match.
+    let fsid = unsafe { mem::transmute::<libc::fsid_t, [i32; 2]>(st.f_fsid) };
     MacMount {
-        name: volume_name(on).unwrap_or_else(|| fallback_name(&mount_point)),
+        name: name.unwrap_or_else(|| fallback_name(&mount_point)),
+        fsid,
         mount_point,
-        file_system: fs.to_string_lossy().into_owned(),
+        file_system,
         local,
         browsable: flags & libc::MNT_DONTBROWSE as u32 == 0,
         read_only: flags & libc::MNT_RDONLY as u32 != 0,

@@ -119,10 +119,19 @@ describe('the drive session', () => {
 
   it('treats a different drive in the same place as a new drive', () => {
     const s = run(start, { type: 'switch', mountPoint: E.mountPoint }, ...scanned(E, 1));
-    const other = { ...E, name: 'Kingston (E:)', totalBytes: 128e9 };
+    const other = { ...E, id: 'another stick', name: 'Kingston (E:)', totalBytes: 128e9 };
     const next = run(s, listed([C, D, other]));
     expect(scanOf(next, E.mountPoint).phase).toBe('idle');
     expect(next.gone).toEqual({ name: 'SanDisk (E:)', lost: 'map' });
+  });
+
+  it('keeps a drive whose name or kind reads differently for a moment', () => {
+    const s = run(start, { type: 'switch', mountPoint: E.mountPoint }, ...scanned(E, 1));
+    const flicker = { ...E, name: 'USB Drive (E:)', kind: 'internal' as const };
+    const next = run(s, listed([C, D, flicker]));
+    expect(scanOf(next, E.mountPoint).phase).toBe('done');
+    expect(next.gone).toBeNull();
+    expect(next.drives[2]!.name).toBe('USB Drive (E:)');
   });
 
   it('ignores a listing that changed nothing, or came back empty', () => {

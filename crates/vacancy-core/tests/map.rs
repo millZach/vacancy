@@ -15,6 +15,7 @@ fn volume(used: u64, free: u64) -> VolumeInfo {
     VolumeInfo {
         name: "Test Disk".into(),
         mount_point: "X:\\".into(),
+        id: "1234ABCD".into(),
         kind: DriveKind::Internal,
         system: false,
         total_bytes: used + free,

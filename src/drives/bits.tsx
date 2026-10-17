@@ -19,12 +19,13 @@ export function DriveIcon({ kind, size = 14, className }: { kind: DriveKind; siz
 }
 
 /** The drive's kind as a small tag, and a "System" tag on the drive the OS runs from. */
-export function DriveTags({ volume, system = true }: { volume: VolumeInfo; system?: boolean }) {
+export function DriveTags({ volume, system = true, id }: { volume: VolumeInfo; system?: boolean; id?: string }) {
   return (
-    <>
+    <span className="drive-tags" id={id}>
       <span className={volume.kind === 'internal' ? 'drive-tag' : 'drive-tag is-outside'}>{KIND_LABEL[volume.kind]}</span>
-      {system && volume.system && <span className="drive-tag">System</span>}
-    </>
+      {/* A space, so screen readers say "Internal System"; the flex layout ignores it. */}
+      {system && volume.system && <> <span className="drive-tag">System</span></>}
+    </span>
   );
 }
 

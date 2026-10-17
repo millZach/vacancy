@@ -131,7 +131,10 @@ describe('the header’s drive menu', () => {
     expect(items.map((i) => i.getAttribute('aria-label'))).toEqual(['Local Disk (C:)', 'Data (D:)', 'SanDisk (E:)']);
     expect(items[0]).toHaveAttribute('aria-checked', 'true');
     expect(items[0]).toHaveFocus();
-    expect(items[1]).toHaveAccessibleDescription(/^700\sGB of 2\sTB used, 1\.3\sTB free Not scanned yet$/);
+    expect(items[1]).toHaveAccessibleDescription(/^Internal 700\sGB of 2\sTB used, 1\.3\sTB free Not scanned yet$/);
+    expect(screen.getByRole('radio', { name: 'Local Disk (C:)' })).toHaveAccessibleDescription(
+      /^Internal System 45\sGB free of 476\sGB Not scanned yet$/,
+    );
     expect(menu).toHaveTextContent('Drives on DESKTOP-ALEX');
     expect(menu).toHaveTextContent('Network and optical drives aren’t listed.');
 
@@ -171,6 +174,7 @@ describe('the header’s drive menu', () => {
     expect(screen.getByRole('menuitemradio', { name: 'Local Disk (C:)' })).toHaveTextContent('Open map');
     await userEvent.click(screen.getByRole('menuitemradio', { name: 'Local Disk (C:)' }));
     expect(await screen.findByLabelText('Map key')).toBeInTheDocument();
+    expect(plate()).toHaveFocus();
     expect(within(crumbs()).getByText('Local Disk (C:)')).toBeInTheDocument();
     expect(within(header()).getByText('431 GB of 476 GB used')).toBeInTheDocument();
     expect(scan).toHaveBeenCalledTimes(2);
@@ -214,13 +218,16 @@ describe('the header’s drive menu', () => {
     await scanToMap('Local Disk (C:)');
 
     await userEvent.click(screen.getByRole('button', { name: 'Start the run' }));
-    expect(plate()).toBeDisabled();
-    expect(plate()).toHaveAttribute('title', 'Switch drives after this run finishes.');
+    expect(plate()).toHaveAttribute('aria-disabled', 'true');
+    expect(plate()).toHaveAccessibleDescription('Switch drives after this run finishes.');
     await userEvent.click(plate());
+    expect(screen.queryByRole('menu')).toBeNull();
+    plate().focus();
+    await userEvent.keyboard('{Enter}');
     expect(screen.queryByRole('menu')).toBeNull();
 
     await userEvent.click(screen.getByRole('button', { name: 'End the run' }));
-    expect(plate()).toBeEnabled();
+    expect(plate()).not.toHaveAttribute('aria-disabled');
     await userEvent.click(plate());
     expect(screen.getByRole('menu', { name: 'Drives' })).toBeInTheDocument();
   });

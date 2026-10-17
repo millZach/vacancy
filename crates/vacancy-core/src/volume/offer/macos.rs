@@ -9,6 +9,8 @@ pub(crate) struct MacMount {
     pub(crate) mount_point: String,
     /// The volume's name as Finder shows it.
     pub(crate) name: String,
+    /// The file system id `statfs` reports, which a volume keeps while it stays mounted.
+    pub(crate) fsid: [i32; 2],
     /// The file system's type: `apfs`, `exfat`, `smbfs`.
     pub(crate) file_system: String,
     /// Mounted from a local device (`MNT_LOCAL`), not over the network.
@@ -38,6 +40,12 @@ const TIME_MACHINE: [&str; 2] = [
 /// APFS volumes macOS keeps for itself, by the names it gives them when they are mounted.
 const SYSTEM_VOLUME_NAMES: [&str; 4] = ["Preboot", "Recovery", "Update", "VM"];
 
+/// Whether a mount might be offered, so is worth asking more about: local, with a disk file system. Asking a stale
+/// network share anything can block for a long time.
+pub(crate) fn worth_asking(local: bool, file_system: &str) -> bool {
+    local && LOCAL_FILE_SYSTEMS.contains(&file_system)
+}
+
 /// The drives to offer from the mounted file systems: `/` (the startup disk) first, then the rest by mount point.
 pub(crate) fn drives(found: &[MacMount]) -> Vec<VolumeInfo> {
     super::ordered(found.iter().filter(|m| offers(m)).map(describe).collect())
@@ -52,10 +60,7 @@ fn offers(m: &MacMount) -> bool {
     if m.mount_point == "/" {
         return true;
     }
-    if !m.local || !m.browsable || m.read_only {
-        return false;
-    }
-    if !LOCAL_FILE_SYSTEMS.contains(&m.file_system.as_str()) {
+    if !worth_asking(m.local, &m.file_system) || !m.browsable || m.read_only {
         return false;
     }
     if m.mount_point.starts_with("/System/Volumes/")
@@ -79,6 +84,7 @@ pub(crate) fn describe(m: &MacMount) -> VolumeInfo {
     VolumeInfo {
         name: m.name.clone(),
         mount_point: m.mount_point.clone(),
+        id: format!("{:x}-{:x}", m.fsid[0], m.fsid[1]),
         kind: if system || m.internal == Some(true) {
             DriveKind::Internal
         } else {
@@ -102,6 +108,7 @@ mod tests {
         MacMount {
             mount_point: mount_point.into(),
             name: name.into(),
+            fsid: [mount_point.len() as i32, 0x1a],
             file_system: "apfs".into(),
             local: true,
             browsable: true,
@@ -227,6 +234,7 @@ mod tests {
     fn reports_capacity_used_and_free() {
         let drives = drives(&a_busy_mac());
         let hd = &drives[0];
+        assert_eq!(hd.id, "1-1a", "the file system id");
         assert_eq!(
             (hd.total_bytes, hd.used_bytes, hd.free_bytes),
             (494 * GB, 460 * GB, 34 * GB)

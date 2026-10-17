@@ -54,13 +54,22 @@ export function DrivesProvider({ children }: { children: ReactNode }) {
   }, [bridge]);
 
   const ready = info.status === 'ready';
+  // One listing at a time: a drive slow to answer never piles up requests, and answers can't arrive out of order.
+  const listing = useRef(false);
   const relist = useCallback(() => {
-    bridge.listVolumes().then(
-      (drives) => dispatch({ type: 'listed', drives }),
-      () => {
-        // Keep the drives we know and ask again next time; a failed listing is not a drive unplugged.
-      },
-    );
+    if (listing.current) return;
+    listing.current = true;
+    bridge
+      .listVolumes()
+      .then(
+        (drives) => dispatch({ type: 'listed', drives }),
+        () => {
+          // Keep the drives we know and ask again next time; a failed listing is not a drive unplugged.
+        },
+      )
+      .finally(() => {
+        listing.current = false;
+      });
   }, [bridge]);
   useEffect(() => {
     if (!ready) return;

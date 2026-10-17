@@ -67,9 +67,12 @@ export function DriveMenu({ drives }: { drives: ReadyDrives }) {
         className={shown ? 'head-disk drive-menu-button is-open' : 'head-disk drive-menu-button'}
         aria-haspopup="menu"
         aria-expanded={shown}
-        disabled={locked}
+        // Still focusable while locked, so the lock note can be read; it just doesn't open.
+        aria-disabled={locked || undefined}
         title={locked ? LOCK_NOTE : 'Switch drive'}
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => {
+          if (!locked) setOpen((o) => !o);
+        }}
       >
         <DriveIcon kind={v.kind} />
         <span className="head-disk-name">{v.name}</span>
@@ -99,11 +102,12 @@ export function DriveMenu({ drives }: { drives: ReadyDrives }) {
               role="menuitemradio"
               aria-checked={d.current}
               aria-label={d.volume.name}
-              aria-describedby={`${ids}-${i}-nums ${ids}-${i}-status`}
+              aria-describedby={`${ids}-${i}-tags ${ids}-${i}-nums ${ids}-${i}-status`}
               tabIndex={-1}
               className={d.current ? 'drive-row is-on' : 'drive-row'}
               onClick={() => {
                 setOpen(false);
+                button.current?.focus();
                 drives.switchTo(d.volume.mountPoint);
               }}
             >
@@ -111,7 +115,7 @@ export function DriveMenu({ drives }: { drives: ReadyDrives }) {
               <span className="drive-row-main">
                 <span className="drive-row-name">
                   <b>{d.volume.name}</b>
-                  <DriveTags volume={d.volume} system={false} />
+                  <DriveTags volume={d.volume} system={false} id={`${ids}-${i}-tags`} />
                 </span>
                 <UsageBar volume={d.volume} />
                 <span className="drive-row-nums" id={`${ids}-${i}-nums`}>

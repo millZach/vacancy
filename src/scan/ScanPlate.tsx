@@ -104,7 +104,7 @@ function DriveCards({ drives }: { drives: ReadyDrives }) {
           role="radio"
           aria-checked={d.current}
           aria-label={d.volume.name}
-          aria-describedby={`${ids}-${i}-nums ${ids}-${i}-status`}
+          aria-describedby={`${ids}-${i}-tags ${ids}-${i}-nums ${ids}-${i}-status`}
           tabIndex={d.current ? 0 : -1}
           className={d.current ? 'drive-card is-on' : 'drive-card'}
           onClick={() => drives.pick(d.volume.mountPoint)}
@@ -112,9 +112,7 @@ function DriveCards({ drives }: { drives: ReadyDrives }) {
         >
           <span className="drive-card-top">
             <DriveIcon kind={d.volume.kind} size={20} className="drive-card-icon" />
-            <span className="drive-card-tags">
-              <DriveTags volume={d.volume} />
-            </span>
+            <DriveTags volume={d.volume} id={`${ids}-${i}-tags`} />
             {d.current && (
               <span className="drive-card-tick" aria-hidden>
                 <Check size={11} strokeWidth={3} />

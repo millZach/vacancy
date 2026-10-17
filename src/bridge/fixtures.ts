@@ -110,7 +110,8 @@ function build(
 
 /** A drive as the core reports it, from its capacity and used space in gigabytes. */
 function drive(name: string, mountPoint: string, kind: DriveKind, system: boolean, totalGb: number, usedGb: number): VolumeInfo {
-  return { name, mountPoint, kind, system, totalBytes: totalGb * GB, usedBytes: usedGb * GB, freeBytes: (totalGb - usedGb) * GB };
+  const id = `fx-${name}`;
+  return { name, mountPoint, id, kind, system, totalBytes: totalGb * GB, usedBytes: usedGb * GB, freeBytes: (totalGb - usedGb) * GB };
 }
 
 const winVolume = drive('Local Disk (C:)', 'C:\\', 'internal', true, 476, 431);

@@ -31,6 +31,9 @@ pub struct VolumeInfo {
     pub name: String,
     /// Where the volume is mounted: `C:\` on Windows, `/` on macOS.
     pub mount_point: String,
+    /// Tells this volume apart from another mounted at the same place later (a USB stick swapped for another): the
+    /// volume's serial number on Windows, its file system id on macOS.
+    pub id: String,
     /// Built in, on USB, or another external drive.
     pub kind: DriveKind,
     /// The OS runs from this drive.
@@ -98,10 +101,11 @@ pub fn system_volume() -> Result<VolumeInfo, VolumeError> {
 
 /// The drives to offer for scanning: the system drive first, then the others by mount point.
 ///
-/// Internal drives plus USB and external ones. Network shares, optical and RAM drives, disk images, cloud
-/// services' virtual drives, read-only volumes, and hidden, system-only or recovery volumes are left out (Windows
-/// volumes without a drive letter; macOS's Preboot, VM, Recovery and Update volumes, and every volume under
-/// `/System/Volumes`, whose Data volume is scanned through `/`). The system drive is always listed.
+/// Internal drives plus USB and external ones. Network shares, optical and RAM drives, cloud services' virtual
+/// drives, read-only volumes, and hidden, system-only or recovery volumes are left out (Windows volumes without a
+/// drive letter; macOS's Preboot, VM, Recovery and Update volumes, and every volume under `/System/Volumes`, whose
+/// Data volume is scanned through `/`). On macOS disk images are left out too; on Windows a mounted ISO is a CD
+/// drive, and a mounted VHD (a Dev Drive is one) counts as internal. The system drive is always listed.
 ///
 /// Fast and read-only, like [`volume_info`]: it asks the OS about each volume and never lists or opens files.
 pub fn list_volumes() -> Result<Vec<VolumeInfo>, VolumeError> {
@@ -110,6 +114,9 @@ pub fn list_volumes() -> Result<Vec<VolumeInfo>, VolumeError> {
         return Ok(drives);
     }
     // The OS should always list the drive it runs from; if it didn't, ask for that drive directly.
-    let system = system_volume()?;
-    Ok(offer::system_first(system, drives))
+    match system_volume() {
+        Ok(system) => Ok(offer::system_first(system, drives)),
+        Err(e) if drives.is_empty() => Err(e),
+        Err(_) => Ok(drives),
+    }
 }

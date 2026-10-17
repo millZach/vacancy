@@ -71,11 +71,12 @@ export function scanOf(s: Session, mountPoint: string): DriveScan {
 }
 
 /**
- * The same drive as before: same place, name, size and kind. A different stick plugged in where the last one was
- * is a different drive, and the last one's map must not carry over to it.
+ * The same drive as before: same place, same volume id. A different stick plugged in where the last one was is a
+ * different drive, and the last one's map must not carry over to it. A name or kind that reads differently once
+ * (the OS was slow to answer) doesn't make it another drive.
  */
 export function sameDrive(a: VolumeInfo, b: VolumeInfo): boolean {
-  return a.mountPoint === b.mountPoint && a.name === b.name && a.totalBytes === b.totalBytes && a.kind === b.kind;
+  return a.mountPoint === b.mountPoint && a.id === b.id;
 }
 
 /** The figures to show for a drive: those its map was drawn against once it has one, so they agree with the map. */
@@ -187,5 +188,13 @@ function listed(s: Session, drives: VolumeInfo[]): Session {
 }
 
 function sameVolume(a: VolumeInfo, b: VolumeInfo): boolean {
-  return sameDrive(a, b) && a.system === b.system && a.usedBytes === b.usedBytes && a.freeBytes === b.freeBytes;
+  return (
+    sameDrive(a, b) &&
+    a.name === b.name &&
+    a.kind === b.kind &&
+    a.system === b.system &&
+    a.totalBytes === b.totalBytes &&
+    a.usedBytes === b.usedBytes &&
+    a.freeBytes === b.freeBytes
+  );
 }

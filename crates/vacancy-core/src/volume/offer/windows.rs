@@ -42,6 +42,8 @@ pub(crate) struct WindowsDrive {
     pub(crate) subst: bool,
     /// The volume's label, empty when it has none.
     pub(crate) label: String,
+    /// The volume's serial number, 0 when Windows won't say.
+    pub(crate) serial: u32,
     /// The file system's name ("NTFS"), empty when Windows won't say (a card reader with no card in it).
     pub(crate) file_system: String,
     /// The file system is mounted read-only.
@@ -176,6 +178,7 @@ pub(crate) fn describe(d: &WindowsDrive) -> VolumeInfo {
     VolumeInfo {
         name: display_name(&d.label, d.drive_type, &d.root),
         mount_point: d.root.clone(),
+        id: format!("{:08X}", d.serial),
         kind: kind(d.drive_type, d.bus),
         system: d.system,
         total_bytes: d.total_bytes,
@@ -232,6 +235,7 @@ mod tests {
             drive_type: drive_type::FIXED,
             subst: false,
             label: String::new(),
+            serial: u32::from(letter),
             file_system: "NTFS".into(),
             read_only: false,
             bus: Some(0x11), // NVMe
@@ -395,6 +399,7 @@ mod tests {
         let drives = drives(&a_busy_pc());
         let c = &drives[0];
         assert_eq!(c.mount_point, "C:\\");
+        assert_eq!(c.id, "00000043", "the serial number, in hex");
         assert_eq!(
             (c.total_bytes, c.used_bytes, c.free_bytes),
             (1000 * GB, 993 * GB, 7 * GB)

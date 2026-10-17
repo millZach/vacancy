@@ -3,6 +3,10 @@
    prototype at tag prototype/drive-picker. */
 
 /* ---------- shared ---------- */
+.drive-tags {
+  display: inline-flex;
+  gap: 5px;
+}
 .drive-tag {
   display: inline-flex;
   align-items: center;
@@ -130,10 +134,6 @@
   color: var(--color-neon-ink);
   filter: var(--glow-icon);
 }
-.drive-card-tags {
-  display: flex;
-  gap: 5px;
-}
 .drive-card-tick {
   display: grid;
   place-items: center;
@@ -186,12 +186,12 @@
     background 0.15s,
     border-color 0.15s;
 }
-.drive-menu-button:hover:not(:disabled),
+.drive-menu-button:hover:not([aria-disabled='true']),
 .drive-menu-button.is-open {
   border-color: var(--color-line-2);
   background: var(--color-raise);
 }
-.drive-menu-button:disabled {
+.drive-menu-button[aria-disabled='true'] {
   cursor: default;
 }
 .usage--head {

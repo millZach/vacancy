@@ -14,6 +14,11 @@ name: string,
  */
 mountPoint: string, 
 /**
+ * Tells this volume apart from another mounted at the same place later (a USB stick swapped for another): the
+ * volume's serial number on Windows, its file system id on macOS.
+ */
+id: string, 
+/**
  * Built in, on USB, or another external drive.
  */
 kind: DriveKind, 
