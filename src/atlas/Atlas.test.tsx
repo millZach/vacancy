@@ -3,23 +3,30 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../App';
 import { BridgeProvider, createMockBridge, fixtures, type Bridge, type MapFolder, type MockOptions } from '../bridge';
+import { DrivesProvider } from '../drives/DrivesProvider';
 
 const plain = (s: string | null | undefined) => (s ?? '').replace(/\u00a0/g, ' ');
 
 function renderApp(bridge: Bridge) {
   return render(
     <BridgeProvider bridge={bridge}>
-      <App />
+      <DrivesProvider>
+        <App />
+      </DrivesProvider>
     </BridgeProvider>,
   );
 }
+
+const ASK = 'Which drive should Vacancy scan?';
+/** The window's header, where the drive plate is. */
+const header = () => screen.getByRole('banner');
 
 const windows = (options: MockOptions = {}) => createMockBridge(fixtures.windows, { scanMs: 0, ...options });
 
 /** Scans the plate's drive and waits for the map. */
 async function scanToMap(name = 'Local Disk (C:)') {
   await userEvent.click(await screen.findByRole('button', { name: `Scan ${name}` }));
-  await screen.findByRole('button', { name: 'Scan again' });
+  await screen.findByLabelText('Map key');
 }
 
 /** The tile or header with this text. */
@@ -39,13 +46,24 @@ beforeEach(() => {
 });
 
 describe('the scan plate', () => {
-  it('shows the system drive on the plate and in the header, with used and free space', async () => {
+  it('asks which drive to scan, the system drive first, also shown in the header with used and free space', async () => {
     renderApp(windows());
+
+    expect(await screen.findByRole('heading', { name: ASK })).toBeInTheDocument();
+    expect(screen.getByText('3 drives on DESKTOP-ALEX')).toBeInTheDocument();
+    expect(within(header()).getByText('Local Disk (C:)')).toBeInTheDocument();
+    expect(within(header()).getByText('431 GB of 476 GB used')).toBeInTheDocument();
+    expect(within(header()).getByText('45 GB free')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Scan Local Disk (C:)' })).toBeEnabled();
+  });
+
+  it('is the single drive plate when there is only one drive', async () => {
+    const fixture = { ...fixtures.windows, volumes: fixtures.windows.volumes.slice(0, 1) };
+    renderApp(createMockBridge(fixture, { scanMs: 0 }));
 
     expect(await screen.findByRole('heading', { name: 'Local Disk (C:)' })).toBeInTheDocument();
     expect(screen.getByText('476 GB on DESKTOP-ALEX, 431 GB used')).toBeInTheDocument();
-    expect(screen.getByText('431 GB of 476 GB used')).toBeInTheDocument();
-    expect(screen.getByText('45 GB free')).toBeInTheDocument();
+    expect(screen.queryByRole('radiogroup', { name: 'Drives' })).toBeNull();
     expect(screen.getByRole('button', { name: 'Scan Local Disk (C:)' })).toBeEnabled();
   });
 
@@ -58,26 +76,16 @@ describe('the scan plate', () => {
     expect(screen.getByText('Scanning only reads. Nothing changes until you approve a plan.')).toBeInTheDocument();
   });
 
-  it('lists the local drives, the system drive first and picked', async () => {
-    renderApp(windows());
-
-    const picker = await screen.findByRole('radiogroup', { name: 'Drive to scan' });
-    const drives = within(picker).getAllByRole('radio');
-    expect(drives.map((d) => d.textContent)).toEqual(['Local Disk (C:)', 'Data (D:)']);
-    expect(drives[0]).toHaveAttribute('aria-checked', 'true');
-
-    await userEvent.click(drives[1]!);
-    expect(screen.getByRole('heading', { name: 'Data (D:)' })).toBeInTheDocument();
-    expect(screen.getByText('1 TB on DESKTOP-ALEX, 320 GB used')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Scan Data (D:)' })).toBeInTheDocument();
-    expect(screen.getByText('320 GB of 1 TB used')).toBeInTheDocument();
-  });
-
-  it('shows a Mac drive, with the header ready for the traffic lights', async () => {
+  it('shows a Mac’s drives, with the header ready for the traffic lights', async () => {
     const { container } = renderApp(createMockBridge(fixtures.macos));
 
-    expect(await screen.findByRole('heading', { name: 'Macintosh HD' })).toBeInTheDocument();
-    expect(screen.getByText('494 GB on Alex’s MacBook Air, 460 GB used')).toBeInTheDocument();
+    const cards = await screen.findByRole('radiogroup', { name: 'Drives' });
+    expect(within(cards).getAllByRole('radio').map((r) => r.getAttribute('aria-label'))).toEqual([
+      'Macintosh HD',
+      'Samsung T7',
+    ]);
+    expect(screen.getByText('2 drives on Alex’s MacBook Air')).toBeInTheDocument();
+    expect(within(header()).getByText('460 GB of 494 GB used')).toBeInTheDocument();
     expect(container.querySelector('.shell')).toHaveAttribute('data-chrome', 'overlay');
     expect(container.querySelector('.shell-head')).toHaveAttribute('data-tauri-drag-region', 'deep');
   });
@@ -85,7 +93,7 @@ describe('the scan plate', () => {
   it('keeps the native title bar on Windows', async () => {
     const { container } = renderApp(windows());
 
-    await screen.findByRole('heading', { name: 'Local Disk (C:)' });
+    await screen.findByRole('heading', { name: ASK });
     expect(container.querySelector('.shell')).toHaveAttribute('data-chrome', 'native');
     expect(container.querySelector('[data-tauri-drag-region]')).toBeNull();
   });
@@ -94,7 +102,7 @@ describe('the scan plate', () => {
     renderApp(windows({ fail: 'Access is denied. (os error 5)' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Access is denied. (os error 5)');
-    expect(screen.getByRole('heading', { name: 'Can’t read your system drive' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Can’t read your drives' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Scan/ })).toBeNull();
   });
 });
@@ -118,7 +126,7 @@ describe('Full Disk Access on a Mac', () => {
 
   it('says nothing when access is granted', async () => {
     renderApp(createMockBridge(fixtures.macos, { fullDiskAccess: 'granted' }));
-    await screen.findByRole('heading', { name: 'Macintosh HD' });
+    await screen.findByRole('heading', { name: ASK });
     expect(screen.queryByText('Vacancy can’t see everything yet.')).toBeNull();
   });
 
@@ -139,10 +147,10 @@ describe('scanning', () => {
     expect(within(hud).getByText('files')).toBeInTheDocument();
     expect(within(hud).getByRole('progressbar', { name: 'Scanned' })).toBeInTheDocument();
     expect(screen.getByText('Mapping as it scans')).toBeInTheDocument();
-    expect(screen.queryByRole('heading', { name: 'Local Disk (C:)' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: ASK })).toBeNull();
     await waitFor(() => expect(container.querySelectorAll('.map-region').length).toBeGreaterThan(1));
 
-    await screen.findByRole('button', { name: 'Scan again' }, { timeout: 3000 });
+    await screen.findByLabelText('Map key', undefined, { timeout: 3000 });
     expect(screen.queryByRole('status', { name: 'Scan progress' })).toBeNull();
     expect(plain(within(hud.ownerDocument.body).getByText('111 folders couldn’t be read').textContent)).toBe(
       '111 folders couldn’t be read',
@@ -154,7 +162,7 @@ describe('scanning', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Scan Local Disk (C:)' }));
     await userEvent.click(await screen.findByRole('button', { name: 'Cancel' }));
 
-    expect(await screen.findByRole('heading', { name: 'Local Disk (C:)' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: ASK })).toBeInTheDocument();
     expect(screen.queryByRole('status', { name: 'Scan progress' })).toBeNull();
   });
 
@@ -303,12 +311,24 @@ describe('the map', () => {
     expect(tile(container, 'node_modules')).not.toHaveAttribute('role');
   });
 
-  it('starts again from the plate', async () => {
-    renderApp(windows());
+  it('starts again from the scan screen, which can also go back to the map', async () => {
+    const bridge = windows();
+    const scan = vi.spyOn(bridge, 'scan');
+    renderApp(bridge);
     await scanToMap();
     await act(async () => {
       await userEvent.click(screen.getByRole('button', { name: 'Scan again' }));
     });
-    expect(await screen.findByRole('heading', { name: 'Local Disk (C:)' })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: ASK })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: 'Local Disk (C:)' })).toHaveAttribute('aria-checked', 'true');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Open its map' }));
+    expect(await screen.findByLabelText('Map key')).toBeInTheDocument();
+    expect(scan).toHaveBeenCalledTimes(1);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Scan again' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Scan again' }));
+    expect(await screen.findByLabelText('Map key')).toBeInTheDocument();
+    expect(scan).toHaveBeenCalledTimes(2);
   });
 });

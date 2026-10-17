@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ago, formatBytes, formatCount, percentOf } from './format';
+import { ago, formatBytes, formatCount, percentOf, timeAgo } from './format';
 
 const plain = (s: string) => s.replace(/\u00a0/g, ' ');
 
@@ -49,5 +49,16 @@ describe('percentOf', () => {
     expect(percentOf(38, 476)).toBe('8');
     expect(percentOf(1, 476)).toBe('<1');
     expect(percentOf(1, 0)).toBe('0');
+  });
+});
+
+describe('timeAgo', () => {
+  const now = Date.UTC(2026, 9, 17, 12);
+  it('counts minutes, then hours, then days', () => {
+    expect(timeAgo(now - 20_000, now)).toBe('just now');
+    expect(timeAgo(now - 4 * 60_000, now)).toBe('4 min ago');
+    expect(timeAgo(now - 59 * 60_000, now)).toBe('59 min ago');
+    expect(timeAgo(now - 125 * 60_000, now)).toBe('2 h ago');
+    expect(timeAgo(now - 3 * 86_400_000, now)).toBe('3 days ago');
   });
 });

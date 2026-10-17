@@ -18,7 +18,7 @@ use crate::categorize::{
 use crate::scan::{CancelToken, ScanError, ScanOptions, ScanProgress, scan};
 use crate::snapshot::{DirFlags, RootKind, Snapshot, UnixTime};
 use crate::text::group_digits;
-use crate::volume::{VolumeInfo, volume_info};
+use crate::volume::{DriveKind, VolumeInfo, volume_info};
 
 /// Items a category shows before the rest are folded into one "smaller items" tile.
 const CATEGORY_ITEMS: usize = 48;
@@ -293,8 +293,12 @@ pub(crate) fn build_map(
     let info = volume_info(volume).unwrap_or_else(|_| VolumeInfo {
         name: volume.display().to_string(),
         mount_point: volume.display().to_string(),
+        id: String::new(),
+        kind: DriveKind::Internal,
+        system: false,
         total_bytes: scanned,
         used_bytes: scanned,
+        free_bytes: 0,
     });
     let overview = overview_until(snapshot, &categories, info, stop)?;
     // A cancel that came during the last step still means no map.
@@ -650,8 +654,12 @@ mod tests {
         let volume = || VolumeInfo {
             name: "Test".into(),
             mount_point: fx.path().display().to_string(),
+            id: String::new(),
+            kind: DriveKind::Internal,
+            system: false,
             total_bytes: 1 << 40,
             used_bytes: snapshot.stats().bytes,
+            free_bytes: (1 << 40) - snapshot.stats().bytes,
         };
         let checks = Cell::new(0);
         let map = overview_until(&snapshot, &categories, volume(), &stopper(&checks, 0))

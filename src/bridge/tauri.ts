@@ -5,9 +5,9 @@ import type { Bridge, FullDiskAccess, MapFolder, Platform, ScanOutcome, ScanUpda
 export function createTauriBridge(): Bridge {
   return {
     platform: detectPlatform(),
-    systemVolume: () => invoke<VolumeInfo>('system_volume'),
     machineName: () => invoke<string>('machine_name'),
     listVolumes: () => invoke<VolumeInfo[]>('list_volumes'),
+    forgetDrive: (mountPoint) => invoke<undefined>('forget_drive', { mountPoint }),
     fullDiskAccess: () => invoke<FullDiskAccess>('full_disk_access'),
     openFullDiskAccessSettings: () => invoke<undefined>('open_full_disk_access_settings'),
     scan: (mountPoint, onUpdate) => {
@@ -16,7 +16,7 @@ export function createTauriBridge(): Bridge {
       return invoke<ScanOutcome>('scan_volume', { mountPoint, onUpdate: onUpdateChannel });
     },
     cancelScan: () => invoke<undefined>('cancel_scan'),
-    browse: (id) => invoke<MapFolder>('browse', { id }),
+    browse: (mountPoint, id) => invoke<MapFolder>('browse', { mountPoint, id }),
   };
 }
 

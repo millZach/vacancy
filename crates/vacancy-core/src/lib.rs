@@ -27,4 +27,4 @@ pub use snapshot::{
     DirFlags, DirId, FileId, FileInfo, Markers, Root, RootKind, ScanStats, Snapshot, Totals,
     UnixTime,
 };
-pub use volume::{VolumeError, VolumeInfo, list_volumes, system_volume, volume_info};
+pub use volume::{DriveKind, VolumeError, VolumeInfo, list_volumes, system_volume, volume_info};
