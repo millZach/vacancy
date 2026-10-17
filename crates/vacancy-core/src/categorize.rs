@@ -462,8 +462,16 @@ pub(crate) fn categorize_until(
         };
         let flags = snapshot.flags(dir);
         let mut matched = false;
+        let sync = sync_root_marks(snapshot.markers(dir));
         if pctx.sealed {
             // Inside a cloud root, a Photos library or macOS's sealed system volume nothing changes.
+        } else if let Some(provider) = sync {
+            // A folder a sync client keeps its working files in is a sync root, wherever it is and whatever a
+            // catalog rule says about the place: Google Drive's mirrored folders, Dropbox folders.
+            me.category = CategoryId::Cloud;
+            ctx.sealed = true;
+            matched = true;
+            cloud_names.push(provider.to_owned());
         } else if let Some(rule) = ctx.trie.and_then(|t| trie.rule(t)) {
             apply(&mut me, &mut ctx, rule);
             matched = rule.category.is_some();
@@ -707,6 +715,17 @@ fn apply(node: &mut Node, ctx: &mut Ctx, rule: &catalog::Rule) {
     ctx.app_data |= rule.app_data;
     ctx.sealed |= rule.seal;
     ctx.packages = rule.packages;
+}
+
+/// The sync service whose working files mark a folder as one of its roots, if any.
+fn sync_root_marks(markers: Markers) -> Option<&'static str> {
+    if markers.contains(Markers::GOOGLE_DRIVE_ROOT) {
+        Some("Google Drive")
+    } else if markers.contains(Markers::DROPBOX_ROOT) {
+        Some("Dropbox")
+    } else {
+        None
+    }
 }
 
 /// Rules that go by a folder's name rather than its place. A Photos library is protected anywhere outside an

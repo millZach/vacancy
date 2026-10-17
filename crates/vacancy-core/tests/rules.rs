@@ -675,6 +675,33 @@ mod guard {
         }
     }
 
+    /// Google Drive keeps working folders at the top of every folder it mirrors, wherever the user chose to put
+    /// it, and Dropbox keeps a `.dropbox` file and cache at the top of its folder. Those folders are sync roots even
+    /// when no setting Vacancy can read names them.
+    #[test]
+    fn sync_roots_found_by_their_clients_working_files() {
+        let fx = Fixture::new();
+        fx.dir("Users/alex/Sync/Work/.tmp.drivedownload");
+        bait(&fx, "Users/alex/Sync/Work");
+        fx.file("Users/alex/Elsewhere/Team Files/.dropbox", 4 * KIB);
+        fx.dir("Users/alex/Elsewhere/Team Files/.dropbox.cache");
+        bait(&fx, "Users/alex/Elsewhere/Team Files");
+        bait(&fx, "Users/alex/code"); // the control
+        for env in [win(&fx), mac(&fx)] {
+            let (snap, proposals) = run(&fx, &env, &moment(&[]));
+            assert_eq!(
+                all_targets(&fx, &snap, &proposals),
+                vec!["Users/alex/code/proj/node_modules".to_owned()],
+                "{:?}",
+                env.platform
+            );
+            let cats = categorize(&snap, &env);
+            let work = snap.find(&fx.path("Users/alex/Sync/Work")).unwrap();
+            assert_eq!(cats.category_of(work), CategoryId::Cloud);
+            assert!(cats.get(CategoryId::Cloud).name.contains("Google Drive"));
+        }
+    }
+
     #[test]
     fn os_folders() {
         let fx = Fixture::new();

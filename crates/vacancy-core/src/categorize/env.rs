@@ -361,15 +361,25 @@ mod detect {
         let local = place(&FOLDERID_LocalAppData, "LOCALAPPDATA", &base.local_app_data);
         let roaming = place(&FOLDERID_RoamingAppData, "APPDATA", &base.app_data);
         // Sync roots from every source that names them: the cloud-files registrations (OneDrive, Dropbox, Google
-        // Drive, iCloud, Box wherever they live), OneDrive's variables, Dropbox's own settings, and folders in the
-        // home folder named after a service. One that is missed is still protected by its cloud-files mark when
-        // the scan sees it.
+        // Drive, iCloud, Box wherever they live), OneDrive's list of its accounts and its variables, Dropbox's own
+        // settings, and folders in the home folder named after a service. Google Drive doesn't say where its
+        // mirrored folders are; the scan recognises them (and any Dropbox folder) by the working folders the
+        // clients keep inside them, and cloud-files placeholders by their mark (see the categorizer).
         let mut cloud = Vec::new();
         for (provider, path) in sync_roots::roots() {
             add_cloud(
                 &mut cloud,
                 CloudRoot {
                     provider,
+                    path: long(&path),
+                },
+            );
+        }
+        for path in sync_roots::onedrive_accounts() {
+            add_cloud(
+                &mut cloud,
+                CloudRoot {
+                    provider: "OneDrive".into(),
                     path: long(&path),
                 },
             );
@@ -444,8 +454,8 @@ mod detect {
 
         use windows_sys::Win32::Foundation::ERROR_SUCCESS;
         use windows_sys::Win32::System::Registry::{
-            HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_EXPAND_SZ, REG_SZ, RegCloseKey, RegEnumKeyExW,
-            RegEnumValueW, RegOpenKeyExW,
+            HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_EXPAND_SZ, REG_SZ,
+            RegCloseKey, RegEnumKeyExW, RegEnumValueW, RegOpenKeyExW,
         };
 
         struct Key(HKEY);
@@ -491,8 +501,8 @@ mod detect {
             out
         }
 
-        /// The string values of a key: each user's sync root path.
-        fn strings(key: &Key) -> Vec<String> {
+        /// The string values of a key, with their names.
+        fn strings(key: &Key) -> Vec<(String, String)> {
             let mut out = Vec::new();
             for i in 0.. {
                 let mut name = vec![0u16; 16_384];
@@ -521,7 +531,7 @@ mod detect {
                     let text = String::from_utf16_lossy(units);
                     let text = text.trim_end_matches('\0').to_owned();
                     if !text.is_empty() {
-                        out.push(text);
+                        out.push((String::from_utf16_lossy(&name[..name_len as usize]), text));
                     }
                 }
             }
@@ -548,10 +558,31 @@ mod detect {
             let mut out = Vec::new();
             for registration in subkeys(&base) {
                 if let Some(users) = open(base.0, &format!(r"{registration}\UserSyncRoots")) {
-                    for path in strings(&users) {
+                    for (_, path) in strings(&users) {
                         let path = PathBuf::from(path);
                         if path.is_absolute() {
                             out.push((provider(&registration), path));
+                        }
+                    }
+                }
+            }
+            out
+        }
+
+        /// OneDrive's own list of its accounts' folders (personal and every work or school account):
+        /// `HKCU\Software\Microsoft\OneDrive\Accounts\<account>\UserFolder`.
+        pub(super) fn onedrive_accounts() -> Vec<PathBuf> {
+            let Some(accounts) = open(HKEY_CURRENT_USER, r"Software\Microsoft\OneDrive\Accounts")
+            else {
+                return Vec::new();
+            };
+            let mut out = Vec::new();
+            for account in subkeys(&accounts) {
+                if let Some(key) = open(accounts.0, &account) {
+                    for (name, path) in strings(&key) {
+                        let path = PathBuf::from(path);
+                        if name.eq_ignore_ascii_case("UserFolder") && path.is_absolute() {
+                            out.push(path);
                         }
                     }
                 }

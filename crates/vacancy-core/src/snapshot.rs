@@ -99,6 +99,11 @@ impl Markers {
     pub const NODE_LOCK: Self = Self(1 << 7);
     /// `CACHEDIR.TAG` or `.rustc_info.json`: the folder is Cargo's build output.
     pub const CARGO_TARGET: Self = Self(1 << 8);
+    /// `.tmp.drivedownload` or `.tmp.driveupload`: Google Drive for desktop's working folders, which it keeps at
+    /// the top of every folder it mirrors, wherever the user put it.
+    pub const GOOGLE_DRIVE_ROOT: Self = Self(1 << 9);
+    /// `.dropbox` or `.dropbox.cache`: the top of a Dropbox folder.
+    pub const DROPBOX_ROOT: Self = Self(1 << 10);
 
     /// Whether every marker in `other` is present.
     pub fn contains(self, other: Self) -> bool {
@@ -128,6 +133,7 @@ impl Markers {
             | "bun.lock"
             | "bun.lockb" => Self::NODE_LOCK,
             "cachedir.tag" | ".rustc_info.json" => Self::CARGO_TARGET,
+            ".dropbox" => Self::DROPBOX_ROOT,
             _ => Self::default(),
         }
     }
@@ -139,6 +145,10 @@ impl Markers {
             Self::GIT
         } else if lower.ends_with(".xcodeproj") || lower.ends_with(".xcworkspace") {
             Self::XCODE_PROJECT
+        } else if lower == ".tmp.drivedownload" || lower == ".tmp.driveupload" {
+            Self::GOOGLE_DRIVE_ROOT
+        } else if lower == ".dropbox.cache" {
+            Self::DROPBOX_ROOT
         } else {
             Self::default()
         }
