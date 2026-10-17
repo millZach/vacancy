@@ -20,7 +20,7 @@ describe('a run as the run panel shows it', () => {
     const events: RunEvent[] = [
       { kind: 'stepStarted', step: 0, id: 'w-node' },
       { kind: 'progress', step: 0, freedBytes: 5 * GB, deletedItems: 1000, totalFreedBytes: 5 * GB, currentPath: 'C:\\a' },
-      { kind: 'deleted', step: 0, path: 'C:\\Users\\alex\\code\\web-shop\\node_modules', bytes: 5 * GB, items: 1000 },
+      { kind: 'deleted', step: 0, path: 'C:\\Users\\alex\\code\\web-shop\\node_modules', bytes: 5 * GB, items: 1000, whole: true },
     ];
     const mid = foldEvents(startRun(plan), events);
     expect(mid.steps[0]).toMatchObject({ status: 'running', freedBytes: 5 * GB, deletedItems: 1000 });
@@ -32,6 +32,18 @@ describe('a run as the run panel shows it', () => {
     expect(done.steps[0]).toMatchObject({ status: 'done', outcome: 'done', freedBytes: 21 * GB });
     expect(done.freedBytes).toBe(21 * GB);
     expect(done.log.at(-1)).toMatchObject({ kind: 'sum', text: 'node_modules in 61 idle projects: 21.0\u00a0GB freed' });
+  });
+
+  it('logs a folder whose loose files went as files in it, not as the folder', () => {
+    const v = foldEvents(startRun(plan), [
+      { kind: 'stepStarted', step: 0, id: plan.steps[0]!.id },
+      { kind: 'deleted', step: 0, path: 'C:\\Users\\alex\\AppData\\Local\\Temp', bytes: 2048, items: 3, whole: false },
+      { kind: 'deleted', step: 0, path: 'C:\\Users\\alex\\AppData\\Local\\Temp', bytes: 1024, items: 1, whole: false },
+    ]);
+    expect(v.log.map((l) => l.text)).toEqual([
+      'deleted 3 files in C:\\Users\\alex\\AppData\\Local\\Temp',
+      'deleted 1 file in C:\\Users\\alex\\AppData\\Local\\Temp',
+    ]);
   });
 
   it('shows a skip as it happens, in its step and the log', () => {
@@ -56,6 +68,7 @@ describe('a run as the run panel shows it', () => {
       path: `C:\\p${i}`,
       bytes: 1,
       items: 1,
+      whole: true,
     }));
     const v = foldEvents(startRun(plan), many);
     expect(v.log).toHaveLength(LOG_KEEP);

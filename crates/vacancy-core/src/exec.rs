@@ -113,6 +113,9 @@ pub struct Deleted {
     /// Files deleted from it.
     #[ts(type = "number")]
     pub items: u64,
+    /// The place itself went: a folder with everything in it, or a file. False when only files inside it went:
+    /// a folder's loose files (the folder stays), or a folder that kept something left in place.
+    pub whole: bool,
 }
 
 /// See [`RunEvent::Skipped`].
@@ -536,11 +539,17 @@ impl Run<'_, '_> {
             tally.step.deleted += done.deleted;
             tally.action = Counts::default();
             if done.deleted > 0 || tally.links > 0 || tally.left.is_empty() {
+                let whole = !matches!(action.target, Target::Loose { .. })
+                    && tally
+                        .left
+                        .iter()
+                        .all(|l| l.said.kind == SkipKind::HardLinked);
                 (self.on_event)(RunEvent::Deleted(Deleted {
                     step: index,
                     path: action.path.display().to_string(),
                     bytes: done.freed,
                     items: done.deleted,
+                    whole,
                 }));
             }
             for left in std::mem::take(&mut tally.left) {

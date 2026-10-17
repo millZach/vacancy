@@ -128,7 +128,8 @@ describe('the mock bridge', () => {
       expect(report.steps.map((s) => s.outcome)).toContain('partial');
       expect(report.deletedItems).toBe(plan.items - 212);
       expect(report.freedBytes).toBeCloseTo(plan.bytes - 0.41e9, -3);
-      expect(report.plannedBytes).toBeCloseTo(plan.bytes + 0.62e9, -3);
+      // What the confirm dialog showed: the place refused while planning is a skip, not part of the plan.
+      expect(report.plannedBytes).toBeCloseTo(plan.bytes, -3);
       expect(report.skippedItems).toBe(213);
       expect(report.biggestWin).toBe('w-node');
       expect(report.freedByCategory.map((c) => c.id)).toEqual(['dev', 'caches', 'downloads']);

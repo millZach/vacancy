@@ -15,4 +15,9 @@ bytes: number,
 /**
  * Files deleted from it.
  */
-items: number, };
+items: number, 
+/**
+ * The place itself went: a folder with everything in it, or a file. False when only files inside it went:
+ * a folder's loose files (the folder stays), or a folder that kept something left in place.
+ */
+whole: boolean, };

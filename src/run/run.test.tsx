@@ -154,7 +154,7 @@ describe('freeing space', () => {
     await run.emit(
       { kind: 'stepStarted', step: 0, id: 'w-node' },
       { kind: 'progress', step: 0, freedBytes: 7e9, deletedItems: 100_000, totalFreedBytes: 7e9, currentPath: 'C:\\x' },
-      { kind: 'deleted', step: 0, path: 'C:\\Users\\alex\\code\\web-shop\\node_modules', bytes: 7e9, items: 100_000 },
+      { kind: 'deleted', step: 0, path: 'C:\\Users\\alex\\code\\web-shop\\node_modules', bytes: 7e9, items: 100_000, whole: true },
     );
     expect(within(panel()).getByText(/^Step 1 of 2: node_modules/)).toBeInTheDocument();
     expect(plain(within(panel()).getByText(/freed of/).previousElementSibling?.textContent)).toBe('7.0 GB');

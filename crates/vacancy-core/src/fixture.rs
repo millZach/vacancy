@@ -517,7 +517,8 @@ fn link_dir(link: &Path, to: &Path) -> io::Result<()> {
 /// Everything under `root`, without following links: one line per file, folder and link, `path<TAB>what`, where the
 /// path is relative to `root` with `/` separators and `what` is `dir`, `link -> <where it points>`, or
 /// `file <bytes> <hash>` (64-bit FNV-1a of the contents), sorted. Two inventories of the same tree are equal exactly
-/// when nothing in it changed. For before-and-after proofs.
+/// when nothing in it changed. For before-and-after proofs. On Windows reading a file leaves its last-access time
+/// alone, so listing a fixture before a scan doesn't make it look just used; elsewhere, list it after the scan.
 pub fn inventory(root: &Path) -> io::Result<Vec<String>> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -542,14 +543,57 @@ pub fn inventory(root: &Path) -> io::Result<Vec<String>> {
                 stack.push(path.clone());
                 "dir".to_owned()
             } else {
-                let data = fs::read(&path)?;
-                format!("file {} {:016x}", data.len(), fnv1a(&data))
+                match read_quietly(&path) {
+                    Ok(data) => format!("file {} {:016x}", data.len(), fnv1a(&data)),
+                    // Held open by someone with no sharing: listed, unread.
+                    Err(e) => format!("file {} unread ({e})", meta.len()),
+                }
             };
             out.push(format!("{rel}\t{what}"));
         }
     }
     out.sort();
     Ok(out)
+}
+
+/// A file's contents, read without changing its last-access time on Windows (where reading would refresh it, and
+/// the rules would then see the file as just used). Elsewhere a plain read.
+fn read_quietly(path: &Path) -> io::Result<Vec<u8>> {
+    #[cfg(windows)]
+    {
+        use std::io::Read;
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::FILETIME;
+        use windows_sys::Win32::Storage::FileSystem::SetFileTime;
+        const GENERIC_READ: u32 = 0x8000_0000;
+        const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+        let mut file = fs::OpenOptions::new()
+            .access_mode(GENERIC_READ | FILE_WRITE_ATTRIBUTES)
+            .share_mode(0x7)
+            .open(path)?;
+        // All ones: don't update the last-access time for anything done through this handle.
+        let keep = FILETIME {
+            dwLowDateTime: u32::MAX,
+            dwHighDateTime: u32::MAX,
+        };
+        // SAFETY: the handle is open with FILE_WRITE_ATTRIBUTES; `keep` outlives the call; null leaves a time alone.
+        unsafe {
+            SetFileTime(
+                file.as_raw_handle(),
+                std::ptr::null(),
+                &keep,
+                std::ptr::null(),
+            )
+        };
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)?;
+        Ok(data)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::read(path)
+    }
 }
 
 fn fnv1a(data: &[u8]) -> u64 {

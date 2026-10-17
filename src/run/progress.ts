@@ -102,7 +102,7 @@ export function foldEvents(view: RunView, events: readonly RunEvent[]): RunView 
         current = e.step;
         break;
       case 'deleted':
-        write('del', `deleted ${e.path}`);
+        write('del', e.whole ? `deleted ${e.path}` : `deleted ${e.items} ${e.items === 1 ? 'file' : 'files'} in ${e.path}`);
         break;
       case 'skipped':
         s.skips = [...s.skips, e.skip];

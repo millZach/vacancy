@@ -147,7 +147,7 @@ export function play(
     const items = place.items - (place.inUse?.items ?? 0);
     stepFreed += freed;
     stepDeleted += items;
-    onEvent({ kind: 'deleted', step: index, path: place.path, bytes: freed, items });
+    onEvent({ kind: 'deleted', step: index, path: place.path, bytes: freed, items, whole: !place.inUse });
     if (place.inUse) skip(place.inUse);
   };
   const finish = () => {
@@ -159,11 +159,12 @@ export function play(
       title: p.title,
       category: p.category,
       regenerable: p.regenerable,
-      plannedBytes: sum(step.places, (pl) => pl.bytes) + sum(step.refused, (r) => r.bytes),
+      // As the core reports: what the confirm dialog showed, not the places refused while planning.
+      plannedBytes: sum(step.places, (pl) => pl.bytes),
       freedBytes: stepFreed,
-      plannedItems: sum(step.places, (pl) => pl.items) + sum(step.refused, (r) => r.items),
+      plannedItems: sum(step.places, (pl) => pl.items),
       deletedItems: stepDeleted,
-      places: step.places.length + step.refused.length,
+      places: step.places.length,
       outcome: left.length === 0 ? 'done' : stepFreed > 0 ? 'partial' : 'skipped',
       skipped,
     };
@@ -181,7 +182,7 @@ export function play(
       const bytes = current.items > 0 ? Math.round((current.bytes * items) / current.items) : 0;
       stepFreed += bytes;
       stepDeleted += items;
-      if (items > 0) onEvent({ kind: 'deleted', step: index, path: current.path, bytes, items });
+      if (items > 0) onEvent({ kind: 'deleted', step: index, path: current.path, bytes, items, whole: false });
       const rest = current.items - items;
       skip({
         path: current.path,
