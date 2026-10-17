@@ -1014,28 +1014,19 @@ impl Engine<'_> {
         Some(out)
     }
 
-    /// Whether a folder named `Cache` is Chromium's disk cache: it holds `Cache_Data`, or sits in a browser
-    /// profile beside the profile's other stores.
+    /// Whether a folder named `Cache` is Chromium's disk cache, by evidence of its own: it holds `Cache_Data`, or
+    /// it sits in a Chromium profile, beside the profile's `Local Storage` folder or `Preferences` file. Other
+    /// Chromium caches beside it don't count: an Electron app can keep its own data in a `Cache` folder next to its
+    /// `GPUCache`.
     fn chromium_layout(&self, dir: DirId) -> bool {
         let snap = self.snap;
-        let has = |d: DirId, names: &[&str]| {
+        let has = |d: DirId, name: &str| {
             snap.children(d)
-                .any(|c| names.iter().any(|n| snap.name(c).eq_ignore_ascii_case(n)))
+                .any(|c| snap.name(c).eq_ignore_ascii_case(name))
         };
-        has(dir, &["Cache_Data"])
+        has(dir, "Cache_Data")
             || snap.parent(dir).is_some_and(|p| {
-                has(
-                    p,
-                    &[
-                        "Local Storage",
-                        "Session Storage",
-                        "IndexedDB",
-                        "Service Worker",
-                        "blob_storage",
-                        "Code Cache",
-                        "GPUCache",
-                    ],
-                )
+                has(p, "Local Storage") || snap.markers(p).contains(Markers::PREFERENCES)
             })
     }
 

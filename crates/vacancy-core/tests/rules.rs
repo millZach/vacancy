@@ -928,6 +928,46 @@ mod guard {
         }
     }
 
+    /// A folder called `Cache` is Chromium's, and safe to empty, only with evidence of its own: `Cache_Data` inside
+    /// it, or a Chromium profile around it (`Local Storage`, `Preferences`). Chromium's `GPUCache` and `Code Cache`
+    /// beside an app's own `Cache` say nothing about what that app keeps in it.
+    #[test]
+    fn a_cache_folder_is_chromium_s_only_with_its_own_evidence() {
+        for windows in [true, false] {
+            let (data, safe) = if windows {
+                ("Users/alex/AppData/Roaming", "w-appcache")
+            } else {
+                ("Users/alex/Library/Application Support", "m-appcache")
+            };
+            let fx = Fixture::new();
+            fx.file(&format!("{data}/Ledger App/Cache/accounts.db"), 512 * KIB);
+            fx.file(&format!("{data}/Ledger App/GPUCache/data_0"), 256 * KIB);
+            fx.file(&format!("{data}/Ledger App/Code Cache/js/x"), 256 * KIB);
+            fx.file(&format!("{data}/discord/Cache/Cache_Data/f_1"), 256 * KIB);
+            fx.file(&format!("{data}/Slack/Cache/data_1"), 256 * KIB);
+            fx.file(
+                &format!("{data}/Slack/Local Storage/leveldb/000003.log"),
+                4 * KIB,
+            );
+            fx.file(&format!("{data}/Spotify/Cache/data_2"), 256 * KIB);
+            fx.file(&format!("{data}/Spotify/Preferences"), 4 * KIB);
+            let env = if windows { win(&fx) } else { mac(&fx) };
+            let (snap, proposals) = run(&fx, &env, &moment(&[]));
+            let found = targets(&fx, &snap, &proposals, safe);
+            let takes = |dir: &str| {
+                found
+                    .iter()
+                    .any(|t| t.starts_with(&format!("{data}/{dir}/")))
+            };
+            let case = format!("{:?}: {found:?}", env.platform);
+            assert!(!takes("Ledger App/Cache"), "an app's own Cache: {case}");
+            assert!(takes("Ledger App/GPUCache"), "{case}");
+            assert!(takes("discord/Cache"), "Cache_Data inside: {case}");
+            assert!(takes("Slack/Cache"), "beside Local Storage: {case}");
+            assert!(takes("Spotify/Cache"), "beside Preferences: {case}");
+        }
+    }
+
     #[test]
     fn os_folders() {
         let fx = Fixture::new();

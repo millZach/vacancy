@@ -47,9 +47,10 @@ pub(super) enum Find {
     /// Known places. After the root, a name may be `*` (any folder) or `*.ext` (any folder ending so).
     Places(Vec<Place>),
     /// Folders with one of these names (any case) anywhere below `under`, not inside another match, code
-    /// libraries or `prune`. With `chromium`, a folder named just `Cache` or `Caches` counts only when it has
-    /// Chromium's layout: a `Cache_Data` folder inside, or a browser profile's folders beside it (`Local Storage`,
-    /// `IndexedDB`, `Code Cache`...).
+    /// libraries or `prune`. With `chromium`, a folder named just `Cache` or `Caches` counts only with evidence
+    /// that it is Chromium's own disk cache: a `Cache_Data` folder inside it, or a Chromium profile around it (a
+    /// `Local Storage` folder or a `Preferences` file beside it). Chromium's other caches beside it (`GPUCache`,
+    /// `Code Cache`) say nothing about it: an app can keep its own data in a folder called `Cache`.
     Named {
         names: &'static [&'static str],
         under: Vec<PathBuf>,

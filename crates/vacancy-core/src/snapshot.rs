@@ -104,6 +104,8 @@ impl Markers {
     pub const GOOGLE_DRIVE_ROOT: Self = Self(1 << 9);
     /// `.dropbox` or `.dropbox.cache`: the top of a Dropbox folder.
     pub const DROPBOX_ROOT: Self = Self(1 << 10);
+    /// A file named `Preferences`: Chromium and Electron keep one in every browser profile.
+    pub const PREFERENCES: Self = Self(1 << 11);
 
     /// Whether every marker in `other` is present.
     pub fn contains(self, other: Self) -> bool {
@@ -134,6 +136,7 @@ impl Markers {
             | "bun.lockb" => Self::NODE_LOCK,
             "cachedir.tag" | ".rustc_info.json" => Self::CARGO_TARGET,
             ".dropbox" => Self::DROPBOX_ROOT,
+            "preferences" => Self::PREFERENCES,
             _ => Self::default(),
         }
     }
