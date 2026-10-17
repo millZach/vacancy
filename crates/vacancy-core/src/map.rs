@@ -261,7 +261,17 @@ pub fn scan_for_map(
         },
         cancel,
     )?;
+    // Building the map takes a moment on a big drive; a cancel during it still means no map.
+    let stop = || {
+        if cancel.is_cancelled() {
+            Err(ScanError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
+    stop()?;
     let categories = categorize(&snapshot, env);
+    stop()?;
     let scanned = snapshot.stats().bytes;
     let info = volume_info(volume).unwrap_or_else(|_| VolumeInfo {
         name: volume.display().to_string(),
@@ -270,6 +280,7 @@ pub fn scan_for_map(
         used_bytes: scanned,
     });
     let overview = overview(&snapshot, &categories, info);
+    stop()?;
     Ok(ScannedVolume {
         snapshot,
         categories,
