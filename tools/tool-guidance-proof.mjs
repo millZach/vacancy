@@ -97,14 +97,26 @@ try {
       await page.locator('.wrap').waitFor({ state: 'detached' });
       for (const toggle of await summary.getByText('Instructions and reference', { exact: true }).all()) await toggle.click();
       if (await summary.locator('ol > li').count() !== 12) throw new Error('Recap lost guide steps');
+      await page.screenshot({ path: join(out, `${name}-recap-instructions.png`) });
+      await summary.getByRole('heading', { level: 1 }).scrollIntoViewIfNeeded();
       await page.screenshot({ path: join(out, `${name}-recap.png`) });
       const summaryText = await summary.innerText();
       if (!mixed && !summaryText.includes('No files were deleted or moved.')) throw new Error('Wrong reminder totals');
+      // Leave the report first: otherwise an immediate assertion can accidentally read the old recap
+      // while the asynchronous history menu is still opening this same saved report.
+      await summary.getByRole('button', { name: 'Scan again' }).click();
+      await page.getByRole('button', { name: /^Scan / }).waitFor();
+      await summary.waitFor({ state: 'detached' });
       await page.getByRole('button', { name: 'Past runs' }).click();
       await page.getByRole('menuitem').click();
-      if (await page.getByText('Instructions and reference', { exact: true }).count() !== 4) throw new Error('History lost guides');
+      await page.getByRole('menu', { name: 'Past runs' }).waitFor({ state: 'hidden' });
+      await summary.waitFor();
+      if (await summary.getByText('Instructions and reference', { exact: true }).count() !== 4) throw new Error('History lost guides');
       await page.screenshot({ path: join(out, `${name}-history.png`) });
-      observations.journeys.push({ platform, mixed, guides: names, summaryText, orderedSteps: 12, fixtureReferencesRefused: 4, shortHighlights: scroll, keyboardReferencesReached: 4, keyboardReferenceReachMs, elapsedMs: performance.now() - journeyStarted });
+      for (const toggle of await summary.getByText('Instructions and reference', { exact: true }).all()) await toggle.click();
+      if (await summary.locator('ol > li').count() !== 12) throw new Error('Reopened history lost instructions');
+      await page.screenshot({ path: join(out, `${name}-history-instructions.png`) });
+      observations.journeys.push({ platform, mixed, guides: names, summaryText, orderedSteps: 12, fixtureReferencesRefused: 4, shortHighlights: scroll, keyboardReferencesReached: 4, keyboardReferenceReachMs, historyReopenedFromScan: true, historyOrderedSteps: 12, elapsedMs: performance.now() - journeyStarted });
       await page.close();
     }
   }
