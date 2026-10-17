@@ -1,5 +1,6 @@
 import type {
   CategoryId,
+  DriveKind,
   FullDiskAccess,
   MapCategory,
   MapFolder,
@@ -9,15 +10,17 @@ import type {
   VolumeInfo,
 } from './types';
 
-/** What the mock bridge answers with. One per platform, with the prototype's datasets (variant D). */
+/**
+ * What the mock bridge answers with. One per platform, with the prototype's datasets (variant D) and drives shaped
+ * like the drive picker prototype's: the system drive, a roomy second drive and, on Windows, a USB stick.
+ */
 export interface Fixture {
   platform: Platform;
   machineName: string;
-  systemVolume: VolumeInfo;
-  /** The drive picker's volumes, the system volume first. */
+  /** The drives to offer, the system drive first. */
   volumes: VolumeInfo[];
   fullDiskAccess: FullDiskAccess;
-  /** The map a scan of the system volume ends with. */
+  /** The map a scan of the system drive ends with. Other drives get it scaled to their size. */
   overview: Overview;
   /** What opening a folder tile shows, by tile id. */
   folders: Record<string, MapFolder>;
@@ -87,7 +90,7 @@ function build(
     folders,
     overview: {
       volume,
-      freeBytes: volume.totalBytes - volume.usedBytes,
+      freeBytes: volume.freeBytes,
       scan: {
         files: scan.files,
         folders: scan.folders,
@@ -105,7 +108,12 @@ function build(
   };
 }
 
-const winVolume: VolumeInfo = { name: 'Local Disk (C:)', mountPoint: 'C:\\', totalBytes: 476 * GB, usedBytes: 431 * GB };
+/** A drive as the core reports it, from its capacity and used space in gigabytes. */
+function drive(name: string, mountPoint: string, kind: DriveKind, system: boolean, totalGb: number, usedGb: number): VolumeInfo {
+  return { name, mountPoint, kind, system, totalBytes: totalGb * GB, usedBytes: usedGb * GB, freeBytes: (totalGb - usedGb) * GB };
+}
+
+const winVolume = drive('Local Disk (C:)', 'C:\\', 'internal', true, 476, 431);
 const home = 'C:\\Users\\alex';
 
 const win = build(
@@ -244,7 +252,7 @@ const win = build(
   ],
 );
 
-const macVolume: VolumeInfo = { name: 'Macintosh HD', mountPoint: '/', totalBytes: 494 * GB, usedBytes: 460 * GB };
+const macVolume = drive('Macintosh HD', '/', 'internal', true, 494, 460);
 const mhome = '/Users/alex';
 
 const mac = build(
@@ -361,8 +369,11 @@ export const fixtures = {
   windows: {
     platform: 'windows',
     machineName: 'DESKTOP-ALEX',
-    systemVolume: winVolume,
-    volumes: [winVolume, { name: 'Data (D:)', mountPoint: 'D:\\', totalBytes: 1024 * GB, usedBytes: 320 * GB }],
+    volumes: [
+      winVolume,
+      drive('Data (D:)', 'D:\\', 'internal', false, 2000, 700),
+      drive('SanDisk (E:)', 'E:\\', 'usb', false, 64, 41),
+    ],
     fullDiskAccess: 'notApplicable',
     overview: win.overview,
     folders: win.folders,
@@ -370,8 +381,7 @@ export const fixtures = {
   macos: {
     platform: 'macos',
     machineName: 'Alex’s MacBook Air',
-    systemVolume: macVolume,
-    volumes: [macVolume, { name: 'Backup', mountPoint: '/Volumes/Backup', totalBytes: 2000 * GB, usedBytes: 740 * GB }],
+    volumes: [macVolume, drive('Samsung T7', '/Volumes/Samsung T7', 'external', false, 1000, 380)],
     fullDiskAccess: 'missing',
     overview: mac.overview,
     folders: mac.folders,

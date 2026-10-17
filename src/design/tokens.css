@@ -26,6 +26,22 @@
   --color-meter: #7d8796; /* used-space bars */
   --color-meter-track: #232a35;
 
+  /* ---------- drives ---------- */
+  --color-card: rgba(20, 25, 32, 0.92); /* a drive card on the dot field */
+  --color-card-hover: rgba(27, 33, 42, 0.96);
+  --color-card-on: rgba(34, 22, 32, 0.94); /* the picked drive's card, lit */
+  --color-pop: #171c24; /* the menu that drops from the header */
+  --color-row-hover: rgba(255, 255, 255, 0.035);
+  --color-row-on: rgba(var(--neon-rgb), 0.06); /* the drive on screen, in the menu */
+  --color-outside: #9cc8db; /* USB and external drive tags */
+  --color-outside-line: rgba(156, 200, 219, 0.32);
+  --color-status-dot: #5b6574; /* a drive not scanned yet */
+  --glow-card-on: 0 0 0 1px var(--color-neon), 0 0 26px -3px rgba(var(--neon-rgb), 0.6),
+    inset 0 0 26px rgba(var(--neon-rgb), 0.1);
+  --glow-dot: 0 0 6px var(--color-neon);
+  --glow-tick: 0 0 10px var(--color-neon);
+  --glow-icon: drop-shadow(0 0 4px var(--color-neon));
+
   /* ---------- the map ---------- */
   /* Each category's hue (oklch degrees); regions and tiles mix it with the lightness and chroma below. */
   --hue-apps: 265;
@@ -60,10 +76,10 @@
   --color-key-scale: #5b6574;
   --color-key-scale-fill: rgba(255, 255, 255, 0.04);
   --color-key-locked: #2b3139;
-  --color-chip-on: #2a323e; /* a picked drive chip */
   --color-raise-hover: #232a35;
   --color-line-hover: #3b4554;
   --shadow-float: 0 14px 36px rgba(0, 0, 0, 0.5);
+  --shadow-pop: 0 24px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(0, 0, 0, 0.4);
   --shadow-hud: 0 18px 44px rgba(0, 0, 0, 0.5);
   /* Tiles glide to their new places when the map zooms or fills in. */
   --map-move: 0.52s cubic-bezier(0.22, 0.8, 0.26, 1);
@@ -77,6 +93,8 @@
   --font-sans: 'Overpass Variable', 'Overpass', 'Segoe UI', system-ui, sans-serif;
   --font-mono: 'Overpass Mono', ui-monospace, Consolas, monospace;
   --font-script: 'Neonderthaw', 'Brush Script MT', cursive;
+  --text-tag: 9.5px; /* drive kind tags */
+  --text-caps: 10.5px; /* small capitals headings */
   --text-2xs: 11px;
   --text-xs: 11.5px;
   --text-sm: 12px;
@@ -84,6 +102,8 @@
   --text-base: 13px;
   --text-md: 14px;
   --text-lg: 15px;
+  --text-xl: 16px; /* a drive card's name */
+  --text-title: 38px; /* the scan screen's question */
   --text-display: 46px;
   --text-wordmark: 35px;
 
@@ -98,10 +118,12 @@
   --space-8: 28px;
 
   /* ---------- radii ---------- */
+  --radius-xs: 4px;
   --radius-sm: 6px;
   --radius-md: 7px;
   --radius-lg: 9px;
   --radius-card: 10px;
+  --radius-pop: 12px; /* drive cards and the drive menu */
   --radius-pill: 999px;
 
   /* ---------- layout ---------- */

@@ -1,5 +1,6 @@
 import type { CategoryId } from '../bindings/CategoryId';
 import type { CategoryTotal } from '../bindings/CategoryTotal';
+import type { DriveKind } from '../bindings/DriveKind';
 import type { FullDiskAccess } from '../bindings/FullDiskAccess';
 import type { ItemKind } from '../bindings/ItemKind';
 import type { MapCategory } from '../bindings/MapCategory';
@@ -14,6 +15,7 @@ import type { VolumeInfo } from '../bindings/VolumeInfo';
 export type {
   CategoryId,
   CategoryTotal,
+  DriveKind,
   FullDiskAccess,
   ItemKind,
   MapCategory,
@@ -37,23 +39,27 @@ export type Platform = 'windows' | 'macos';
  */
 export interface Bridge {
   readonly platform: Platform;
-  /** The drive the OS runs from. Read-only. */
-  systemVolume(): Promise<VolumeInfo>;
   /** This computer's name, as the OS shows it. */
   machineName(): Promise<string>;
-  /** Local volumes for the drive picker, the system volume first. Read-only. */
+  /**
+   * The drives to offer for scanning: internal, USB and external ones, the system drive first. Read-only and fast,
+   * so the UI asks again now and then to notice drives coming and going. Rejects if the drives can't be read.
+   */
   listVolumes(): Promise<VolumeInfo[]>;
+  /** Forgets a drive that has gone away: its map, and its scan if one is running. */
+  forgetDrive(mountPoint: string): Promise<void>;
   /** Whether macOS lets Vacancy see everything ("notApplicable" on Windows). */
   fullDiskAccess(): Promise<FullDiskAccess>;
   /** Opens System Settings at Full Disk Access (macOS). */
   openFullDiskAccessSettings(): Promise<void>;
   /**
    * Scans a volume, read-only. `onUpdate` gets the HUD's numbers about ten times a second, now and then with a
-   * preview of the categories. Resolves with the map, or with `{ status: 'cancelled' }` after `cancelScan`.
+   * preview of the categories. Resolves with the map, or with `{ status: 'cancelled' }` after `cancelScan`. Each
+   * drive keeps its own map; one scan runs at a time, so starting one cancels the scan running on any drive.
    */
   scan(mountPoint: string, onUpdate: (update: ScanUpdate) => void): Promise<ScanOutcome>;
-  /** Stops the running scan. */
+  /** Stops the running scan, on whichever drive. */
   cancelScan(): Promise<void>;
-  /** Opens a folder tile of the last finished scan. */
-  browse(id: string): Promise<MapFolder>;
+  /** Opens a folder tile of a drive's map. */
+  browse(mountPoint: string, id: string): Promise<MapFolder>;
 }

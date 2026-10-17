@@ -94,7 +94,7 @@ describe('the overview model', () => {
 });
 
 describe('the scanning model', () => {
-  const volume = fixtures.windows.systemVolume;
+  const volume = fixtures.windows.overview.volume;
   it('shows categories found so far, the rest of the used space unscanned, and free space', () => {
     const model = scanModel(
       volume,
@@ -121,7 +121,7 @@ describe('the scanning model', () => {
 describe('the folder model', () => {
   it('is one region, the folder, holding its contents', () => {
     const folder = fixtures.windows.folders['fx-apps-2']!;
-    const model = folderModel(folder, { name: 'Apps & games', protected: false }, fixtures.windows.systemVolume);
+    const model = folderModel(folder, { name: 'Apps & games', protected: false }, fixtures.windows.overview.volume);
     expect(model.regions).toHaveLength(1);
     const region = model.regions[0]!;
     expect(region.name).toBe('Adobe');

@@ -42,3 +42,12 @@ export function percentOf(part: number, whole: number): string {
   const p = (part / whole) * 100;
   return p < 1 ? '<1' : p.toFixed(0);
 }
+
+/** How long ago something happened this session, to the minute: "just now", "4 min ago", "2 h ago", then as `ago`. */
+export function timeAgo(whenMs: number, nowMs = Date.now()): string {
+  const minutes = Math.floor((nowMs - whenMs) / 60_000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 24 * 60) return `${Math.floor(minutes / 60)} h ago`;
+  return ago(whenMs, nowMs);
+}

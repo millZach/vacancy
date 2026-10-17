@@ -15,7 +15,7 @@ export function DrivesPending({ error }: { error: string | null }) {
             <HardDrive size={26} strokeWidth={1.4} className="plate-icon" aria-hidden />
             {error !== null && (
               <>
-                <h1>Can’t read your system drive</h1>
+                <h1>Can’t read your drives</h1>
                 <p className="plate-cap plate-error" role="alert">
                   {error}
                 </p>

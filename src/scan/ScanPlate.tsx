@@ -1,20 +1,17 @@
-import { HardDrive, ScanLine, ShieldAlert, Sparkles } from 'lucide-react';
-import type { Ref } from 'react';
-import type { FullDiskAccess, VolumeInfo } from '../bridge';
+import { Check, Map as MapIcon, ScanLine, ShieldAlert, Sparkles } from 'lucide-react';
+import { useId, useRef, type KeyboardEvent, type Ref } from 'react';
+import { DriveIcon, DriveStatus, DriveTags, UsageBar } from '../drives/bits';
+import type { DriveItem, ReadyDrives } from '../drives/context';
+import { useNow } from '../drives/useNow';
 import { formatBytes } from '../format';
 import './scan.css';
 
 interface Props {
-  /** The drives a scan can be pointed at, the system volume first. */
-  volumes: VolumeInfo[];
-  selected: VolumeInfo;
-  onSelect: (volume: VolumeInfo) => void;
-  machineName: string;
-  fullDiskAccess: FullDiskAccess;
+  drives: ReadyDrives;
   onOpenFullDiskAccess: () => void;
   /** The AI agent Vacancy found, or null for built-in rules only. */
   agent: string | null;
-  /** Why the last scan failed, if it did. */
+  /** Why the last scan of this drive failed, if it did. */
   failure: string | null;
   onScan: (button: HTMLButtonElement) => void;
   /** The plate's content, which the dot field keeps calm around. */
@@ -22,58 +19,146 @@ interface Props {
 }
 
 /**
- * Before a scan: the drive plate floating on the dot field. It names the drive, offers the other local drives,
- * and starts the scan. On a Mac without Full Disk Access it says what will be missing and opens the setting.
+ * Before a scan: the plate floating on the dot field. With several drives it asks which one to scan, with a card per
+ * drive, the drive on screen lit; with one, it is that drive's plate. It starts the scan, or for a drive scanned
+ * already, goes back to its map or scans again. On a Mac without Full Disk Access it says what will be missing and
+ * opens the setting.
  */
-export function ScanPlate({
-  volumes,
-  selected,
-  onSelect,
-  machineName,
-  fullDiskAccess,
-  onOpenFullDiskAccess,
-  agent,
-  failure,
-  onScan,
-  contentRef,
-}: Props) {
+export function ScanPlate({ drives, onOpenFullDiskAccess, agent, failure, onScan, contentRef }: Props) {
+  const { list, current, machineName } = drives;
+  const v = current.volume;
+  const several = list.length > 1;
   return (
     <div className="plate">
-      <div className="plate-content" ref={contentRef}>
-        <HardDrive size={26} strokeWidth={1.4} className="plate-icon" aria-hidden />
-        <h1>{selected.name}</h1>
-        <p className="plate-cap">
-          {formatBytes(selected.totalBytes, 0)} on {machineName}, {formatBytes(selected.usedBytes, 0)} used
-        </p>
-        {volumes.length > 1 && (
-          <div className="drive-picker" role="radiogroup" aria-label="Drive to scan">
-            {volumes.map((v) => (
-              <button
-                key={v.mountPoint}
-                type="button"
-                role="radio"
-                aria-checked={v.mountPoint === selected.mountPoint}
-                className={v.mountPoint === selected.mountPoint ? 'drive-chip is-on' : 'drive-chip'}
-                onClick={() => onSelect(v)}
-              >
-                <HardDrive size={12} strokeWidth={2} aria-hidden />
-                {v.name}
-              </button>
-            ))}
-          </div>
+      <div className={several ? 'plate-content has-cards' : 'plate-content'} ref={contentRef}>
+        {several ? (
+          <>
+            <h1 className="plate-ask">Which drive should Vacancy scan?</h1>
+            <p className="plate-cap">
+              {list.length} drives on {machineName}
+            </p>
+            <DriveCards drives={drives} />
+          </>
+        ) : (
+          <>
+            <DriveIcon kind={v.kind} size={26} className="plate-icon" />
+            <h1>{v.name}</h1>
+            <p className="plate-cap">
+              {formatBytes(v.totalBytes, 0)} on {machineName}, {formatBytes(v.usedBytes, 0)} used
+            </p>
+          </>
         )}
-        <button type="button" className="cta cta--lg" onClick={(e) => onScan(e.currentTarget)}>
-          <ScanLine size={16} aria-hidden /> Scan {selected.name}
-        </button>
+        <PlateActions drive={current} onScan={onScan} onOpenMap={drives.openMap} />
         {failure !== null && (
           <p className="plate-cap plate-error" role="alert">
             The scan stopped: {failure}
           </p>
         )}
-        {fullDiskAccess === 'missing' && <AccessNote onOpen={onOpenFullDiskAccess} />}
+        {drives.fullDiskAccess === 'missing' && <AccessNote onOpen={onOpenFullDiskAccess} />}
         <AgentNote agent={agent} />
-        <p className="plate-fine">Scanning only reads. Nothing changes until you approve a plan.</p>
+        <p className="plate-fine">
+          Scanning only reads. Nothing changes until you approve a plan.
+          {v.kind !== 'internal' && <> Keep {v.name} plugged in until the scan finishes.</>}
+        </p>
       </div>
+    </div>
+  );
+}
+
+/** One card per drive. The arrow keys move between them, as in any group of radio buttons. */
+function DriveCards({ drives }: { drives: ReadyDrives }) {
+  const now = useNow();
+  const ids = useId();
+  const cards = useRef<(HTMLButtonElement | null)[]>([]);
+  const { list } = drives;
+
+  const onKey = (e: KeyboardEvent<HTMLButtonElement>, i: number) => {
+    const n = list.length;
+    const keys: Record<string, number> = {
+      ArrowRight: i + 1,
+      ArrowDown: i + 1,
+      ArrowLeft: i - 1,
+      ArrowUp: i - 1,
+      Home: 0,
+      End: n - 1,
+    };
+    const to = keys[e.key];
+    if (to === undefined) return;
+    e.preventDefault();
+    const j = (to + n) % n;
+    const next = list[j];
+    if (!next) return;
+    drives.pick(next.volume.mountPoint);
+    cards.current[j]?.focus();
+  };
+
+  return (
+    <div className="drive-cards" role="radiogroup" aria-label="Drives" data-no-ripple>
+      {list.map((d, i) => (
+        <button
+          key={d.volume.mountPoint}
+          ref={(el) => {
+            cards.current[i] = el;
+          }}
+          type="button"
+          role="radio"
+          aria-checked={d.current}
+          aria-label={d.volume.name}
+          aria-describedby={`${ids}-${i}`}
+          tabIndex={d.current ? 0 : -1}
+          className={d.current ? 'drive-card is-on' : 'drive-card'}
+          onClick={() => drives.pick(d.volume.mountPoint)}
+          onKeyDown={(e) => onKey(e, i)}
+        >
+          <span className="drive-card-top">
+            <DriveIcon kind={d.volume.kind} size={20} className="drive-card-icon" />
+            <span className="drive-card-tags">
+              <DriveTags volume={d.volume} />
+            </span>
+            {d.current && (
+              <span className="drive-card-tick" aria-hidden>
+                <Check size={11} strokeWidth={3} />
+              </span>
+            )}
+          </span>
+          <span className="drive-card-name">{d.volume.name}</span>
+          <UsageBar volume={d.volume} />
+          <span className="drive-card-about" id={`${ids}-${i}`}>
+            <span className="drive-card-nums">
+              <b>{formatBytes(d.volume.freeBytes, 0)} free</b> of {formatBytes(d.volume.totalBytes, 0)}
+            </span>
+            <DriveStatus scan={d.scan} now={now} />
+          </span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Scan the drive; or, for a drive scanned already, go back to its map without scanning again, or scan again. */
+function PlateActions({
+  drive,
+  onScan,
+  onOpenMap,
+}: {
+  drive: DriveItem;
+  onScan: (button: HTMLButtonElement) => void;
+  onOpenMap: () => void;
+}) {
+  if (drive.scan.phase !== 'done')
+    return (
+      <button type="button" className="cta cta--lg" onClick={(e) => onScan(e.currentTarget)}>
+        <ScanLine size={16} aria-hidden /> Scan {drive.volume.name}
+      </button>
+    );
+  return (
+    <div className="plate-actions">
+      <button type="button" className="cta cta--lg" onClick={onOpenMap}>
+        <MapIcon size={16} aria-hidden /> Open its map
+      </button>
+      <button type="button" className="btn btn--lg" onClick={(e) => onScan(e.currentTarget)}>
+        <ScanLine size={14} aria-hidden /> Scan again
+      </button>
     </div>
   );
 }

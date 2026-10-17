@@ -8,6 +8,8 @@
 }
 
 .shell-head {
+  position: relative;
+  z-index: 5; /* the drive menu drops over the screen below */
   flex: none;
   height: var(--header-h);
   display: flex;
@@ -34,23 +36,6 @@
   color: var(--color-text);
   font-weight: 600;
   white-space: nowrap;
-}
-.head-meter {
-  position: relative;
-  display: block;
-  flex: none;
-  width: 110px;
-  height: 6px;
-  border-radius: 3px;
-  background: var(--color-meter-track);
-  overflow: hidden;
-}
-.head-meter > i {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  background: var(--color-meter);
 }
 .head-disk-nums,
 .head-disk-free {

@@ -126,6 +126,7 @@ button.crumb:hover {
 .atlas.is-scan .hud,
 .atlas.is-scan .plate-content .cta,
 .atlas.is-scan .plate-content .agent-note,
-.atlas.is-scan .plate-content .drive-picker {
+.atlas.is-scan .plate-content .btn,
+.atlas.is-scan .plate-content .drive-cards {
   pointer-events: auto;
 }

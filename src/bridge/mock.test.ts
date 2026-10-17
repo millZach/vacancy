@@ -28,6 +28,7 @@ describe('the mock bridge', () => {
     const outcome = await bridge.scan('D:\\', () => {});
     if (outcome.status !== 'done') throw new Error('expected a map');
     expect(outcome.overview.volume.name).toBe('Data (D:)');
+    expect(outcome.overview.categories[0]!.items[0]!.path.startsWith('D:\\')).toBe(true);
     const total = outcome.overview.categories.reduce((s, c) => s + c.bytes, 0);
     expect(total).toBeCloseTo(outcome.overview.volume.usedBytes, -3);
   });
@@ -39,10 +40,34 @@ describe('the mock bridge', () => {
     expect(await outcome).toEqual({ status: 'cancelled' });
   });
 
-  it('opens fixture folders and refuses unknown ones', async () => {
-    const bridge = createMockBridge(fixtures.windows);
-    const adobe = await bridge.browse('fx-apps-2');
+  it('opens folders of a scanned drive and refuses unknown ones', async () => {
+    const bridge = createMockBridge(fixtures.windows, { scanMs: 0 });
+    await expect(bridge.browse('C:\\', 'fx-apps-2')).rejects.toThrow('there is no finished scan of C:\\ to explore');
+    await bridge.scan('C:\\', () => {});
+    const adobe = await bridge.browse('C:\\', 'fx-apps-2');
     expect(adobe.item.name).toBe('Adobe');
-    await expect(bridge.browse('nope')).rejects.toThrow('there is no folder nope in this scan');
+    await expect(bridge.browse('C:\\', 'nope')).rejects.toThrow('there is no folder nope in this scan');
+  });
+
+  it('keeps a map per drive, with paths on that drive, and forgets a drive that goes', async () => {
+    const bridge = createMockBridge(fixtures.windows, { scanMs: 0 });
+    await bridge.scan('C:\\', () => {});
+    await bridge.scan('D:\\', () => {});
+    expect((await bridge.browse('C:\\', 'fx-apps-2')).item.path).toBe('C:\\Program Files\\Adobe');
+    expect((await bridge.browse('D:\\', 'fx-apps-2')).item.path).toBe('D:\\Program Files\\Adobe');
+
+    bridge.unplug('D:\\');
+    expect((await bridge.listVolumes()).map((v) => v.mountPoint)).toEqual(['C:\\', 'E:\\']);
+    await bridge.forgetDrive('D:\\');
+    await expect(bridge.browse('D:\\', 'fx-apps-2')).rejects.toThrow('there is no finished scan of D:\\');
+    await expect(bridge.scan('D:\\', () => {})).rejects.toThrow('not connected');
+    expect((await bridge.browse('C:\\', 'fx-apps-2')).item.name).toBe('Adobe');
+  });
+
+  it('stops the scan of a drive it forgets', async () => {
+    const bridge = createMockBridge(fixtures.windows, { scanMs: 60_000 });
+    const outcome = bridge.scan('E:\\', () => {});
+    await bridge.forgetDrive('E:\\');
+    expect(await outcome).toEqual({ status: 'cancelled' });
   });
 });

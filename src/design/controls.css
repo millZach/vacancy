@@ -85,6 +85,12 @@
   padding: 5px 10px 4px;
   font-size: var(--text-ui);
 }
+/* Beside a large call to action. */
+.btn--lg {
+  padding: 12px 16px 11px;
+  border-radius: var(--radius-lg);
+  font-size: var(--text-md);
+}
 
 /* A button that reads as a link inside a sentence. */
 .link-button {
