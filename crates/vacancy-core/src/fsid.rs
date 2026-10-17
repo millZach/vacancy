@@ -33,10 +33,16 @@ impl Identity {
     /// Whether this is the identity the scanner recorded as `scanned` for a folder (Windows: its file id, on a
     /// volume the scanner checked; Unix: its device and inode).
     pub(crate) fn matches_scan(&self, scanned: u128) -> bool {
+        self.scan_key() == scanned
+    }
+
+    /// This identity as the scanner records identities: Windows' file id (the volume is the scan's), Unix's device
+    /// and inode in one number.
+    pub(crate) fn scan_key(&self) -> u128 {
         if cfg!(windows) {
-            self.file == scanned
+            self.file
         } else {
-            (u128::from(self.volume) << 64) | self.file == scanned
+            (u128::from(self.volume) << 64) | self.file
         }
     }
 }

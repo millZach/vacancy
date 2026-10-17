@@ -38,6 +38,7 @@ use crate::guard::Guard;
 use crate::plan::{Action, Plan, Step as PlanStep, Target, denied_reason, next_id};
 use crate::report::{CategoryFreed, Outcome, RunReport, Skip, SkipKind, StepReport};
 use crate::scan::CancelToken;
+use crate::snapshot::digest_key;
 use crate::text::group_digits;
 use crate::volume::VolumeInfo;
 
@@ -147,6 +148,20 @@ pub fn execute(
     execute_inner(plan, env, figures, on_event, cancel, &Hooks::default())
 }
 
+/// The folder at `path` and what it lists, read now through a fresh walk that follows no link: its chain and its
+/// entries. For the planner, which reads a folder's loose files by identity.
+pub(crate) fn files_in(path: &Path) -> Result<(Vec<Step>, Vec<Entry>), Fail> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| Fail::Failed("the path has no name".into()))?;
+    let parent = sys::walk_to_parent(path)?;
+    let (dir, step) = sys::open_dir(&parent.dir, name, None, false)?;
+    let entries = sys::list(&dir)?;
+    let mut chain = parent.steps.clone();
+    chain.push(step);
+    Ok((chain, entries))
+}
+
 /// Points where the tests change the tree mid-run, to check that a change can't redirect a delete.
 #[derive(Default)]
 pub(crate) struct Hooks<'h> {
@@ -196,6 +211,16 @@ pub(crate) struct Entry {
 }
 
 impl Entry {
+    /// What identifies it, as the scanner records identities (see `snapshot::digest_key`): Windows' file id,
+    /// Unix's device and inode.
+    pub(crate) fn key(&self) -> u128 {
+        if cfg!(windows) {
+            self.id
+        } else {
+            (u128::from(self.dev) << 64) | self.id
+        }
+    }
+
     /// The entry as a step of a chain, in a folder on the volume `volume`.
     pub(crate) fn step(&self, volume: u64) -> Step {
         Step {
@@ -237,14 +262,14 @@ pub(crate) enum Fail {
 }
 
 /// How a reason is said of one thing and of several ("is in use", "are in use").
-struct Said {
-    kind: SkipKind,
-    one: String,
+pub(crate) struct Said {
+    pub(crate) kind: SkipKind,
+    pub(crate) one: String,
     many: String,
 }
 
 impl Fail {
-    fn said(&self) -> Said {
+    pub(crate) fn said(&self) -> Said {
         let (kind, one, many): (SkipKind, String, String) = match self {
             Fail::Gone => (
                 SkipKind::Gone,
@@ -597,16 +622,16 @@ impl Run<'_, '_> {
                 self.delete_file(parent_dir, path, &entry, busy, false, tally);
                 Ok(())
             }
-            Target::Loose { kept } => {
+            Target::Loose { files } => {
                 let (dir, target) =
                     sys::open_dir(parent_dir, name, None, false).map_err(|f| Whole::of("It", f))?;
                 let mut chain = parent_steps.clone();
                 chain.push(target);
                 judge(guard, path, &chain, true)?;
                 same_identity(&chain, action)?;
-                self.loose(&dir, path, action, kept, index, busy, tally)
+                self.loose(&dir, path, files, index, busy, tally)
             }
-            Target::Dir => {
+            Target::Dir { folders } => {
                 let (dir, target) =
                     sys::open_dir(parent_dir, name, None, true).map_err(|f| Whole::of("It", f))?;
                 let mut chain = parent_steps.clone();
@@ -616,30 +641,39 @@ impl Run<'_, '_> {
                 if sys::changed(&dir).map_err(|f| Whole::of("It", f))? >= self.threshold {
                     return Err(Whole::new(SkipKind::Changed, "It changed since the scan"));
                 }
-                self.verify_tree(guard, step, &dir, &target, path, action)?;
+                let tree = Tree {
+                    folders,
+                    root_step: &target,
+                    path,
+                };
+                self.verify_tree(guard, step, &dir, &tree, action)?;
                 if let Some(hook) = self.hooks.before_delete {
                     hook(path);
                 }
-                self.delete_tree(parent_dir, dir, &target, path, index, busy, tally);
+                self.delete_tree(parent_dir, dir, &tree, action, index, busy, tally);
                 Ok(())
             }
         }
     }
 
-    /// Checks a folder target whole before anything in it goes: every entry of every folder in it unchanged since
-    /// the scan, every folder the one its parent listed, on the target's volume and mount, nothing protected inside,
-    /// and its size as the scan measured it. See the module docs.
+    /// Checks a folder target whole before anything in it goes: every folder in it lists exactly what the scan
+    /// listed there (by identity), every entry is unchanged since the scan, every folder is the one its parent
+    /// listed, on the target's volume and mount, nothing protected is inside, and its size is the scan's. See the
+    /// module docs.
     fn verify_tree(
         &self,
         guard: &Guard,
         step: &PlanStep,
         root: &sys::Dir,
-        root_step: &Step,
-        path: &Path,
+        tree: &Tree<'_>,
         action: &Action,
     ) -> Result<(), Whole> {
+        let path = tree.path;
         let mut measure = Measure::default();
         let entries = sys::list(root).map_err(|f| Whole::of("Its contents", f))?;
+        if !tree.lists_as_scanned(tree.root_step, &entries) {
+            return Err(changed_inside(path, path));
+        }
         // The target's own folder is the caller's; the ones below are opened here, one per level.
         let mut stack: Vec<(Option<sys::Dir>, PathBuf, Vec<Entry>, usize)> =
             vec![(None, path.to_path_buf(), entries, 0)];
@@ -673,7 +707,7 @@ impl Run<'_, '_> {
                     let parent = dir.as_ref().unwrap_or(root);
                     let (sub_dir, sub) =
                         sys::open_dir(parent, &e.name, Some(&e), false).map_err(inside)?;
-                    if !same_volume(root_step, &sub) {
+                    if !same_volume(tree.root_step, &sub) {
                         return Err(Whole::new(
                             SkipKind::OtherVolume,
                             format!("Another volume is mounted inside it, at {}", at.display()),
@@ -697,6 +731,9 @@ impl Run<'_, '_> {
                         ));
                     }
                     let entries = sys::list(&sub_dir).map_err(inside)?;
+                    if !tree.lists_as_scanned(&sub, &entries) {
+                        return Err(changed_inside(path, &at));
+                    }
                     stack.push((Some(sub_dir), at, entries, 0));
                 }
             }
@@ -704,25 +741,30 @@ impl Run<'_, '_> {
         measure.check(action)
     }
 
-    /// Deletes a verified folder target, depth first, relative to the open folders. See the module docs.
+    /// Deletes a verified folder target, depth first, relative to the open folders. Each folder is listed again
+    /// and must still list exactly what the scan listed, or nothing in it goes. See the module docs.
     #[allow(clippy::too_many_arguments)]
     fn delete_tree(
         &mut self,
         parent: &sys::Dir,
         root: sys::Dir,
-        root_step: &Step,
-        path: &Path,
+        tree: &Tree<'_>,
+        action: &Action,
         index: u32,
         busy: &sys::Busy,
         tally: &mut Tally,
     ) {
+        let path = tree.path;
         let entries = match sys::list(&root) {
-            Ok(entries) => entries,
-            Err(fail) => return tally.fail(&fail, path, 0, 0),
+            Ok(entries) if tree.lists_as_scanned(tree.root_step, &entries) => entries,
+            Ok(_) => {
+                return tally.leave(Said::changed(), path, action.bytes, action.files);
+            }
+            Err(fail) => return tally.fail(&fail, path, action.bytes, action.files),
         };
         let mut stack: Vec<Frame> = vec![Frame {
             dir: root,
-            step: root_step.clone(),
+            step: tree.root_step.clone(),
             path: path.to_path_buf(),
             entries,
             next: 0,
@@ -743,24 +785,34 @@ impl Run<'_, '_> {
                     let inside_target = !stack.is_empty();
                     let above = stack.last().map_or(parent, |f| &f.dir);
                     match sys::remove_dir(above, frame.dir, &frame.step, inside_target) {
-                        Ok(()) | Err(Fail::NotEmpty | Fail::Gone) => {}
+                        Ok(()) | Err(Fail::Gone) => {}
+                        // Nothing left in it was left on purpose: something new arrived while it was emptied.
+                        Err(Fail::NotEmpty) if stack.is_empty() && tally.left.is_empty() => tally
+                            .leave(
+                                Said {
+                                    kind: SkipKind::Changed,
+                                    one: "stays: something was added to it during the run".into(),
+                                    many: "stay: something was added to them during the run".into(),
+                                },
+                                &frame.path,
+                                0,
+                                0,
+                            ),
+                        Err(Fail::NotEmpty) => {}
                         Err(fail) => tally.fail(&fail, &frame.path, 0, 0),
                     }
                 }
                 continue;
             };
-            top.next += 1;
-            let at = top.path.join(&e.name);
             if self.cancel.is_cancelled() {
-                // Stop after the file just deleted. What is left in this folder (this entry on) is counted; what
-                // is left in the folders above is unknown in files, and explained by the cancel.
+                // Stop after the file just deleted. What is left of the action is counted below.
                 stopped = true;
-                let left = (top.entries.len() + 1 - top.next) as u64;
-                tally.leave(Said::cancelled(), &top.path, 0, left);
                 continue;
             }
+            top.next += 1;
+            let at = top.path.join(&e.name);
             if e.changed >= self.threshold {
-                let file = u64::from(e.kind == Kind::File);
+                let file = u64::from(e.counts);
                 tally.leave(Said::changed(), &at, e.alloc, file);
                 continue;
             }
@@ -777,18 +829,23 @@ impl Run<'_, '_> {
                     Err(Fail::Gone) => {}
                     Err(fail) => tally.fail(&fail, &at, 0, 0),
                 },
-                Kind::Special(what) => tally.leave(Said::special(what), &at, e.alloc, 0),
+                Kind::Special(what) => {
+                    tally.leave(Said::special(what), &at, e.alloc, u64::from(e.counts));
+                }
                 Kind::Dir => {
                     let threshold = self.threshold;
                     let opened =
                         sys::open_dir(&top.dir, &e.name, Some(&e), true).and_then(|(dir, sub)| {
-                            if !same_volume(root_step, &sub) {
+                            if !same_volume(tree.root_step, &sub) {
                                 return Err(Fail::OtherVolume);
                             }
                             if sys::changed(&dir)? >= threshold {
                                 return Err(Fail::Changed);
                             }
                             let entries = sys::list(&dir)?;
+                            if !tree.lists_as_scanned(&sub, &entries) {
+                                return Err(Fail::Changed);
+                            }
                             Ok((dir, sub, entries))
                         });
                     match opened {
@@ -805,6 +862,18 @@ impl Run<'_, '_> {
                 }
             }
             self.progress(index, tally, &at, false);
+        }
+        if stopped {
+            // What the scan measured of the action, less what went and what was left for other reasons.
+            let (left_bytes, left_files) = tally
+                .left
+                .iter()
+                .fold((0, 0), |(b, f), l| (b + l.bytes, f + l.files));
+            let files = action
+                .files
+                .saturating_sub(tally.action.deleted + left_files);
+            let bytes = action.bytes.saturating_sub(tally.action.freed + left_bytes);
+            tally.leave(Said::cancelled(), path, bytes, files);
         }
     }
 
@@ -824,49 +893,55 @@ impl Run<'_, '_> {
                 tally.action.freed += freed;
                 tally.action.deleted += 1;
             }
-            Ok(None) => tally.leave(Said::hard_linked(), at, e.alloc, 1),
+            Ok(None) => {
+                // Its name here is gone; its other names keep the file, and its space.
+                tally.action.deleted += 1;
+                tally.leave(Said::hard_linked(), at, e.alloc, 1);
+            }
             Err(Fail::Gone) => {}
             Err(fail) => tally.fail(&fail, at, e.alloc, 1),
         }
     }
 
-    /// Deletes a folder's loose files: those the scan saw (not kept individually, unchanged since), within the
-    /// scan's totals of them. Files new or changed since are left alone. The folder itself stays.
+    /// Deletes a folder's loose files: only those the plan holds by name and identity (the ones the scan saw),
+    /// each unchanged since the scan. Files new or changed since are left alone, and so is the folder.
     #[allow(clippy::too_many_arguments)]
     fn loose(
         &mut self,
         dir: &sys::Dir,
         path: &Path,
-        action: &Action,
-        kept: &[OsString],
+        planned: &[(OsString, u128)],
         index: u32,
         busy: &sys::Busy,
         tally: &mut Tally,
     ) -> Result<(), Whole> {
         let entries = sys::list(dir).map_err(|f| Whole::of("Its files", f))?;
-        let mut measure = Measure::default();
-        let old: Vec<Entry> = entries
+        let found: Vec<Entry> = entries
             .into_iter()
-            .filter(|e| e.kind == Kind::File && !kept.iter().any(|k| k == &e.name))
-            .filter(|e| e.changed < self.threshold)
-            .inspect(|e| measure.add(e))
+            .filter(|e| {
+                planned
+                    .iter()
+                    .any(|(name, key)| *name == e.name && *key == e.key())
+            })
             .collect();
-        let (single_bytes, single_files) = measure.single();
-        if single_bytes > action.bytes || single_files > action.files {
-            return Err(Whole::new(
-                SkipKind::Changed,
-                "Its files changed since the scan: there are more of them than the scan saw",
-            ));
-        }
         if let Some(hook) = self.hooks.before_delete {
             hook(path);
         }
-        for (i, e) in old.iter().enumerate() {
+        for (i, e) in found.iter().enumerate() {
             let at = path.join(&e.name);
             if self.cancel.is_cancelled() {
-                let bytes = old[i..].iter().map(|e| e.alloc).sum();
-                tally.leave(Said::cancelled(), path, bytes, (old.len() - i) as u64);
+                let rest = &found[i..];
+                let bytes = rest.iter().map(|e| e.alloc).sum();
+                tally.leave(Said::cancelled(), path, bytes, rest.len() as u64);
                 break;
+            }
+            if e.changed >= self.threshold {
+                tally.leave(Said::changed(), &at, e.alloc, 1);
+                continue;
+            }
+            if let Kind::Special(what) = e.kind {
+                tally.leave(Said::special(what), &at, e.alloc, 1);
+                continue;
             }
             if let Some(hook) = self.hooks.before_file {
                 hook(&at);
@@ -874,21 +949,40 @@ impl Run<'_, '_> {
             self.delete_file(dir, &at, e, busy, false, tally);
             self.progress(index, tally, &at, false);
         }
-        // The files the scan saw that aren't there unchanged now.
-        let missing = action.files.saturating_sub(measure.files);
+        // The files the scan saw that aren't there now: removed by someone else, or replaced.
+        let missing = planned.len().saturating_sub(found.len()) as u64;
         if missing > 0 {
             tally.leave(
                 Said {
-                    kind: SkipKind::Changed,
-                    one: "changed or was removed since the scan".into(),
-                    many: "changed or were removed since the scan".into(),
+                    kind: SkipKind::Gone,
+                    one: "was removed or replaced since the scan".into(),
+                    many: "were removed or replaced since the scan".into(),
                 },
                 path,
-                action.bytes.saturating_sub(measure.bytes),
+                0,
                 missing,
             );
         }
         Ok(())
+    }
+}
+
+/// A folder target being checked and deleted: what the scan listed in each of its folders, its own step, and its
+/// path.
+struct Tree<'a> {
+    folders: &'a HashMap<u128, u64>,
+    root_step: &'a Step,
+    path: &'a Path,
+}
+
+impl Tree<'_> {
+    /// Whether the folder `step` lists exactly what the scan listed there: the digest of its entries' identities
+    /// is the scan's. A folder the scan didn't list is new, so no.
+    fn lists_as_scanned(&self, step: &Step, entries: &[Entry]) -> bool {
+        let digest = entries
+            .iter()
+            .fold(0u64, |sum, e| sum.wrapping_add(digest_key(e.key())));
+        self.folders.get(&step.id.scan_key()) == Some(&digest)
     }
 }
 
@@ -935,17 +1029,6 @@ impl Measure {
                 self.single_bytes += e.alloc;
                 self.single_files += 1;
             }
-        }
-    }
-
-    /// Bytes and files with no other name, as far as is known: all of them where link counts aren't known
-    /// (Windows' listing doesn't give them, so a hard-linked file counts as having one name, which errs towards
-    /// refusing).
-    fn single(&self) -> (u64, u64) {
-        if self.links_known {
-            (self.single_bytes, self.single_files)
-        } else {
-            (self.bytes, self.files)
         }
     }
 
@@ -1025,10 +1108,9 @@ fn left_skip(action: &Action, left: &Left) -> Skip {
 /// The step's report: its numbers, its outcome, and its skips, at most [`SKIPS_PER_KIND`] of each kind with the
 /// rest summed into one.
 fn step_report(step: &PlanStep, tally: Tally) -> StepReport {
-    let planned_bytes = step.actions.iter().map(|a| a.bytes).sum::<u64>()
-        + step.refused.iter().map(|(s, _)| s.bytes).sum::<u64>();
-    let planned_items = step.actions.iter().map(|a| a.files).sum::<u64>()
-        + step.refused.iter().map(|(_, files)| files).sum::<u64>();
+    // What the confirm dialog showed: the places that were to run, not those refused while planning.
+    let planned_bytes = step.actions.iter().map(|a| a.bytes).sum::<u64>();
+    let planned_items = step.actions.iter().map(|a| a.files).sum::<u64>();
     let mut skipped: Vec<Skip> = Vec::new();
     let mut per_kind: HashMap<SkipKind, usize> = HashMap::new();
     let mut rest: Vec<Skip> = Vec::new();
@@ -1076,7 +1158,7 @@ fn step_report(step: &PlanStep, tally: Tally) -> StepReport {
         freed_bytes: tally.step.freed,
         planned_items,
         deleted_items: tally.step.deleted,
-        places: (step.actions.len() + step.refused.len()) as u64,
+        places: step.actions.len() as u64,
         outcome,
         skipped,
     }
@@ -1138,7 +1220,13 @@ fn report(
         planned_bytes: steps.iter().map(|s| s.planned_bytes).sum(),
         freed_bytes: steps.iter().map(|s| s.freed_bytes).sum(),
         deleted_items: steps.iter().map(|s| s.deleted_items).sum(),
-        skipped_items: steps.iter().flat_map(|s| &s.skipped).map(|k| k.items).sum(),
+        // Names deleted while other names keep the file were deleted, not skipped.
+        skipped_items: steps
+            .iter()
+            .flat_map(|s| &s.skipped)
+            .filter(|k| k.kind != SkipKind::HardLinked)
+            .map(|k| k.items)
+            .sum(),
         freed_by_category: by_category,
         total_bytes,
         used_before,

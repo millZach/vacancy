@@ -409,6 +409,7 @@ impl Scratch {
             accessed: unix_time(raw.accessed),
             link_key,
             identity,
+            key: raw.file_id.unwrap_or(0),
         }
     }
 

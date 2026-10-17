@@ -247,7 +247,8 @@ fn entry<'n>(name: &'n OsStr, st: &libc::stat, volume: &Volume) -> Entry<'n> {
         libc::S_IFLNK => EntryKind::FileLink,
         _ => EntryKind::Other,
     };
-    let identity = matches!(kind, EntryKind::Dir | EntryKind::File).then(|| identity(st));
+    let identity_of = identity;
+    let identity = matches!(kind, EntryKind::Dir | EntryKind::File).then(|| identity_of(st));
     let link_key = (kind == EntryKind::File && st.st_nlink > 1)
         .then(|| LinkKey::Id((u128::from(st.st_dev as u64) << 64) | u128::from(st.st_ino)));
     Entry {
@@ -259,6 +260,7 @@ fn entry<'n>(name: &'n OsStr, st: &libc::stat, volume: &Volume) -> Entry<'n> {
         accessed: st.st_atime as UnixTime,
         link_key,
         identity,
+        key: identity_of(st),
     }
 }
 

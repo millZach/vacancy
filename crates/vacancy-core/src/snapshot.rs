@@ -261,6 +261,26 @@ struct DirRec {
     tree: Totals,
     flags: DirFlags,
     markers: Markers,
+    digests: Digests,
+}
+
+/// Which entries a folder listed, as two sums of [`digest_key`]s: of every entry, and of its files alone. Two
+/// listings with the same sum list the same entries (barring a 64-bit collision of ids nobody chooses): the
+/// executor proves a folder holds exactly what the scan saw this way, since on Windows times can be copied over
+/// with a file and say nothing about whether it is new.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Digests {
+    pub(crate) all: u64,
+    pub(crate) files: u64,
+}
+
+/// One entry's part of a folder's [`Digests`]: its identity (Windows file id; Unix device and inode), mixed so that
+/// sums of different sets don't meet by accident.
+pub(crate) fn digest_key(id: u128) -> u64 {
+    let mut z = (id as u64) ^ ((id >> 64) as u64).rotate_left(29) ^ 0x9E37_79B9_7F4A_7C15;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -389,6 +409,11 @@ impl Snapshot {
         self.ids.get(dir.0 as usize).copied().filter(|&id| id != 0)
     }
 
+    /// The digests of what the folder listed when the scan read it (zero for a folder it didn't).
+    pub(crate) fn digests(&self, dir: DirId) -> Digests {
+        self.dir(dir).digests
+    }
+
     /// What identified a kept file when the scan listed it, as [`identity`](Self::identity) does for folders.
     pub(crate) fn file_identity(&self, file: FileId) -> Option<u128> {
         self.files
@@ -502,6 +527,9 @@ pub(crate) struct Listing {
     pub(crate) own_last_used: UnixTime,
     pub(crate) markers: Markers,
     pub(crate) flags: DirFlags,
+    /// See [`Digests`].
+    pub(crate) digest_all: u64,
+    pub(crate) digest_files: u64,
     /// File-shaped links (symlinks) seen and not followed.
     pub(crate) file_links: u32,
     /// Extra names of hard-linked files, not counted again.
@@ -536,6 +564,8 @@ impl Listing {
         self.own_last_used = 0;
         self.markers = Markers::default();
         self.flags = DirFlags::default();
+        self.digest_all = 0;
+        self.digest_files = 0;
         self.file_links = 0;
         self.hard_links = 0;
         self.subdirs.clear();
@@ -631,6 +661,7 @@ impl Builder {
             tree: Totals::default(),
             flags: DirFlags::default(),
             markers: Markers::default(),
+            digests: Digests::default(),
         });
         self.snap.ids.push(0);
         self.snap.roots.push(Root {
@@ -688,6 +719,7 @@ impl Builder {
                 },
                 flags: sub.flags,
                 markers: Markers::default(),
+                digests: Digests::default(),
             });
             snap.ids.push(sub.identity.unwrap_or(0));
             if sub.flags.contains(DirFlags::LINK) {
@@ -719,6 +751,10 @@ impl Builder {
             d.own.last_used = d.own.last_used.max(listing.own_last_used);
             d.flags = d.flags.with(listing.flags);
             d.markers = listing.markers;
+            d.digests = Digests {
+                all: listing.digest_all,
+                files: listing.digest_files,
+            };
         }
         let mut at = dir.0;
         while at != NO_PARENT {

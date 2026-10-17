@@ -4,8 +4,9 @@
 //! root is the folder, the places the rules and the Guard use (home, app data, temp) are laid out inside it
 //! ([`env`]), and the Guard denies everything outside it by identity ([`Env::confined_to`]). It only ever narrows
 //! what Vacancy can touch. [`check_root`] refuses a folder that could widen it: one that isn't an existing folder,
-//! is reached through a link, is a drive's root, or is in, or holds, the real home folder. The desktop app enters
-//! the mode when `VACANCY_FIXTURE_ROOT` names such a folder (see AGENTS.md, "Prove an app change").
+//! is reached through a link, is a drive's root, or is in, or holds, the real home folder, and the desktop app also
+//! wants the [`MARKER`] file that [`build`] writes, so the mode only ever runs on a folder the generator made. The
+//! app enters the mode when `VACANCY_FIXTURE_ROOT` names such a folder (see AGENTS.md, "Prove an app change").
 //!
 //! **A fixture profile** ([`build`]) is the fake home those proofs and the executor's tests run against: caches,
 //! temp files, an idle project whose `node_modules` is laid out the way pnpm lays it out (links into `.pnpm`, a
@@ -29,6 +30,15 @@ pub const USER: &str = "fixture";
 
 /// The environment variable that puts the desktop app in fixture mode.
 pub const ROOT_VAR: &str = "VACANCY_FIXTURE_ROOT";
+
+/// The file [`build`] writes at a profile's root. Fixture mode runs only on a folder that has it: a folder the
+/// generator made holds nothing real, so the fixture's own, narrower places protect all there is.
+pub const MARKER: &str = "vacancy-fixture-profile.txt";
+
+/// Whether `root` is a fixture profile [`build`] made: it has the [`MARKER`] file, a file and not a link.
+pub fn is_profile(root: &Path) -> bool {
+    fs::symlink_metadata(root.join(MARKER)).is_ok_and(|m| m.is_file())
+}
 
 /// Why a folder can't be a fixture root.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -177,6 +187,11 @@ pub fn build_with(root: &Path, bulk: usize) -> io::Result<Profile> {
             FixtureError::NotEmpty(root.to_path_buf()).to_string(),
         ));
     }
+    fs::write(
+        root.join(MARKER),
+        "A fake profile Vacancy's tests and proofs run against. Nothing here is real.
+",
+    )?;
     let home = sub(root, &format!("Users/{USER}"));
     let windows = cfg!(windows);
     let mut specs: Vec<Spec> = Vec::new();

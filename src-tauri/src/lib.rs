@@ -67,6 +67,15 @@ impl Mode {
         let Some(home) = std::env::home_dir() else {
             return Mode::Refused("Fixture mode: your home folder can't be found.".into());
         };
+        // Only a folder the fixture generator made: anything else could hold real files the fixture's own,
+        // narrower places don't protect.
+        if !fixture::is_profile(&root) {
+            return Mode::Refused(format!(
+                "Fixture mode refused: {} is not a fixture profile (it has no {}).",
+                root.display(),
+                fixture::MARKER
+            ));
+        }
         match fixture::check_root(&root, &home) {
             Ok(root) => {
                 let used = measure(&root).map_or(0, |s| s.stats().bytes);
@@ -79,10 +88,20 @@ impl Mode {
         }
     }
 
-    /// Checks that `mount_point` is a drive this mode works on, and gives the places to scan and judge it with.
+    /// Checks that `mount_point` is a drive this mode works on (one the drive list offers now), and gives the
+    /// places to scan and judge it with. Reads the drives and the OS's known folders: call it off the async threads.
     fn env_for(&self, mount_point: &str) -> Result<Env, String> {
         match self {
-            Mode::Real => Ok(Env::detect(Path::new(mount_point))),
+            Mode::Real => {
+                let offered = vacancy_core::list_volumes()
+                    .map_err(|e| e.to_string())?
+                    .iter()
+                    .any(|v| v.mount_point == mount_point);
+                if !offered {
+                    return Err(format!("{mount_point} is not a drive Vacancy offers."));
+                }
+                Ok(Env::detect(Path::new(mount_point)))
+            }
             Mode::Fixture { root, .. } if Path::new(mount_point) == root => Ok(fixture::env(root)),
             Mode::Fixture { .. } => Err(format!("{mount_point} is not the fixture.")),
             Mode::Refused(why) => Err(why.clone()),
@@ -328,7 +347,7 @@ async fn scan_volume(
     app: AppHandle,
     session: State<'_, Session>,
 ) -> Result<ScanOutcome, String> {
-    let env = session.mode.env_for(&mount_point)?;
+    let env = env_for(&app, &mount_point).await?;
     let (generation, token) = {
         // Under the run's lock, which a run takes to check that no scan is running: never both at once.
         let run = lock(&session.run);
@@ -387,6 +406,15 @@ async fn scan_volume(
             Err(e.to_string())
         }
     }
+}
+
+/// [`Mode::env_for`], on a blocking thread: a drive slow to answer must not hold up the async workers.
+async fn env_for(app: &AppHandle, mount_point: &str) -> Result<Env, String> {
+    let app = app.clone();
+    let mount_point = mount_point.to_owned();
+    tauri::async_runtime::spawn_blocking(move || app.state::<Session>().mode.env_for(&mount_point))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Stops the running scan, on whichever drive, if there is one.
@@ -451,8 +479,8 @@ async fn run_plan(
     on_event: Channel<RunEvent>,
     app: AppHandle,
 ) -> Result<RunReport, String> {
+    let env = env_for(&app, &mount_point).await?;
     let session = app.state::<Session>();
-    let env = session.mode.env_for(&mount_point)?;
     let cancel = CancelToken::new();
     let plan = {
         let mut run = lock(&session.run);

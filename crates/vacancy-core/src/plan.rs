@@ -16,8 +16,9 @@
 //!
 //! A plan can't be changed once made: its fields are private and it is only ever read.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -30,6 +31,7 @@ use crate::guard::{Denied, Guard};
 use crate::map::ScannedVolume;
 use crate::report::{Skip, SkipKind};
 use crate::rules::{ProposalAction, loose};
+use crate::snapshot::{DirId, Snapshot, digest_key};
 
 /// A plan, as the confirm dialog shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
@@ -92,13 +94,16 @@ pub enum PlanError {
 /// What an action deletes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Target {
-    /// A folder, with everything in it.
-    Dir,
+    /// A folder, with everything in it. `folders` has, for it and every folder in it the scan entered, the digest
+    /// of what the scan listed there (see `snapshot::Digests`), by the folder's identity as the scan recorded it:
+    /// the executor deletes from a folder only if it lists exactly that now.
+    Dir { folders: HashMap<u128, u64> },
     /// One file.
     File,
-    /// The files directly in a folder, except `kept`: the files the scan kept individually there, which are
-    /// targets of their own (or of nobody), never loose files.
-    Loose { kept: Vec<OsString> },
+    /// The files directly in a folder that the scan saw and didn't keep individually, by name and identity. They
+    /// are read while planning and must then be exactly the ones the scan listed (their digest is the scan's);
+    /// the executor deletes only these.
+    Loose { files: Vec<(OsString, u128)> },
 }
 
 /// One place a plan deletes, with its fingerprint from the scan.
@@ -241,19 +246,12 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
             refused: Vec::new(),
         };
         for &at in proposals.targets(i) {
-            let (target, path, scanned_id, bytes, files) = match at {
+            let (path, scanned_id, bytes, files) = match at {
                 ItemRef::Dir(d) => {
                     let t = snap.tree(d);
-                    (
-                        Target::Dir,
-                        snap.path(d),
-                        snap.identity(d),
-                        t.bytes,
-                        t.files,
-                    )
+                    (snap.path(d), snap.identity(d), t.bytes, t.files)
                 }
                 ItemRef::File(f) => (
-                    Target::File,
                     snap.file_path(f),
                     snap.file_identity(f),
                     snap.file(f).bytes,
@@ -261,26 +259,15 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
                 ),
                 ItemRef::FilesIn(d) => {
                     let (bytes, files) = loose(snap, d);
-                    let kept = snap
-                        .files(d)
-                        .map(|f| snap.file(f).name.to_owned())
-                        .collect();
-                    (
-                        Target::Loose { kept },
-                        snap.path(d),
-                        snap.identity(d),
-                        bytes,
-                        files,
-                    )
+                    (snap.path(d), snap.identity(d), bytes, files)
                 }
                 ItemRef::Proposal(_) => continue,
             };
-            let contents = matches!(target, Target::Loose { .. });
-            let refuse = |kind: SkipKind, reason: String| {
+            let refuse = |kind: SkipKind, reason: &str| {
                 (
                     Skip {
                         path: path.display().to_string(),
-                        reason,
+                        reason: reason.to_owned(),
                         kind,
                         bytes,
                         items: files,
@@ -288,11 +275,12 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
                     files,
                 )
             };
+            let contents = matches!(at, ItemRef::FilesIn(_));
             let chain = match guard.check_with(&mut walker, &path, contents) {
                 Ok(chain) => chain,
                 Err(denied) => {
                     let (kind, reason) = denied_reason(&denied);
-                    step.refused.push(refuse(kind, reason));
+                    step.refused.push(refuse(kind, &reason));
                     continue;
                 }
             };
@@ -302,20 +290,32 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
             match scanned_id {
                 Some(id) if now.matches_scan(id) => {}
                 Some(_) => {
-                    step.refused.push(refuse(
-                        SkipKind::Changed,
-                        "It was replaced since the scan".into(),
-                    ));
+                    step.refused
+                        .push(refuse(SkipKind::Changed, "It was replaced since the scan"));
                     continue;
                 }
                 None => {
-                    step.refused.push(refuse(
-                        SkipKind::Refused,
-                        "This drive's file system can't confirm what is there".into(),
-                    ));
+                    step.refused.push(refuse(SkipKind::Refused, UNCONFIRMABLE));
                     continue;
                 }
             }
+            let target = match at {
+                ItemRef::Dir(d) => match folder_digests(snap, d) {
+                    Some(folders) => Target::Dir { folders },
+                    None => {
+                        step.refused.push(refuse(SkipKind::Refused, UNCONFIRMABLE));
+                        continue;
+                    }
+                },
+                ItemRef::FilesIn(d) => match loose_now(snap, d, &path, now) {
+                    Ok(files) => Target::Loose { files },
+                    Err((kind, reason)) => {
+                        step.refused.push(refuse(kind, &reason));
+                        continue;
+                    }
+                },
+                _ => Target::File,
+            };
             step.actions.push(Action {
                 target,
                 path,
@@ -340,6 +340,66 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
         steps,
         left_for_you,
     })
+}
+
+/// Why a target the scan has no identities for is refused.
+const UNCONFIRMABLE: &str = "This drive's file system can't confirm what is there";
+
+/// The digests of what the scan listed in the folder `dir` and in every folder in it the scan entered, by each
+/// folder's identity as the scan recorded it. `None` if one has no identity.
+fn folder_digests(snap: &Snapshot, dir: DirId) -> Option<HashMap<u128, u64>> {
+    let mut out = HashMap::new();
+    let mut stack = vec![dir];
+    while let Some(d) = stack.pop() {
+        out.insert(snap.identity(d)?, snap.digests(d).all);
+        stack.extend(snap.children(d).filter(|&c| snap.flags(c).entered()));
+    }
+    Some(out)
+}
+
+/// The loose files of the folder `dir`, at `path`, read now: the files it lists that the scan didn't keep
+/// individually, by name and identity. They must be exactly the ones the scan listed: their digest is the scan's.
+/// A file the scan never saw can't be told by its times on Windows (a copy keeps the original's), only by its
+/// identity, which this compares.
+fn loose_now(
+    snap: &Snapshot,
+    dir: DirId,
+    path: &Path,
+    folder: Identity,
+) -> Result<Vec<(OsString, u128)>, (SkipKind, String)> {
+    let unconfirmable = || (SkipKind::Refused, UNCONFIRMABLE.to_owned());
+    let mut expected = snap.digests(dir).files;
+    let mut kept = Vec::new();
+    for f in snap.files(dir) {
+        let id = snap.file_identity(f).ok_or_else(unconfirmable)?;
+        expected = expected.wrapping_sub(digest_key(id));
+        kept.push(id);
+    }
+    let (chain, entries) = crate::exec::files_in(path).map_err(|f| {
+        let said = f.said();
+        (said.kind, format!("It {}", said.one))
+    })?;
+    if chain.last().map(|s| s.id) != Some(folder) {
+        return Err((SkipKind::Changed, "It was replaced since the scan".into()));
+    }
+    let files: Vec<(OsString, u128)> = entries
+        .into_iter()
+        .filter(|e| e.counts && !kept.contains(&e.key()))
+        .map(|e| {
+            let key = e.key();
+            (e.name, key)
+        })
+        .collect();
+    let digest = files
+        .iter()
+        .fold(0u64, |sum, (_, key)| sum.wrapping_add(digest_key(*key)));
+    if digest != expected {
+        return Err((
+            SkipKind::Changed,
+            "Its files changed since the scan: they aren't the ones the scan saw".into(),
+        ));
+    }
+    Ok(files)
 }
 
 /// What the run reports for a place the Guard refused.

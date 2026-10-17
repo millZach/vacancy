@@ -369,8 +369,21 @@ fn a_run_deletes_exactly_what_was_approved() {
         "{:?}",
         linked[0]
     );
+    // Every name in it went, the shared file's too; the scan counted that file here or in the store.
     assert!(
-        node.deleted_items + 1 >= node.planned_items && node.deleted_items <= node.planned_items
+        node.deleted_items == node.planned_items || node.deleted_items == node.planned_items + 1,
+        "{node:#?}"
+    );
+    assert_eq!(
+        report.skipped_items,
+        report
+            .steps
+            .iter()
+            .flat_map(|s| &s.skipped)
+            .filter(|k| k.kind != SkipKind::HardLinked)
+            .map(|k| k.items)
+            .sum::<u64>(),
+        "a name deleted while another keeps the file is not a skip"
     );
     assert!(report.freed_bytes > 0);
     assert!(report.freed_bytes <= report.planned_bytes);
@@ -681,6 +694,13 @@ fn fixture_mode_refuses_roots_that_could_widen_it() {
         std::fs::create_dir_all(p).unwrap();
     }
     assert_eq!(fixture::check_root(&ok, &home), Ok(ok.clone()));
+    assert!(!fixture::is_profile(&ok), "an empty folder is no profile");
+    let profile = base.join("fixtures").join("built");
+    fixture::build(&profile).unwrap();
+    assert!(
+        fixture::is_profile(&profile),
+        "a profile the generator made"
+    );
     let file = base.join("a-file");
     std::fs::write(&file, b"x").unwrap();
     let link = base.join("linked");
@@ -824,4 +844,164 @@ fn a_volume_mounted_inside_a_target_is_left_alone() {
         );
         assert!(fx.profile.cache.join("f_000001").exists(), "skipped whole");
     }
+}
+
+/// The times of `path` (a file or folder), to put back later with [`set_times_like`].
+#[cfg(windows)]
+fn times_of(path: &Path) -> windows_sys::Win32::Storage::FileSystem::FILE_BASIC_INFO {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_BASIC_INFO, FileBasicInfo, GetFileInformationByHandleEx,
+    };
+    let file = open_attributes(path);
+    let mut info = FILE_BASIC_INFO::default();
+    // SAFETY: `info` is writable and sized as passed; the handle is open.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileBasicInfo,
+            (&raw mut info).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    };
+    assert_ne!(ok, 0, "read the times of {}", path.display());
+    info
+}
+
+/// Sets all four of `path`'s times, the change time too, as any program may.
+#[cfg(windows)]
+fn set_times_like(path: &Path, times: &windows_sys::Win32::Storage::FileSystem::FILE_BASIC_INFO) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_BASIC_INFO, FileBasicInfo, SetFileInformationByHandle,
+    };
+    let file = open_attributes(path);
+    let info = FILE_BASIC_INFO {
+        FileAttributes: 0,
+        ..*times
+    };
+    // SAFETY: `info` is a valid FILE_BASIC_INFO of the size passed; the handle has FILE_WRITE_ATTRIBUTES.
+    let ok = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileBasicInfo,
+            (&raw const info).cast(),
+            std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    };
+    assert_ne!(ok, 0, "set the times of {}", path.display());
+}
+
+#[cfg(windows)]
+fn open_attributes(path: &Path) -> std::fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .access_mode(0x0080 | 0x0100) // FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES
+        .custom_flags(0x0200_0000 | 0x0020_0000) // FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+        .open(path)
+        .unwrap()
+}
+
+/// Copies `from` to `to` the way a copy can look old: the copy gets the original's times, and the folder it went
+/// into gets its own times back. On Windows all of them, the change time included; elsewhere the kernel sets the
+/// change time, and only the others can be put back.
+fn copy_with_old_times(from: &Path, to: &Path) {
+    let folder = to.parent().unwrap();
+    #[cfg(windows)]
+    {
+        let folder_times = times_of(folder);
+        std::fs::copy(from, to).unwrap();
+        set_times_like(to, &times_of(from));
+        set_times_like(folder, &folder_times);
+    }
+    #[cfg(not(windows))]
+    {
+        let old = std::fs::metadata(folder).unwrap().modified().unwrap();
+        std::fs::copy(from, to).unwrap();
+        let src = std::fs::metadata(from).unwrap();
+        let times = std::fs::FileTimes::new()
+            .set_modified(src.modified().unwrap())
+            .set_accessed(src.accessed().unwrap());
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(to)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        std::fs::File::open(folder)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old))
+            .unwrap();
+    }
+}
+
+/// A file's times say nothing about whether it is new on Windows: a copy keeps the original's (Explorer,
+/// `CopyFile`, `robocopy /COPY:DAT`), and any program can set even the change time. A file copied in after the plan
+/// with every time set back to before the scan, its folder's too, is still told apart by its identity: the folder
+/// target holding it is skipped whole, and a folder's loose files never include it.
+#[test]
+fn a_file_copied_in_with_old_times_is_never_deleted() {
+    let fx = Fx::new();
+    let plan = fx.plan(&fx.all_ids());
+    let doc = fx.profile.documents.join("report.docx");
+    let deep = fx.profile.long_path.parent().unwrap();
+    let into_tree = deep.join("copied-report.docx");
+    copy_with_old_times(&doc, &into_tree);
+    let into_loose = fx
+        .profile
+        .loose
+        .parent()
+        .unwrap()
+        .join("copied-report.docx");
+    copy_with_old_times(&doc, &into_loose);
+    let before = std::fs::read(&doc).unwrap();
+
+    let (report, _) = fx.run(&plan, &CancelToken::new());
+    assert_eq!(
+        std::fs::read(&into_tree).unwrap(),
+        before,
+        "the copy in the folder target stays"
+    );
+    assert_eq!(
+        std::fs::read(&into_loose).unwrap(),
+        before,
+        "the copy among the loose files stays"
+    );
+    assert!(
+        fx.profile.long_path.exists(),
+        "the folder target holding the copy is skipped whole"
+    );
+    let skip = skips(&report)
+        .into_iter()
+        .find(|k| k.kind == SkipKind::Changed && deep.starts_with(&k.path))
+        .unwrap_or_else(|| {
+            panic!(
+                "the folder target is reported as changed: {:#?}",
+                report.steps
+            )
+        });
+    assert!(skip.reason.contains("changed since the scan"), "{skip:?}");
+    assert!(
+        !fx.profile.loose.exists(),
+        "the loose files the scan saw went"
+    );
+}
+
+/// The same copy made between the scan and the plan: the folder's loose files are no longer the ones the scan saw,
+/// so the planner refuses them, and the confirm dialog's numbers leave them out.
+#[test]
+fn loose_files_that_changed_before_planning_are_refused() {
+    let fx = Fx::new();
+    let folder = fx.profile.loose.parent().unwrap().to_path_buf();
+    copy_with_old_times(
+        &fx.profile.documents.join("notes.txt"),
+        &folder.join("copied-notes.txt"),
+    );
+    let summary = fx.plan(&fx.all_ids()).summary();
+    let refused = summary
+        .refused
+        .iter()
+        .find(|k| Path::new(&k.path) == folder)
+        .unwrap_or_else(|| panic!("the loose files are refused: {:#?}", summary.refused));
+    assert_eq!(refused.kind, SkipKind::Changed);
 }

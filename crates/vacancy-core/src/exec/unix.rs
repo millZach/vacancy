@@ -415,8 +415,9 @@ fn unlink(dir: &Dir, c: &CString, flags: libc::c_int, may_chmod: bool) -> Result
             libc::ENOENT => Fail::Gone,
             libc::EBUSY => Fail::InUse(None),
             libc::ENOTEMPTY | libc::EEXIST => Fail::NotEmpty,
-            libc::EPERM => Fail::Locked,
-            libc::EACCES => Fail::Refused,
+            // Also what Full Disk Access and System Integrity Protection answer: a lock is told by its flags,
+            // which `delete_file` looks at first.
+            libc::EPERM | libc::EACCES => Fail::Refused,
             e => Fail::Failed(format!("error {e}")),
         });
     }

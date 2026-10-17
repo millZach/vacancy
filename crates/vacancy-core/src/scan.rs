@@ -341,6 +341,9 @@ pub(crate) struct Entry<'n> {
     /// For folders and files: what identifies it (Windows file id; Unix device and inode). A folder's is checked
     /// when it is opened; a kept file's is its fingerprint for the plan.
     pub(crate) identity: Option<u128>,
+    /// What identifies the entry, whatever it is (Windows file id; Unix device and inode; 0 where the file system
+    /// has no ids), for its folder's digest (see [`crate::snapshot::digest_key`]).
+    pub(crate) key: u128,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -416,6 +419,12 @@ pub(crate) struct Collector<'a> {
 impl Collector<'_> {
     pub(crate) fn add(&mut self, e: &Entry<'_>) {
         let listing = &mut *self.listing;
+        // Every name the folder lists, hard links and all, before anything is merged or skipped.
+        let key = crate::snapshot::digest_key(e.key);
+        listing.digest_all = listing.digest_all.wrapping_add(key);
+        if e.kind == EntryKind::File {
+            listing.digest_files = listing.digest_files.wrapping_add(key);
+        }
         match e.kind {
             EntryKind::File => {
                 if let Some(key) = e.link_key

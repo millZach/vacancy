@@ -34,11 +34,12 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
     FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_WRITE_ATTRIBUTES, FileAttributeTagInfo,
     FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx, FileIdExtdDirectoryInfo,
-    FileIdExtdDirectoryRestartInfo, FileIdInfo, FileStandardInfo, GetFileInformationByHandleEx,
-    OPEN_EXISTING, SYNCHRONIZE, SetFileInformationByHandle,
+    FileIdExtdDirectoryRestartInfo, FileIdInfo, FileStandardInfo, GetDriveTypeW,
+    GetFileInformationByHandleEx, OPEN_EXISTING, SYNCHRONIZE, SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK};
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
+use windows_sys::Win32::System::WindowsProgramming::DRIVE_REMOTE;
 
 use super::{Entry, Fail, Kind};
 use crate::fsid::{Identity, Step};
@@ -141,6 +142,11 @@ pub(crate) fn walk_to_parent(path: &Path) -> Result<Parent, Fail> {
     };
     let root_path = format!(r"\\?\{}:\", char::from(letter));
     let wide: Vec<u16> = OsStr::new(&root_path).encode_wide().chain([0]).collect();
+    // A network drive is never deleted from: a link on the server can look like a plain folder from here.
+    // SAFETY: `wide` is NUL-terminated.
+    if unsafe { GetDriveTypeW(wide.as_ptr()) } == DRIVE_REMOTE {
+        return Err(Fail::Unsupported);
+    }
     // SAFETY: `wide` is NUL-terminated.
     let raw = unsafe {
         CreateFileW(
@@ -235,10 +241,17 @@ pub(crate) fn open_dir(
     Ok((Dir { handle }, step))
 }
 
-/// The later of an open folder's last-write and change times, in nanoseconds since the Unix epoch.
+/// The latest of an open folder's creation, last-write and change times, in nanoseconds since the Unix epoch.
 pub(crate) fn changed(dir: &Dir) -> Result<i128, Fail> {
     let basic = basic(&dir.handle).ok_or(Fail::Failed("no times".into()))?;
-    Ok(nanos(basic.LastWriteTime.max(basic.ChangeTime)))
+    Ok(latest(&basic))
+}
+
+/// The latest of a file's creation, last-write and change times. A copy made by Explorer or `CopyFile` keeps the
+/// original's write and change times but gets a new creation time; `robocopy /COPY:DAT` keeps all three, which is
+/// why a folder's entries are also checked by identity (see `snapshot::Digests`).
+fn latest(b: &FILE_BASIC_INFO) -> i128 {
+    nanos(b.CreationTime.max(b.LastWriteTime).max(b.ChangeTime))
 }
 
 /// Every entry of an open folder, from the start. A listing that fails part way fails whole: nothing is decided
@@ -319,7 +332,7 @@ pub(crate) fn delete_file(
         return Err(Fail::Changed);
     }
     let times = basic(&handle).ok_or(Fail::Failed("no times".into()))?;
-    if nanos(times.LastWriteTime.max(times.ChangeTime)) >= threshold {
+    if latest(&times) >= threshold {
         return Err(Fail::Changed);
     }
     let links = standard(&handle).map_or(1, |s| s.NumberOfLinks);
@@ -346,7 +359,7 @@ pub(crate) fn delete_link(dir: &Dir, e: &Entry, threshold: i128) -> Result<(), F
         return Err(Fail::Changed);
     }
     let times = basic(&handle).ok_or(Fail::Failed("no times".into()))?;
-    if nanos(times.LastWriteTime.max(times.ChangeTime)) >= threshold {
+    if latest(&times) >= threshold {
         return Err(Fail::Changed);
     }
     // A volume mounted in a folder is left mounted: deleting the mount point would take the volume away from
@@ -412,8 +425,10 @@ fn is_volume(handle: &Handle) -> bool {
         return true;
     };
     let name: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| u16::from_le_bytes(*c))
         .collect();
     String::from_utf16_lossy(&name)
         .to_ascii_lowercase()
@@ -728,7 +743,7 @@ fn to_entry(dir: &Dir, e: &FILE_ID_EXTD_DIR_INFO, name: &[u16]) -> Entry {
         id: u128::from_le_bytes(e.FileId.Identifier),
         dev: 0,
         alloc,
-        changed: nanos(e.LastWriteTime.max(e.ChangeTime)),
+        changed: nanos(e.CreationTime.max(e.LastWriteTime).max(e.ChangeTime)),
         links: None,
         // As the scanner counts: everything that isn't a folder or a link.
         counts: !is_dir && kind != Kind::Link,
