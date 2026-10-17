@@ -211,6 +211,157 @@ pub(crate) fn mac_name_rule(fs_type: Option<&str>, case_sensitive: Option<bool>)
 mod tests {
     use super::*;
 
+    /// A path under the temp folder in the running OS's syntax.
+    fn native(base: &Path, rel: &str) -> PathBuf {
+        rel.split('/')
+            .fold(base.to_path_buf(), |p, part| p.join(part))
+    }
+
+    /// A `root_preference_sqlite.db` in `dir` laid out as Drive lays it out, listing `mirrors` and the drive
+    /// mounted at `mount`.
+    fn drive_db(dir: &Path, mirrors: &[Option<&str>], mount: &str) {
+        let conn = rusqlite::Connection::open(dir.join("root_preference_sqlite.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE roots (root_id INTEGER PRIMARY KEY, media_id INTEGER, title TEXT,
+                 last_seen_absolute_path TEXT, sync_type INTEGER);
+             CREATE TABLE media (media_id INTEGER PRIMARY KEY, fs_type INTEGER, last_mount_point TEXT);",
+        )
+        .unwrap();
+        for (i, path) in mirrors.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO roots (media_id, title, last_seen_absolute_path, sync_type)
+                 VALUES (1, ?1, ?2, 1)",
+                rusqlite::params![format!("folder {i}"), path],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO media (fs_type, last_mount_point) VALUES (10, ?1), (3, ?2)",
+            rusqlite::params![mount, "/Volumes/USB"],
+        )
+        .unwrap();
+    }
+
+    fn found(dir: &Path) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = google_drive_roots(dir)
+            .into_iter()
+            .map(|c| c.path)
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The folders Drive mirrors are wherever the user picked, with no name to go by: Drive's own record says
+    /// where. Blank, missing and relative entries, and media other than Drive's own, are left out.
+    #[test]
+    fn reads_google_drive_s_record_of_the_folders_it_mirrors() {
+        let fx = tempfile::tempdir().unwrap();
+        let work = native(fx.path(), "Users/alex/Projects/Work");
+        let mount = native(fx.path(), "GoogleDrive");
+        let work_text = work.to_str().unwrap().to_owned();
+        let verbatim = format!(r"\\?\{work_text}");
+        let mirrors = [
+            Some(work_text.as_str()),
+            cfg!(windows).then_some(verbatim.as_str()), // the same folder, as Drive writes it on Windows
+            None,
+            Some("  "),
+            Some("relative/folder"),
+        ];
+        drive_db(fx.path(), &mirrors, mount.to_str().unwrap());
+        assert_eq!(found(fx.path()), {
+            let mut want = vec![work.clone(), mount];
+            want.sort();
+            want
+        });
+        assert!(
+            google_drive_roots(fx.path())
+                .iter()
+                .all(|c| c.provider == "Google Drive")
+        );
+        // Listed, the mirror is a cloud root: nothing in it may go, though it has no working folders to go by.
+        let mut env = if cfg!(windows) {
+            Env::windows(fx.path(), "alex")
+        } else {
+            Env::macos(fx.path(), "alex")
+        };
+        env.cloud.extend(google_drive_roots(fx.path()));
+        let guard = crate::Guard::new(&env, fx.path());
+        assert!(matches!(
+            guard.check(&work.join("app").join("node_modules")),
+            Err(crate::Denied::Protected(_))
+        ));
+    }
+
+    /// Reading the database never writes beside it (no journal, no copy) and never changes it.
+    #[test]
+    fn reads_drive_s_database_in_place_without_writing() {
+        let fx = tempfile::tempdir().unwrap();
+        let work = native(fx.path(), "Work");
+        drive_db(fx.path(), &[work.to_str()], "/Volumes/GoogleDrive");
+        let db = fx.path().join("root_preference_sqlite.db");
+        let before = std::fs::read(&db).unwrap();
+        let listing = |dir: &Path| {
+            let mut names: Vec<_> = std::fs::read_dir(dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+        let files = listing(fx.path());
+        assert!(found(fx.path()).contains(&work));
+        assert_eq!(listing(fx.path()), files, "nothing new beside it");
+        assert_eq!(std::fs::read(&db).unwrap(), before, "unchanged");
+    }
+
+    /// Drive holds its database open while it runs. A database Drive has locked is still read, without waiting
+    /// on Drive; one that isn't there, or isn't a database, adds nothing.
+    #[test]
+    fn tolerates_drive_s_database_locked_missing_or_broken() {
+        let fx = tempfile::tempdir().unwrap();
+        let work = native(fx.path(), "Work");
+        drive_db(fx.path(), &[work.to_str()], "/Volumes/GoogleDrive");
+        let drive =
+            rusqlite::Connection::open(fx.path().join("root_preference_sqlite.db")).unwrap();
+        drive
+            .execute_batch("PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;")
+            .unwrap();
+        let started = std::time::Instant::now();
+        assert!(found(fx.path()).contains(&work), "read past Drive's lock");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        drop(drive);
+
+        assert!(found(&fx.path().join("nowhere")).is_empty(), "missing");
+        let broken = tempfile::tempdir().unwrap();
+        std::fs::write(broken.path().join("root_preference_sqlite.db"), b"not a db").unwrap();
+        assert!(found(broken.path()).is_empty(), "not a database");
+        let other = tempfile::tempdir().unwrap();
+        rusqlite::Connection::open(other.path().join("root_preference_sqlite.db"))
+            .unwrap()
+            .execute_batch("CREATE TABLE settings (k TEXT, v TEXT);")
+            .unwrap();
+        assert!(
+            found(other.path()).is_empty(),
+            "a layout without the tables"
+        );
+    }
+
+    #[test]
+    fn names_odd_paths_in_sqlite_uris() {
+        let path = if cfg!(windows) {
+            PathBuf::from(r"C:\Users\Jo #1\Drive?%\root.db")
+        } else {
+            PathBuf::from("/Users/Jo #1/Drive?%/root.db")
+        };
+        let uri = sqlite_uri(&path, "mode=ro").unwrap();
+        let want = if cfg!(windows) {
+            "file:///C:/Users/Jo%20%231/Drive%3F%25/root.db?mode=ro"
+        } else {
+            "file:///Users/Jo%20%231/Drive%3F%25/root.db?mode=ro"
+        };
+        assert_eq!(uri, want);
+    }
+
     #[test]
     fn only_apple_volumes_fold_the_unicode_form() {
         assert_eq!(
@@ -329,6 +480,102 @@ fn dropbox_roots(dirs: &[PathBuf]) -> Vec<CloudRoot> {
     out
 }
 
+/// Google Drive for desktop's own record of the folders it keeps in sync, from `root_preference_sqlite.db` in
+/// `dir` (`%LOCALAPPDATA%\Google\DriveFS` on Windows, `~/Library/Application Support/Google/DriveFS` on a Mac):
+/// every folder of this computer it mirrors or backs up (`roots`), and the drive it mounts for My Drive (`media`).
+///
+/// Drive keeps the database open while it runs. It is read in place, never copied, through a read-only
+/// connection that waits a moment at most for Drive's locks; if Drive holds them, it is read once more as an
+/// immutable file, which takes no locks and writes nothing (not even a journal). Missing, locked or unreadable, it
+/// adds nothing.
+pub(crate) fn google_drive_roots(dir: &Path) -> Vec<CloudRoot> {
+    let db = dir.join("root_preference_sqlite.db");
+    if !db.is_file() {
+        return Vec::new();
+    }
+    let paths = ["mode=ro", "mode=ro&immutable=1"]
+        .into_iter()
+        .find_map(|params| drive_db_paths(&db, params).ok())
+        .unwrap_or_default();
+    let mut out: Vec<CloudRoot> = Vec::new();
+    for path in paths {
+        add_cloud(
+            &mut out,
+            CloudRoot {
+                provider: "Google Drive".into(),
+                path,
+            },
+        );
+    }
+    out
+}
+
+/// What Drive's database lists, read with the URI parameters `params`. A table or column this version of Drive
+/// doesn't have adds nothing; a lock or a database that can't be read is an error, so the caller can try again.
+fn drive_db_paths(db: &Path, params: &str) -> rusqlite::Result<Vec<PathBuf>> {
+    use rusqlite::{Connection, ErrorCode, OpenFlags};
+    let uri = sqlite_uri(db, params).ok_or_else(|| rusqlite::Error::InvalidPath(db.into()))?;
+    let conn = Connection::open_with_flags(
+        uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(std::time::Duration::from_millis(250))?;
+    let mut out = Vec::new();
+    for sql in [
+        // Folders of this computer that Drive mirrors or backs up.
+        "SELECT last_seen_absolute_path FROM roots",
+        // The drive (`G:\`, or a folder on a Mac) that holds My Drive and shared drives.
+        "SELECT last_mount_point FROM media WHERE fs_type = 10",
+    ] {
+        let found = conn.prepare(sql).and_then(|mut stmt| {
+            stmt.query_map([], |row| row.get::<_, Option<String>>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        });
+        match found {
+            Ok(found) => out.extend(found.into_iter().flatten().filter_map(drive_path)),
+            // SQLITE_ERROR: no such table or column.
+            Err(e) if e.sqlite_error_code() == Some(ErrorCode::Unknown) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(out)
+}
+
+/// A path as Drive writes it (sometimes as `\\?\C:\...`), if it is one.
+fn drive_path(text: String) -> Option<PathBuf> {
+    let text = text.trim();
+    let text = match text.strip_prefix(r"\\?\") {
+        Some(rest) => match rest.strip_prefix(r"UNC\") {
+            Some(unc) => format!(r"\\{unc}"),
+            None => rest.to_owned(),
+        },
+        None => text.to_owned(),
+    };
+    let path = PathBuf::from(text);
+    path.is_absolute().then_some(path)
+}
+
+/// A `file:` URI for SQLite naming `path`, with `params` as its query.
+fn sqlite_uri(path: &Path, params: &str) -> Option<String> {
+    let text = path.to_str()?.replace('\\', "/");
+    let mut uri = String::from("file://");
+    if !text.starts_with('/') {
+        uri.push('/'); // `C:/x` is `file:///C:/x`
+    }
+    for b in text.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~/:".contains(&b) {
+            uri.push(char::from(b));
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
+        }
+    }
+    uri.push('?');
+    uri.push_str(params);
+    Some(uri)
+}
+
 #[cfg(windows)]
 mod detect {
     use std::ffi::OsString;
@@ -344,7 +591,9 @@ mod detect {
     };
     use windows_sys::core::GUID;
 
-    use super::{CloudRoot, Env, KnownFolders, add_cloud, clouds_in, dropbox_roots};
+    use super::{
+        CloudRoot, Env, KnownFolders, add_cloud, clouds_in, dropbox_roots, google_drive_roots,
+    };
 
     /// An environment variable naming an absolute path, with 8.3 short names expanded: `%TEMP%` is often spelled
     /// `C:\Users\RUNNER~1\...`, while the scan sees the long names.
@@ -397,9 +646,9 @@ mod detect {
         let roaming = place(&FOLDERID_RoamingAppData, "APPDATA", &base.app_data);
         // Sync roots from every source that names them: the cloud-files registrations (OneDrive, Dropbox, Google
         // Drive, iCloud, Box wherever they live), OneDrive's list of its accounts and its variables, Dropbox's own
-        // settings, and folders in the home folder named after a service. Google Drive doesn't say where its
-        // mirrored folders are; the scan recognises them (and any Dropbox folder) by the working folders the
-        // clients keep inside them, and cloud-files placeholders by their mark (see the categorizer).
+        // settings, Google Drive's record of the folders it mirrors, and folders in the home folder named after a
+        // service. The scan also recognises Google Drive and Dropbox folders by the working folders the clients
+        // keep inside them, and cloud-files placeholders by their mark (see the categorizer).
         let mut cloud = Vec::new();
         for (provider, path) in sync_roots::roots() {
             add_cloud(
@@ -430,7 +679,10 @@ mod detect {
                 );
             }
         }
-        for root in dropbox_roots(&[roaming.join("Dropbox"), local.join("Dropbox")]) {
+        for root in dropbox_roots(&[roaming.join("Dropbox"), local.join("Dropbox")])
+            .into_iter()
+            .chain(google_drive_roots(&local.join("Google").join("DriveFS")))
+        {
             add_cloud(
                 &mut cloud,
                 CloudRoot {
@@ -631,7 +883,7 @@ mod detect {
 mod detect {
     use std::path::{Path, PathBuf};
 
-    use super::{CloudRoot, Env, add_cloud, clouds_in, dropbox_roots};
+    use super::{CloudRoot, Env, add_cloud, clouds_in, dropbox_roots, google_drive_roots};
 
     pub(super) fn detect(root: &Path) -> Env {
         let home = std::env::var_os("HOME")
@@ -673,8 +925,16 @@ mod detect {
                 });
             }
         }
-        // Dropbox wherever its settings say it is, and sync folders in the home folder found by name.
-        for root in dropbox_roots(&[home.join(".dropbox")]) {
+        // Dropbox wherever its settings say it is, the folders Google Drive says it mirrors, and sync folders in the
+        // home folder found by name.
+        let drive = library
+            .join("Application Support")
+            .join("Google")
+            .join("DriveFS");
+        for root in dropbox_roots(&[home.join(".dropbox")])
+            .into_iter()
+            .chain(google_drive_roots(&drive))
+        {
             add_cloud(&mut env.cloud, root);
         }
         for root in clouds_in(&home) {
