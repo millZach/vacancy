@@ -1,0 +1,2 @@
+/* THROWAWAY typography additions; palette and all other type use the approved host's tokens.css. */
+:root { --advisor-text-title: 24px; --advisor-text-dialog: 33px; --advisor-provider-mark: 18px; }
