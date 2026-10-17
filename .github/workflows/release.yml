@@ -1,0 +1,143 @@
+# On a version tag (v0.2.0): checks the tag is the app's version, builds the Windows installers and the universal macOS
+# .dmg, and attaches them to a draft GitHub Release with generated notes. A person reviews the draft and publishes it.
+# The version lives in one place, [workspace.package] in Cargo.toml; Tauri, the installers and the release all read it.
+# This is a separate workflow on purpose: the job names in ci.yml are the merge bar and stay as they are.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Check the tag is the app version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+      windows-bundles: ${{ steps.check.outputs.windows-bundles }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: check
+        name: Compare the tag with Cargo.toml
+        shell: bash
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "vacancy") | .version')
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME is not the app version v$version. Set [workspace.package] version in Cargo.toml, commit, and tag that commit v<version>."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then echo "prerelease=true" >> "$GITHUB_OUTPUT"; else echo "prerelease=false" >> "$GITHUB_OUTPUT"; fi
+          # WiX only takes x.y.z or a numeric pre-release (x.y.z-4), so other pre-releases ship without the .msi.
+          if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?$ ]]; then
+            echo "windows-bundles=nsis,msi" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$version has a non-numeric pre-release, which WiX can't take. This release ships without the .msi."
+            echo "windows-bundles=nsis" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build on ${{ matrix.name }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            rust-targets: ''
+          - name: macOS
+            os: macos-latest
+            # One .dmg for Apple silicon and Intel Macs.
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      WINDOWS_BUNDLES: ${{ needs.version.outputs.windows-bundles }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install npm packages
+        run: npm ci
+
+      # Release names: Vacancy-<version>-windows-x64-setup.exe, -windows-x64.msi, -macos-universal.dmg.
+      - name: Build the Windows installers
+        if: runner.os == 'Windows'
+        run: |
+          npx tauri build --bundles "$WINDOWS_BUNDLES" -- --locked
+          mkdir -p out
+          cp target/release/bundle/nsis/*-setup.exe "out/Vacancy-$VERSION-windows-x64-setup.exe"
+          if compgen -G 'target/release/bundle/msi/*.msi' > /dev/null; then
+            cp target/release/bundle/msi/*.msi "out/Vacancy-$VERSION-windows-x64.msi"
+          fi
+
+      - name: Build the macOS disk image
+        if: runner.os == 'macOS'
+        run: |
+          npx tauri build --target universal-apple-darwin --bundles dmg -- --locked
+          mkdir -p out
+          cp target/universal-apple-darwin/release/bundle/dmg/*.dmg "out/Vacancy-$VERSION-macos-universal.dmg"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.name }}
+          path: out/*
+          if-no-files-found: error
+
+  draft:
+    name: Draft the GitHub Release
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.version.outputs.version }}
+      PRERELEASE: ${{ needs.version.outputs.prerelease }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: out
+          merge-multiple: true
+
+      - name: Create the draft with every installer
+        run: |
+          cd out
+          sha256sum Vacancy-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          prerelease=()
+          if [ "$PRERELEASE" = "true" ]; then prerelease=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" Vacancy-* SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --draft \
+            --generate-notes \
+            --title "Vacancy $VERSION" \
+            "${prerelease[@]}"
