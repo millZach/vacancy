@@ -26,6 +26,8 @@ interface Props {
   drives: ReadyDrives;
   /** The AI agent Vacancy found, or null for built-in rules only. */
   agent: string | null;
+  /** Read-only advisor status note on the scan plate. */
+  advisorNote: ReactNode;
   /** The plan tray is open beside the map. */
   planOpen: boolean;
   onPlanOpen: (open: boolean) => void;
@@ -46,7 +48,7 @@ const ALMOST = 0.98;
  * panel and the plan's tiles drain to vacant ground. After the run the drive's screen is its finish: the highlight
  * slides, then the summary (the before/after map and what changed), which the drive keeps until it is scanned again.
  */
-export function Atlas({ drives, agent, planOpen, onPlanOpen }: Props) {
+export function Atlas({ drives, agent, advisorNote, planOpen, onPlanOpen }: Props) {
   const bridge = useBridge();
   const field = useRef<DotFieldHandle>(null);
   const [calm, setCalm] = useState<HTMLDivElement | null>(null);
@@ -385,7 +387,7 @@ export function Atlas({ drives, agent, planOpen, onPlanOpen }: Props) {
             <ScanPlate
               drives={drives}
               onOpenFullDiskAccess={() => void bridge.openFullDiskAccessSettings()}
-              agent={agent}
+              advisorNote={advisorNote}
               failure={state.phase === 'failed' ? state.message : null}
               onScan={startScan}
               contentRef={setCalm}

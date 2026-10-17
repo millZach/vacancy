@@ -6,6 +6,16 @@ afterEach(() => {
 });
 
 describe('the mock bridge', () => {
+  it('previews an unchecked advisor or isolated failure without blocking drives', async () => {
+    const unchecked = createMockBridge(fixtures.windows, { advisor: 'notChecked' });
+    const status = await unchecked.advisorStatus();
+    expect(status.enabled).toBe(false);
+    expect(status.discovery).toBe('fixture');
+    expect(status.providers.map((p) => p.availability.state)).toEqual(['notChecked', 'notChecked']);
+    const failed = createMockBridge(fixtures.windows, { advisor: 'error' });
+    await expect(failed.advisorStatus()).rejects.toThrow('Fixture app availability is unavailable.');
+    expect(await failed.listVolumes()).toHaveLength(3);
+  });
   it('reports synthetic disabled advisor availability without claiming live support', async () => {
     for (const fixture of [fixtures.windows, fixtures.macos]) {
       const bridge = createMockBridge(fixture);

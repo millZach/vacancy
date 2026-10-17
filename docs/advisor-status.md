@@ -1,0 +1,5 @@
+# Advisor status placement
+
+Zach chose **C, the centered focused dialog**, from the advisor status prototype on 2026-10-17. Primary source: tag `prototype/advisor-status`, commit `5c817910e23d2b7290c8bba4fc6e76fe33614b29`, treatment C in `prototypes/advisor-status/Variants.tsx`. The header's Rules only control and scan plate's AI options open it; its explanation expands and Continue with built-in rules dismisses it.
+
+This settles placement and interaction only. Production rows report the read-only availability bridge, distinguish limited passive discovery from synthetic fixture status, and keep assistance disabled. Finding a matching executable does not verify its version, account or isolation. No provider invocation, credential/settings access, enable preference or API-key integration is authorized by this decision. The provider strategy remains unresolved; the strict names/sizes/counts/dates-only boundary remains in force. Built-in rules continue independently of status loading or failure.

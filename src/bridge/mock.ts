@@ -2,6 +2,7 @@ import type { Fixture, PastRun, RunSkip } from './fixtures';
 import { makePlan, pastReport, play, type MockPlan, type Playback } from './mockRun';
 import type {
   Bridge,
+  AdvisorStatus,
   CategoryTotal,
   MapFolder,
   Overview,
@@ -14,6 +15,8 @@ import type {
 } from './types';
 
 export interface MockOptions {
+  /** Advisor-only browser preview: native fixture bypass, or a failed read. Never enables a provider. */
+  advisor?: 'notChecked' | 'error';
   /** Answer after this many milliseconds, to see loading states. Default: next tick. */
   delayMs?: number;
   /** Make every call fail with this message, to see error states. */
@@ -102,7 +105,14 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
   return {
     platform: fixture.platform,
     machineName: () => answer(fixture.machineName),
-    advisorStatus: () => answer({ ...fixture.advisorStatus, enabled: false, discovery: 'fixture' as const }),
+    advisorStatus: () => options.advisor === 'error' ? failure<AdvisorStatus>('Fixture app availability is unavailable.') : answer({
+      ...fixture.advisorStatus,
+      enabled: false,
+      discovery: 'fixture' as const,
+      providers: options.advisor === 'notChecked'
+        ? fixture.advisorStatus.providers.map((p) => ({ ...p, availability: { state: 'notChecked' as const } }))
+        : fixture.advisorStatus.providers,
+    }),
     listVolumes: () => answer(volumes),
     forgetDrive: (mountPoint) => {
       if (running?.mountPoint === mountPoint) running.finish({ status: 'cancelled' });

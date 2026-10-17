@@ -8,13 +8,14 @@ import { reclaimableOf, reportOf } from './drives/session';
 import { HistoryMenu } from './history/HistoryMenu';
 import { Shell } from './shell/Shell';
 import { Finish } from './wrapped/Finish';
-
-/** Which AI agent Vacancy found. Detection of Claude Code and Codex arrives with ticket 7; until then, rules only. */
-const AGENT: string | null = null;
+import { AdvisorDialog, AdvisorNote, AdvisorTrigger } from './advisor/Advisor';
+import { useAdvisorStatus } from './advisor/useAdvisorStatus';
 
 export function App() {
   const bridge = useBridge();
   const drives = useDrives();
+  const advisor = useAdvisorStatus();
+  const [advisorOpen, setAdvisorOpen] = useState(false);
   const ready = drives.status === 'ready' ? drives : null;
   // The plan tray beside the map. Each drive keeps its own plan; the tray shows the plan of the drive on screen,
   // and closes when another drive comes on screen.
@@ -37,28 +38,37 @@ export function App() {
   const report = onMap && scan ? reportOf(scan) : null;
 
   return (
-    <Shell
-      platform={bridge.platform}
-      drive={ready && <DriveMenu drives={ready} />}
-      agent={AGENT}
-      reclaimable={onMap && scan && planning ? reclaimableOf(scan) : null}
-      lit={(!!report && report.freedBytes > 0) || (!!past && past.freedBytes > 0)}
-      history={ready && <HistoryMenu locked={ready.locked} onOpen={setPast} />}
-      action={
-        onMap && !planOpen && !planRun && proposals.length > 0 ? (
-          <button type="button" className="cta cta--sm" onClick={() => setPlanOpen(true)}>
-            Build a plan
-          </button>
-        ) : null
-      }
-    >
-      {past ? (
-        <Finish key={past.id} report={past} start="rest" onClose={() => setPast(null)} />
-      ) : ready ? (
-        <Atlas drives={ready} agent={AGENT} planOpen={planOpen} onPlanOpen={setPlanOpen} />
-      ) : (
-        <DrivesPending error={drives.status === 'error' ? drives.message : null} />
-      )}
-    </Shell>
+    <>
+      <Shell
+        platform={bridge.platform}
+        drive={ready && <DriveMenu drives={ready} />}
+        advisor={<AdvisorTrigger open={advisorOpen} onOpen={() => setAdvisorOpen(true)} />}
+        reclaimable={onMap && scan && planning ? reclaimableOf(scan) : null}
+        lit={(!!report && report.freedBytes > 0) || (!!past && past.freedBytes > 0)}
+        history={ready && <HistoryMenu locked={ready.locked} onOpen={setPast} />}
+        action={
+          onMap && !planOpen && !planRun && proposals.length > 0 ? (
+            <button type="button" className="cta cta--sm" onClick={() => setPlanOpen(true)}>
+              Build a plan
+            </button>
+          ) : null
+        }
+      >
+        {past ? (
+          <Finish key={past.id} report={past} start="rest" onClose={() => setPast(null)} />
+        ) : ready ? (
+          <Atlas
+            drives={ready}
+            agent={null}
+            advisorNote={<AdvisorNote state={advisor.state} onOpen={() => setAdvisorOpen(true)} />}
+            planOpen={planOpen}
+            onPlanOpen={setPlanOpen}
+          />
+        ) : (
+          <DrivesPending error={drives.status === 'error' ? drives.message : null} />
+        )}
+      </Shell>
+      {advisorOpen && <AdvisorDialog state={advisor.state} onRetry={advisor.retry} onClose={() => setAdvisorOpen(false)} />}
+    </>
   );
 }

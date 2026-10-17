@@ -1,4 +1,3 @@
-import { Sparkles } from 'lucide-react';
 import type { ReactNode } from 'react';
 import type { Platform } from '../bridge';
 import { Wordmark } from '../design/Wordmark';
@@ -9,8 +8,8 @@ interface Props {
   platform: Platform;
   /** The header's drive plate (the drive menu), once the drives are known. */
   drive: ReactNode;
-  /** The AI agent Vacancy found, or null for built-in rules only. */
-  agent: string | null;
+  /** Read-only AI availability control. */
+  advisor: ReactNode;
   /** What the drive on screen could get back, once its map is up; null before. */
   reclaimable?: number | null;
   /** The screen's call to action in the header ("Build a plan"), if it has one. */
@@ -31,7 +30,7 @@ interface Props {
 export function Shell({
   platform,
   drive,
-  agent,
+  advisor,
   reclaimable = null,
   action = null,
   history = null,
@@ -42,7 +41,7 @@ export function Shell({
   // "deep": anywhere in the header drags the window, except on its controls.
   const drag = overlay ? { 'data-tauri-drag-region': 'deep' } : {};
   return (
-    <div className="shell" data-chrome={overlay ? 'overlay' : 'native'}>
+    <div className="shell" data-chrome={overlay ? 'overlay' : 'native'} data-map={reclaimable !== null}>
       <header className="shell-head" {...drag}>
         <Wordmark lit={lit} />
         {drive}
@@ -59,13 +58,7 @@ export function Shell({
             </span>
           )}
           {history}
-          <span
-            className={agent ? 'pill' : 'pill is-muted'}
-            title={agent ? `${agent} explains unfamiliar folders and suggests reorganizations` : 'No AI agent found'}
-          >
-            <Sparkles size={12} strokeWidth={2.2} aria-hidden />
-            {agent ?? 'Rules only'}
-          </span>
+          {advisor}
           {action}
         </div>
       </header>
