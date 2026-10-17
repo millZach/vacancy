@@ -159,6 +159,11 @@ fn windows_home(fx: &Fixture) {
     fx.file(&format!("{roaming}/Slack/Code Cache/js/y"), 512 * KIB);
     fx.file(&format!("{roaming}/Code/CachedData/abc/z"), 256 * KIB);
     fx.file(&format!("{roaming}/Code/User/settings.json"), 4 * KIB);
+    // A folder called Cache with nothing of Chromium's around it: an app's own, which may hold real data.
+    fx.file(
+        &format!("{roaming}/Ledger App/Cache/accounts.db"),
+        512 * KIB,
+    );
     fx.file(
         &format!("{roaming}/Tool/node_modules/cache/index.js"),
         256 * KIB,
@@ -270,8 +275,16 @@ fn the_windows_rules_find_what_the_prototype_proposes() {
     );
     assert_eq!(
         get(&proposals, "w-appcache").unwrap().summary,
-        "Caches that discord, Slack and Code rebuild on their own."
+        "Browser-engine caches that discord, Slack and Code rebuild on their own."
     );
+    assert_eq!(
+        t("w-appcache-other"),
+        vec![format!("{roaming}/Ledger App/Cache/accounts.db")],
+        "a plain Cache folder is only proposed for review"
+    );
+    let other = get(&proposals, "w-appcache-other").unwrap();
+    assert_eq!(other.risk, Risk::Review);
+    assert!(!other.default_on);
     assert_eq!(
         t("w-gpucache"),
         vec![format!("{local}/D3DSCache/shader.bin")]
@@ -334,6 +347,7 @@ fn the_windows_rules_find_what_the_prototype_proposes() {
                 assert!(p.default_on);
                 assert!(!p.regenerable);
             }
+            "w-appcache-other" => {}
             _ => {
                 assert_eq!(p.risk, Risk::Safe, "{}", p.id);
                 assert!(p.default_on, "{}", p.id);
@@ -389,6 +403,10 @@ fn mac_home(fx: &Fixture) {
     );
     fx.file(
         &format!("{lib}/Application Support/Slack/Cache/Cache_Data/s"),
+        512 * KIB,
+    );
+    fx.file(
+        &format!("{lib}/Application Support/Ledger App/Caches/accounts.db"),
         512 * KIB,
     );
     fx.file(&format!("{h}/code/weatherly/package.json"), 4 * KIB);
@@ -453,6 +471,14 @@ fn the_mac_rules_find_what_the_prototype_proposes() {
         )],
         "running Slack's cache stays"
     );
+    assert_eq!(
+        t("m-appcache-other"),
+        vec![format!(
+            "{lib}/Application Support/Ledger App/Caches/accounts.db"
+        )],
+        "a plain Caches folder is only proposed for review"
+    );
+    assert!(!get(&proposals, "m-appcache-other").unwrap().default_on);
     assert_eq!(
         t("m-node"),
         vec!["Users/alex/code/weatherly/node_modules".to_owned()]

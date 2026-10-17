@@ -47,11 +47,14 @@ pub(super) enum Find {
     /// Known places. After the root, a name may be `*` (any folder) or `*.ext` (any folder ending so).
     Places(Vec<Place>),
     /// Folders with one of these names (any case) anywhere below `under`, not inside another match, code
-    /// libraries or `prune`.
+    /// libraries or `prune`. With `chromium`, a folder named just `Cache` or `Caches` counts only when it has
+    /// Chromium's layout: a `Cache_Data` folder inside, or a browser profile's folders beside it (`Local Storage`,
+    /// `IndexedDB`, `Code Cache`...).
     Named {
         names: &'static [&'static str],
         under: Vec<PathBuf>,
         prune: Vec<PathBuf>,
+        chromium: bool,
     },
     /// A project's dependency or build folder: a folder named `folder` (any case) whose parent has the `project`
     /// marker and the `proof`, in a project nobody has used for `idle_days`. Looked for below `under`, never
@@ -137,9 +140,10 @@ fn unlabelled(path: PathBuf) -> Place {
 }
 
 /// Folder names Electron apps, browsers and games use for caches they rebuild.
+/// Folder names Chromium, Electron and WebView2 use for the caches they rebuild. `Cache` only counts with
+/// Chromium's layout around it (see `Find::Named`).
 const APP_CACHES: &[&str] = &[
     "Cache",
-    "Caches",
     "Code Cache",
     "GPUCache",
     "DawnCache",
@@ -150,6 +154,9 @@ const APP_CACHES: &[&str] = &[
     "ShaderCache",
     "CachedData",
 ];
+
+/// Plain cache folder names, which apps other than browsers use as they like: proposed for review only.
+const PLAIN_CACHES: &[&str] = &["Cache", "Caches"];
 
 /// The temp folders the temp rule empties: only those called `Temp` or `tmp`. A `%TEMP%` pointed at some other
 /// folder (`C:\Users\me\Projects`, `C:\Tools`) is not a reason to empty it.
@@ -384,14 +391,41 @@ fn windows(env: &Env) -> Vec<Rule> {
                 under: app_data,
                 // Temp belongs to the temp rule, which leaves alone what was used in the last day.
                 prune: env.temp.clone(),
+                chromium: true,
             },
             skip: Skip::default(),
             build_output: false,
             text: Text {
                 title: "App caches",
-                summary: "Caches that {labels} rebuild on their own.",
-                why: "Apps fill these again as you use them. Your settings, sign-ins and files are elsewhere and are \
-                      untouched.",
+                summary: "Browser-engine caches that {labels} rebuild on their own.",
+                why: "Apps built on Chromium, Electron or WebView2 fill these again as you use them. Your settings, \
+                      sign-ins and files are elsewhere and are untouched.",
+            },
+        },
+        Rule {
+            id: "w-appcache-other",
+            category: CategoryId::Caches,
+            risk: Risk::Review,
+            regenerable: true,
+            default_on: None,
+            action: ActionKind::DeleteContents,
+            find: Find::Named {
+                names: PLAIN_CACHES,
+                under: vec![
+                    local.clone(),
+                    roaming.clone(),
+                    sub(home, "AppData/LocalLow"),
+                ],
+                prune: env.temp.clone(),
+                chromium: false,
+            },
+            skip: Skip::default(),
+            build_output: false,
+            text: Text {
+                title: "Other app caches",
+                summary: "Folders named Cache in {labels}.",
+                why: "Most apps keep only caches in folders with this name, but nothing guarantees it: an app may keep \
+                      data it can't fetch again there. Check the sample paths before adding this.",
             },
         },
         Rule {
@@ -578,6 +612,7 @@ fn macos(env: &Env) -> Vec<Rule> {
                 names: APP_CACHES,
                 under: vec![support.clone()],
                 prune: env.temp.clone(),
+                chromium: true,
             },
             skip: Skip {
                 running_apps: true,
@@ -586,9 +621,34 @@ fn macos(env: &Env) -> Vec<Rule> {
             build_output: false,
             text: Text {
                 title: "App caches",
-                summary: "Caches that {labels} rebuild on their own.",
-                why: "Apps fill these again as you use them. Apps that are running are left alone, and your settings \
-                      and files are untouched.",
+                summary: "Browser-engine caches that {labels} rebuild on their own.",
+                why: "Apps built on Chromium or Electron fill these again as you use them. Apps that are running are \
+                      left alone, and your settings and files are untouched.",
+            },
+        },
+        Rule {
+            id: "m-appcache-other",
+            category: CategoryId::Caches,
+            risk: Risk::Review,
+            regenerable: true,
+            default_on: None,
+            action: ActionKind::DeleteContents,
+            find: Find::Named {
+                names: PLAIN_CACHES,
+                under: vec![support.clone()],
+                prune: env.temp.clone(),
+                chromium: false,
+            },
+            skip: Skip {
+                running_apps: true,
+                ..Skip::default()
+            },
+            build_output: false,
+            text: Text {
+                title: "Other app caches",
+                summary: "Folders named Cache in {labels}.",
+                why: "Most apps keep only caches in folders with this name, but nothing guarantees it: an app may keep \
+                      data it can't fetch again there. Check the sample paths before adding this.",
             },
         },
         Rule {

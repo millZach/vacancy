@@ -594,13 +594,14 @@ impl Engine<'_> {
                 names,
                 under,
                 prune,
+                chromium,
             } => {
                 let prune: Vec<DirId> = prune.iter().filter_map(|p| self.locate(p)).collect();
                 for base in under {
                     let Some(base_dir) = self.locate(base) else {
                         continue;
                     };
-                    for dir in self.named_below(base_dir, names, &prune)? {
+                    for dir in self.named_below(base_dir, names, &prune, *chromium)? {
                         spots.push(Spot {
                             dir,
                             label: Some(self.owner(base_dir, dir)),
@@ -871,7 +872,13 @@ impl Engine<'_> {
     }
 
     /// Folders below `base` named one of `names`, not looking inside a match, code libraries or `prune`.
-    fn named_below(&mut self, base: DirId, names: &[&str], prune: &[DirId]) -> Option<Vec<DirId>> {
+    fn named_below(
+        &mut self,
+        base: DirId,
+        names: &[&str],
+        prune: &[DirId],
+        chromium: bool,
+    ) -> Option<Vec<DirId>> {
         let mut out = Vec::new();
         let mut stack = vec![base];
         while let Some(d) = stack.pop() {
@@ -885,7 +892,10 @@ impl Engine<'_> {
                     continue;
                 }
                 let key = name_key(name);
-                if names.iter().any(|n| n.eq_ignore_ascii_case(&key)) {
+                let plain = key == "cache" || key == "caches";
+                if names.iter().any(|n| n.eq_ignore_ascii_case(&key))
+                    && (!chromium || !plain || self.chromium_layout(c))
+                {
                     out.push(c);
                 } else {
                     stack.push(c);
@@ -893,6 +903,31 @@ impl Engine<'_> {
             }
         }
         Some(out)
+    }
+
+    /// Whether a folder named `Cache` is Chromium's disk cache: it holds `Cache_Data`, or sits in a browser
+    /// profile beside the profile's other stores.
+    fn chromium_layout(&self, dir: DirId) -> bool {
+        let snap = self.snap;
+        let has = |d: DirId, names: &[&str]| {
+            snap.children(d)
+                .any(|c| names.iter().any(|n| snap.name(c).eq_ignore_ascii_case(n)))
+        };
+        has(dir, &["Cache_Data"])
+            || snap.parent(dir).is_some_and(|p| {
+                has(
+                    p,
+                    &[
+                        "Local Storage",
+                        "Session Storage",
+                        "IndexedDB",
+                        "Service Worker",
+                        "blob_storage",
+                        "Code Cache",
+                        "GPUCache",
+                    ],
+                )
+            })
     }
 
     /// Project folders below `base`: a folder named `folder` beside the `project` marker, with the `proof` that
