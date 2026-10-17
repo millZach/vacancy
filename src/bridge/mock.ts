@@ -200,6 +200,8 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
       const run = history.find((r) => r.id === id);
       return run ? answer(run) : failure(`This run can’t be opened: the history has no run ${id}.`);
     },
+    // Browser fixtures never open host apps or claim an external launch succeeded.
+    openHint: () => failure('Steam can’t be opened from this fixture preview. No app was launched.'),
     unplug,
   };
 }

@@ -357,7 +357,11 @@ describe('the summary', () => {
     expect(plain(section('Reorganized').textContent)).toBe(
       'ReorganizedDownloads. 812 files moved. Every move is recorded.Desktop. 216 files moved. Every move is recorded.',
     );
-    expect(plain(section('Left for you').textContent)).toContain('Cyberpunk 2077 (not played in 14 months)71.0 GB in Steam.71 GB');
+    const advice = within(section('Left for you'));
+    expect(advice.getByText('Cyberpunk 2077 (not played in 14 months)')).toBeInTheDocument();
+    expect(advice.getByText('71.0 GB in Steam.')).toBeInTheDocument();
+    expect(advice.getByText(fullReport.leftForYou[0]!.why)).toBeInTheDocument();
+    expect(plain(section('Left for you').querySelector('.advice-num')?.textContent)).toBe('71 GB');
     const stat = (label: string) => plain(within(panel()).getByText(label).nextElementSibling?.textContent);
     expect(stat('files moved')).toBe('1,028');
   });

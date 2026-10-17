@@ -48,6 +48,7 @@ export function count(n: number, one: string, many = `${one}s`): string {
 export function headlineSub(r: RunReport): string {
   const took = formatDuration(r.durationMs);
   if (r.freedBytes <= 0 && r.movedItems <= 0 && r.deletedItems <= 0) {
+    if (r.steps.length === 0 && r.leftForYou.length > 0) return `${count(r.leftForYou.length, 'reminder')} saved. No files were deleted or moved, and no disk space was freed.`;
     return `${r.volumeName} is as it was: nothing in the plan could go this time. The next slides say why.`;
   }
   const did = [
@@ -76,7 +77,7 @@ export function diskSub(r: RunReport): string {
       ? `That’s ${growth.toFixed(1)} times the room you had.`
       : r.freeAfter > r.freeBefore
         ? `That’s ${formatBytes(r.freeAfter - r.freeBefore)} more room.`
-        : 'Other apps wrote to the drive while it ran, so free space didn’t grow.';
+        : r.freeAfter === r.freeBefore ? 'Free space stayed the same.' : 'Other apps wrote to the drive while it ran, so free space didn’t grow.';
   return `${room} ${r.volumeName} is ${after}% full now${after < before ? `, down from ${before}%` : ''}.`;
 }
 

@@ -53,6 +53,8 @@ export function RunPanel({ run, hot, onHot, onStop, onSeeChanges, onBack, onScan
 
   const share = plan.bytes > 0 ? Math.min(1, view.freedBytes / plan.bytes) : run.phase === 'running' ? 0 : 1;
   const current = view.steps[view.current];
+  const reminders = plan.leftForYou.length;
+  const adviceOnly = n === 0 && reminders > 0;
   const report = run.phase === 'ended' ? run.report : null;
   const ran = report ? report.steps.filter((s) => !neverReached(s.deletedItems, s.skipped)).length : 0;
   const somethingRan = view.steps.some((s) => s.status !== 'pending');
@@ -63,12 +65,12 @@ export function RunPanel({ run, hot, onHot, onStop, onSeeChanges, onBack, onScan
         <div>
           <h2>
             {run.phase === 'running'
-              ? 'Freeing space'
+              ? adviceOnly ? 'Saving reminders' : 'Freeing space'
               : run.phase === 'failed'
                 ? 'The run stopped'
                 : report?.cancelled
                   ? 'Stopped'
-                  : 'Done'}
+                  : adviceOnly ? 'Reminders saved' : 'Done'}
           </h2>
           {run.phase === 'failed' ? (
             <p className="run-error" role="alert">
@@ -81,10 +83,10 @@ export function RunPanel({ run, hot, onHot, onStop, onSeeChanges, onBack, onScan
                   ? 'Stopping after the file being deleted'
                   : current
                     ? `Step ${view.current + 1} of ${n}: ${current.title}`
-                    : 'Starting'
+                    : adviceOnly ? 'Saving advice to this run’s history. No files will be deleted.' : 'Starting'
                 : report?.cancelled
                   ? `You stopped the run. ${ran} of ${n} ${n === 1 ? 'step' : 'steps'} ran.`
-                  : n === 1
+                  : adviceOnly ? 'No files were deleted or moved.' : n === 1
                     ? 'The step finished.'
                     : `All ${n} steps finished.`}
             </p>
@@ -115,7 +117,7 @@ export function RunPanel({ run, hot, onHot, onStop, onSeeChanges, onBack, onScan
 
       <div className="run-log" ref={log} role="log" aria-label="Log" aria-live="off">
         {view.log.length === 0 && run.phase === 'running' && (
-          <div className="run-log-line is-sum">Checking every place again before it goes…</div>
+          <div className="run-log-line is-sum">{adviceOnly ? 'Saving the selected reminders…' : 'Checking every place again before it goes…'}</div>
         )}
         {view.log.slice(-LOG_SHOWN).map((l) => (
           <div key={l.id} className={`run-log-line is-${l.kind}`}>
@@ -128,8 +130,7 @@ export function RunPanel({ run, hot, onHot, onStop, onSeeChanges, onBack, onScan
         {run.phase === 'running' && (
           <div className="run-going">
             <p>
-              {view.skips > 0 ? `${formatCount(view.skips)} skipped so far. ` : ''}Keep using your computer; anything
-              open is skipped.
+              {adviceOnly ? 'No apps are opened and no files are changed.' : `${view.skips > 0 ? `${formatCount(view.skips)} skipped so far. ` : ''}Keep using your computer; anything open is skipped.`}
             </p>
             <button type="button" className="btn" onClick={onStop} disabled={run.stopping}>
               {run.stopping ? 'Stopping' : 'Stop'}
@@ -147,6 +148,7 @@ export function RunPanel({ run, hot, onHot, onStop, onSeeChanges, onBack, onScan
                       : ''
                   }.`}
             </p>
+            {reminders > 0 && <p>{reminders} {reminders === 1 ? 'reminder' : 'reminders'} left for you, not counted as freed space.</p>}
             <button type="button" className="cta run-cta" onClick={onSeeChanges}>
               See what changed
             </button>

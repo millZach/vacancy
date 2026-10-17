@@ -40,7 +40,8 @@ describe('the mock bridge', () => {
     if (c.status !== 'done' || d.status !== 'done') throw new Error('expected maps');
     expect(c.proposals.map((p) => p.id)).toEqual(fixtures.windows.proposals.map((p) => p.id));
     const tiles = c.overview.categories.flatMap((cat) => cat.items.filter((i) => i.kind === 'proposal'));
-    expect(tiles.map((t) => t.proposal).sort()).toEqual(c.proposals.map((p) => p.id).sort());
+    expect(tiles.map((t) => t.proposal).sort()).toEqual(c.proposals.filter((p) => p.action === 'delete').map((p) => p.id).sort());
+    expect(c.proposals.filter((p) => p.action === 'hint')).toEqual([expect.objectContaining({ bytes: 0, itemCount: 0, placeCount: 0, defaultOn: false })]);
     for (const t of tiles) expect(t.bytes).toBe(c.proposals.find((p) => p.id === t.proposal)!.bytes);
 
     const node = d.proposals.find((p) => p.id === 'w-node')!;
@@ -91,6 +92,7 @@ describe('the mock bridge', () => {
     const scanned = async (options = {}) => {
       const bridge = createMockBridge(fixtures.windows, { scanMs: 0, runMs: 0, ...options });
       await bridge.scan('C:\\', () => {});
+      await expect(bridge.buildPlan('C:\\', [])).rejects.toThrow('the plan has no selected proposals');
       return bridge;
     };
 

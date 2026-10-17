@@ -7,6 +7,7 @@ import { MapView, type TileLook } from '../map/MapView';
 import { layoutAtlas, type AtlasModel, type Leaf, type Rect } from '../map/model';
 import { useSize } from '../map/useSize';
 import { tileOf } from '../plan/totals';
+import { HintActionButton } from '../plan/HintActionButton';
 import { asSentence, neverReached } from '../run/progress';
 import { biggestWin, categoryOf, count, keptOf } from '../wrapped/deck';
 import { tokenMs } from '../wrapped/motion';
@@ -258,7 +259,9 @@ export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onCl
             <HeroNumber bytes={r.freedBytes} />
           </h1>
           <p className="summary-sub">
-            back on {r.volumeName}.
+            {r.steps.length === 0 && r.leftForYou.length > 0
+              ? `${r.leftForYou.length} ${r.leftForYou.length === 1 ? 'reminder' : 'reminders'} saved for you. No files were deleted or moved.`
+              : `back on ${r.volumeName}.`}
             {known &&
               ` Free space went from ${formatBytes(r.freeBefore)} to ${formatBytes(r.freeAfter)}${
                 growth >= 1.5 ? `, ${growth.toFixed(1)} times the room you started with.` : '.'
@@ -429,8 +432,10 @@ export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onCl
                   <span>
                     <b>{a.title}</b>
                     {a.summary}
+                    <span className="advice-why">{a.why}</span>
+                    {a.hintAction?.kind === 'steamUninstall' && <HintActionButton mountPoint={r.mountPoint} proposalId={a.id} />}
                   </span>
-                  <span className="advice-num">{formatBytes(a.bytes, 0)}</span>
+                  {a.bytes > 0 && <span className="advice-num">{formatBytes(a.bytes, 0)}</span>}
                 </li>
               ))}
             </ul>

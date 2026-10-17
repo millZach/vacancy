@@ -21,6 +21,13 @@ beforeEach(() => {
 });
 
 describe('the summary panel', () => {
+  it('keeps older advice without typed actions readable with its full explanation', () => {
+    const oldAdvice = { id: 'old-hint', title: 'Old game advice', summary: 'Review it in its store.', why: 'Use the store so its library remains consistent.', bytes: 71e9 };
+    renderPanel({ ...report, leftForYou: [oldAdvice] });
+    expect(screen.getByText(oldAdvice.why)).toBeInTheDocument();
+    expect(screen.getByText(oldAdvice.summary)).toBeInTheDocument();
+    expect(screen.getByText('Tips aren’t counted in freed space. Vacancy can’t do them for you.')).toBeInTheDocument();
+  });
   it('leads with what was freed, on which drive, and free space before and after', () => {
     renderPanel();
     expect(screen.getByRole('heading', { level: 1 })).toHaveAccessibleName(/^26\.9\sGB freed$/);

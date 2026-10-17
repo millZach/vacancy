@@ -398,6 +398,7 @@ export function Atlas({ drives, agent, planOpen, onPlanOpen }: Props) {
       {planning && (
         <PlanTray
           key={overview.volume.mountPoint}
+          mountPoint={overview.volume.mountPoint}
           proposals={proposals}
           plan={plan}
           agent={agent}

@@ -47,7 +47,7 @@ export interface MockPlan {
 /**
  * The plan for proposals `ids` of a drive's scan: one step per delete proposal, biggest first, its places spread from
  * the proposal's sample paths. Places the fixture says changed since the scan are left out and listed in `refused`.
- * Advice and tools can't be carried out, so they are left for the user.
+ * Hints are saved as reminders, never as deletion steps or freed space.
  */
 export function makePlan(
   id: string,
@@ -60,6 +60,7 @@ export function makePlan(
   const unknown = ids.find((i) => !proposals.some((p) => p.id === i));
   if (unknown !== undefined) throw new Error(`there is no proposal ${unknown} in this scan`);
   const chosen = proposals.filter((p) => ids.includes(p.id));
+  if (chosen.length === 0) throw new Error('the plan has no selected proposals');
   const steps = chosen
     .filter((p) => p.action === 'delete')
     .map((p): MockStep => {
@@ -85,8 +86,8 @@ export function makePlan(
     places: s.places.length,
   }));
   const advice = chosen
-    .filter((p) => p.action !== 'delete')
-    .map((p): LeftForYou => ({ id: p.id, title: p.title, summary: p.summary, why: p.why, bytes: p.bytes }));
+    .filter((p) => p.action === 'hint')
+    .map((p): LeftForYou => ({ id: p.id, title: p.title, summary: p.summary, why: p.why, bytes: 0, hintAction: p.hintAction ?? null }));
   return {
     steps,
     advice,

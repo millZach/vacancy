@@ -120,4 +120,6 @@ export interface Bridge {
   listRuns(): Promise<RunHistory>;
   /** A kept run, as it was saved: everything its highlight slides and summary show. */
   openRun(id: string): Promise<RunReport>;
+  /** Opens only a trusted Steam hint from a retained scan. Never accepts a URL or runs as part of a plan. */
+  openHint(mountPoint: string, proposalId: string): Promise<void>;
 }

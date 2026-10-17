@@ -709,7 +709,13 @@ export const fixtures = {
     ],
     fullDiskAccess: 'notApplicable',
     overview: win.overview,
-    proposals: winProposals,
+    proposals: [...winProposals, {
+      id: 'w-steam-advice', category: 'apps', title: 'Cyberpunk 2077 (not played for 430 days)',
+      summary: 'Use Steam to uninstall this game if you no longer play it.',
+      why: 'Uninstall from Steam so its library stays consistent. Vacancy won’t delete the game or open Steam during a run.',
+      bytes: 0, itemCount: 0, placeCount: 0, risk: 'review', source: 'rule', aiNote: null,
+      action: 'hint', hintAction: { kind: 'steamUninstall', appId: 1091500 }, regenerable: false, samplePaths: [], defaultOn: false,
+    }],
     folders: win.folders,
     runSkips: [
       {
@@ -761,7 +767,13 @@ export const fixtures = {
     volumes: [macVolume, drive('Samsung T7', '/Volumes/Samsung T7', 'external', false, 1000, 380)],
     fullDiskAccess: 'missing',
     overview: mac.overview,
-    proposals: macProposals,
+    proposals: [...macProposals, {
+      id: 'm-logic-advice', category: 'apps', title: 'Logic Pro sound library',
+      summary: 'Remove sounds you don’t use from inside Logic Pro.',
+      why: "In Logic Pro, open Sound Library and review your downloaded content (Manage Packs in Logic Pro 12; Sound Library Manager in earlier versions). Use the app's controls for content you no longer need, or relocate the library through Logic. Existing projects may need these sounds. Shared or cloned content means the library's size is not a promise of space recovered.",
+      bytes: 0, itemCount: 0, placeCount: 0, risk: 'review', source: 'rule', aiNote: null,
+      action: 'hint', hintAction: { kind: 'logicInstructions' }, regenerable: false, samplePaths: [], defaultOn: false,
+    }],
     folders: mac.folders,
     runSkips: [
       {

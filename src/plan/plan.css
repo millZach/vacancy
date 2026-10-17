@@ -66,6 +66,14 @@
   font-size: var(--text-sm);
   color: var(--color-text-3);
 }
+.tray-group-note {
+  margin: var(--space-2) 0;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--color-text-3);
+}
+.hint-action { display: block; margin: var(--space-3) 0; }
+.hint-action-error { display: block; margin-top: var(--space-2); color: var(--color-review); font-size: var(--text-sm); line-height: 1.45; }
 
 .tray-row {
   display: grid;
