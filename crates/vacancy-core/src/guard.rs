@@ -975,30 +975,39 @@ mod tests {
         let mnt = fx.at("Users/alex/code/mnt");
         let images = tempfile::tempdir().unwrap();
         let image = images.path().join("vacancy-test.dmg");
-        let made = Command::new("hdiutil")
-            .args([
-                "create",
-                "-quiet",
-                "-size",
-                "4m",
-                "-fs",
-                "HFS+",
-                "-volname",
-                "VacancyTest",
-            ])
-            .arg(&image)
-            .status();
-        if !made.is_ok_and(|s| s.success()) {
-            eprintln!("skipped: hdiutil couldn't make a disk image");
+        // Skipped where hdiutil can't do it, except in CI, where it must: there the test has to run.
+        let ran = |what: &str, cmd: &mut Command| -> bool {
+            match cmd.output() {
+                Ok(out) if out.status.success() => true,
+                out => {
+                    let why = match out {
+                        Ok(out) => String::from_utf8_lossy(&out.stderr).into_owned(),
+                        Err(e) => e.to_string(),
+                    };
+                    assert!(std::env::var_os("CI").is_none(), "hdiutil {what}: {why}");
+                    eprintln!("skipped: hdiutil {what}: {why}");
+                    false
+                }
+            }
+        };
+        let made = ran(
+            "create",
+            Command::new("hdiutil")
+                .args(["create", "-quiet", "-size", "4m", "-fs", "HFS+"])
+                .args(["-volname", "VacancyTest"])
+                .arg(&image),
+        );
+        if !made {
             return;
         }
-        let attached = Command::new("hdiutil")
-            .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
-            .arg(&mnt)
-            .arg(&image)
-            .status();
-        if !attached.is_ok_and(|s| s.success()) {
-            eprintln!("skipped: hdiutil couldn't mount the disk image");
+        let attached = ran(
+            "attach",
+            Command::new("hdiutil")
+                .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
+                .arg(&mnt)
+                .arg(&image),
+        );
+        if !attached {
             return;
         }
         let _detach = Detach(mnt.clone());

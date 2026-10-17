@@ -716,6 +716,15 @@ mod tests {
         );
     }
 
+    /// Takes away a link `link_dir` put: a symlink is a file on Unix, a junction a folder on Windows.
+    fn unlink_dir(link: &Path) {
+        if cfg!(windows) {
+            std::fs::remove_dir(link).unwrap();
+        } else {
+            std::fs::remove_file(link).unwrap();
+        }
+    }
+
     /// A folder a walker keeps open is never reused once its path no longer leads to it: renamed and replaced by a
     /// link, or with a link put in for a folder above it, the path is refused; replaced by another folder, the
     /// answer is the new folder's.
@@ -740,7 +749,7 @@ mod tests {
         );
 
         // Back in place, and the folder above it renamed and linked instead.
-        std::fs::remove_dir(&cache).unwrap();
+        unlink_dir(&cache);
         std::fs::rename(&moved, &cache).unwrap();
         assert!(walker.chain(&cache.join("a")).is_some());
         let x_moved = root.join("x-old");
@@ -748,7 +757,7 @@ mod tests {
             Ok(()) => {
                 link_dir(&x, &x_moved);
                 assert!(walker.chain(&cache.join("c")).is_none(), "a link above it");
-                std::fs::remove_dir(&x).unwrap();
+                unlink_dir(&x);
                 std::fs::rename(&x_moved, &x).unwrap();
                 assert!(walker.chain(&cache.join("a")).is_some());
             }
