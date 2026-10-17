@@ -61,6 +61,13 @@ pub(crate) struct Volume {
     serial: Option<u64>,
 }
 
+impl Volume {
+    /// The volume's serial number, which with a file id names a file: `None` where the volume has no file ids.
+    pub(crate) fn id(&self) -> Option<u64> {
+        self.serial
+    }
+}
+
 pub(crate) fn roots(path: &Path) -> io::Result<Vec<RootSpec>> {
     let real = plain(path);
     if !std::fs::symlink_metadata(&real)?.is_dir() {
@@ -390,7 +397,7 @@ impl Scratch {
             allocated = real;
         }
         let identity = match kind {
-            EntryKind::Dir | EntryKind::CloudDir => raw.file_id,
+            EntryKind::Dir | EntryKind::CloudDir | EntryKind::File => raw.file_id,
             _ => None,
         };
         let link_key = match (kind, raw.file_id) {
@@ -405,10 +412,16 @@ impl Scratch {
             name: OsStr::new(self.name.as_str()),
             kind,
             allocated,
+            logical: if kind == EntryKind::File {
+                u64::try_from(raw.end_of_file).unwrap_or(0)
+            } else {
+                0
+            },
             modified: unix_time(raw.modified),
             accessed: unix_time(raw.accessed),
             link_key,
             identity,
+            key: raw.file_id.unwrap_or(0),
         }
     }
 

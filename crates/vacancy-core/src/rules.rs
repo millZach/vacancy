@@ -165,6 +165,8 @@ pub struct Proposals {
     list: Vec<Proposal>,
     targets: Vec<Vec<ItemRef>>,
     kinds: Vec<ActionKind>,
+    /// Per proposal: its rule takes Xcode's DerivedData, whose build products are apps (see the catalog).
+    built_apps: Vec<bool>,
 }
 
 impl Proposals {
@@ -182,6 +184,12 @@ impl Proposals {
     /// How proposal `index` acts.
     pub fn kind(&self, index: usize) -> ActionKind {
         self.kinds[index]
+    }
+
+    /// Whether proposal `index` may take a folder holding a macOS app bundle: only Xcode's DerivedData, whose
+    /// build products are the apps Xcode builds. The executor applies the same exception when it looks again.
+    pub(crate) fn takes_built_apps(&self, index: usize) -> bool {
+        self.built_apps[index]
     }
 
     /// The index of the proposal with this id.
@@ -265,7 +273,7 @@ pub(crate) fn propose_until(
         checks: 0,
     };
     // Each proposal travels with its targets and kind as one entry, so sorting can't separate them.
-    let mut entries: Vec<(Proposal, Vec<ItemRef>, ActionKind)> = Vec::new();
+    let mut entries: Vec<(Proposal, Vec<ItemRef>, ActionKind, bool)> = Vec::new();
     for rule in catalog::rules(env) {
         let found = engine.run(&rule)?;
         if found.bytes == 0 {
@@ -276,14 +284,16 @@ pub(crate) fn propose_until(
             proposal,
             found.targets.into_iter().map(|t| t.at).collect(),
             rule.action,
+            rule.takes_built_apps,
         ));
     }
-    entries.sort_by_key(|(p, _, _)| std::cmp::Reverse(p.bytes));
+    entries.sort_by_key(|(p, ..)| std::cmp::Reverse(p.bytes));
     let mut out = Proposals::default();
-    for (proposal, targets, kind) in entries {
+    for (proposal, targets, kind, built_apps) in entries {
         out.list.push(proposal);
         out.targets.push(targets);
         out.kinds.push(kind);
+        out.built_apps.push(built_apps);
     }
     Some(out)
 }
@@ -389,9 +399,11 @@ impl<'a> Guarded<'a> {
         let Some(step) = chain.len().checked_sub(from_end).and_then(|i| chain.get(i)) else {
             return false;
         };
-        self.snap
-            .identity(scanned)
-            .is_none_or(|id| step.id.matches_scan(id))
+        // The whole identity, volume included: another disk at the same letter has the same file ids.
+        match self.snap.identity(scanned) {
+            None => true,
+            Some(_) => self.snap.dir_identity(scanned) == Some(step.id),
+        }
     }
 
     /// Whether `at` may be deleted: the Guard allows its path, and nothing the scan saw in or around it is
@@ -1217,7 +1229,7 @@ impl Engine<'_> {
 }
 
 /// A folder's loose files: its files minus the ones kept individually.
-fn loose(snap: &Snapshot, dir: DirId) -> (u64, u64) {
+pub(crate) fn loose(snap: &Snapshot, dir: DirId) -> (u64, u64) {
     let own = snap.own(dir);
     let (mut bytes, mut files) = (own.bytes, own.files);
     for f in snap.files(dir) {

@@ -1,7 +1,7 @@
 import { HardDrive, Usb } from 'lucide-react';
 import type { DriveKind, VolumeInfo } from '../bridge';
 import { formatBytes, timeAgo } from '../format';
-import { reclaimableOf, type DriveScan } from './session';
+import { reclaimableOf, reportOf, type DriveScan } from './session';
 import './drives.css';
 
 /** Why the drive menu is shut while a plan runs. */
@@ -55,20 +55,25 @@ export function UsageBar({
 }
 
 /**
- * "Not scanned yet", "Scanning now" or "Scanned 4 min ago, 120 GB to reclaim", with a dot that lights once the drive
- * has a scan.
+ * "Not scanned yet", "Scanning now", "Scanned 4 min ago, 120 GB to reclaim", "Cleaning up now" or "Freed 74 GB 2 min
+ * ago", with a dot that lights once the drive has a scan.
  */
 export function DriveStatus({ scan, now, id }: { scan: DriveScan; now: number; id?: string }) {
   const lit = scan.phase === 'done' ? ' is-scanned' : scan.phase === 'scanning' ? ' is-scanning' : '';
-  const reclaim = reclaimableOf(scan);
   return (
     <span className={`drive-status${lit}`} id={id}>
       <i aria-hidden />
-      {scan.phase === 'done'
-        ? `Scanned ${timeAgo(scan.at, now)}${reclaim > 0 ? `, ${formatBytes(reclaim, 0)} to reclaim` : ''}`
-        : scan.phase === 'scanning'
-          ? 'Scanning now'
-          : 'Not scanned yet'}
+      {statusText(scan, now)}
     </span>
   );
+}
+
+function statusText(scan: DriveScan, now: number): string {
+  if (scan.phase === 'scanning') return 'Scanning now';
+  if (scan.phase !== 'done') return 'Not scanned yet';
+  if (scan.planRun?.phase === 'running') return 'Cleaning up now';
+  const report = reportOf(scan);
+  if (report) return `Freed ${formatBytes(report.freedBytes, 0)} ${timeAgo(report.startedAt + report.durationMs, now)}`;
+  const reclaim = reclaimableOf(scan);
+  return `Scanned ${timeAgo(scan.at, now)}${reclaim > 0 ? `, ${formatBytes(reclaim, 0)} to reclaim` : ''}`;
 }

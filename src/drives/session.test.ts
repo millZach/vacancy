@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { fixtures, type Overview, type VolumeInfo } from '../bridge';
-import { EMPTY, reclaimableBytes, reclaimableOf, reduce, scanOf, shownVolume, type Action, type Session } from './session';
+import { plan as samplePlan, report as sampleReport } from '../test/run';
+import {
+  EMPTY,
+  reclaimableBytes,
+  reclaimableOf,
+  reduce,
+  reportOf,
+  scanOf,
+  shownVolume,
+  type Action,
+  type Session,
+} from './session';
 
 const [C, D, E] = fixtures.windows.volumes as [VolumeInfo, VolumeInfo, VolumeInfo];
 
@@ -193,5 +204,112 @@ describe('each drive’s plan', () => {
     const s = run(start, ...scanned(C, 1));
     expect(reclaimableOf(scanOf(s, C.mountPoint))).toBe(total);
     expect(reclaimableOf(scanOf(s, D.mountPoint))).toBe(0);
+  });
+});
+
+describe('each drive’s run and summary', () => {
+  const runOf = (s: Session, volume: VolumeInfo) => {
+    const scan = scanOf(s, volume.mountPoint);
+    return scan.phase === 'done' ? scan.planRun : undefined;
+  };
+  const planFor = (volume: VolumeInfo, id = 'plan-1') => ({ ...samplePlan, id, mountPoint: volume.mountPoint });
+  const started = (volume: VolumeInfo, id = 'plan-1'): Action => ({
+    type: 'runStarted',
+    mountPoint: volume.mountPoint,
+    plan: planFor(volume, id),
+  });
+  const ended = (volume: VolumeInfo, id = 'plan-1'): Action => ({
+    type: 'runEnded',
+    mountPoint: volume.mountPoint,
+    planId: id,
+    report: { ...sampleReport, planId: id, mountPoint: volume.mountPoint },
+  });
+  const events = (volume: VolumeInfo, id = 'plan-1'): Action => ({
+    type: 'runEvents',
+    mountPoint: volume.mountPoint,
+    planId: id,
+    events: [
+      { kind: 'stepStarted', step: 0, id: 'w-node' },
+      { kind: 'progress', step: 0, freedBytes: 3e9, deletedItems: 10, totalFreedBytes: 3e9, currentPath: 'C:\\a' },
+    ],
+  });
+
+  it('locks drive switching and scanning while the plan runs, and follows its events', () => {
+    const s = run(start, ...scanned(C, 1), started(C), events(C));
+    expect(s.locked).toBe(true);
+    const r = runOf(s, C);
+    expect(r?.phase).toBe('running');
+    expect(r?.phase === 'running' && r.view.freedBytes).toBe(3e9);
+    expect(run(s, { type: 'switch', mountPoint: D.mountPoint })).toBe(s);
+    expect(run(s, { type: 'showScanScreen' })).toBe(s);
+    expect(run(s, { type: 'scanStarted', mountPoint: C.mountPoint, run: 2 })).toBe(s);
+    // Its proposals are spent: the plan can't change, and there is nothing left to reclaim.
+    expect(run(s, { type: 'plan', mountPoint: C.mountPoint, id: 'w-node', on: false })).toBe(s);
+    expect(reclaimableOf(scanOf(s, C.mountPoint))).toBe(0);
+  });
+
+  it('marks Stop, then ends with the report, unlocked, and opens the summary on "See what changed"', () => {
+    let s = run(start, ...scanned(C, 1), started(C), { type: 'runStopping', mountPoint: C.mountPoint });
+    const r = runOf(s, C);
+    expect(r?.phase === 'running' && r.stopping).toBe(true);
+
+    s = run(s, ended(C));
+    expect(s.locked).toBe(false);
+    expect(runOf(s, C)?.phase).toBe('ended');
+    expect(reportOf(scanOf(s, C.mountPoint))?.freedBytes).toBe(sampleReport.freedBytes);
+    // The drive's figures are its own from the end of the run.
+    expect(shownVolume(s, C).freeBytes).toBe(sampleReport.freeAfter);
+
+    s = run(s, { type: 'showSummary', mountPoint: C.mountPoint });
+    expect(runOf(s, C)?.phase).toBe('summary');
+    expect(s.screen).toBe('map');
+  });
+
+  it('ignores another plan’s events and ending, and a start while one runs', () => {
+    const s = run(start, ...scanned(C, 1), started(C));
+    expect(run(s, events(C, 'plan-9'))).toBe(s);
+    expect(run(s, started(C, 'plan-2'))).toBe(s);
+    const other = run(s, ended(C, 'plan-9'));
+    expect(runOf(other, C)?.phase).toBe('running');
+  });
+
+  it('says why a run failed, unlocks, and goes back to the plan', () => {
+    let s = run(start, ...scanned(C, 1), started(C), {
+      type: 'runFailed',
+      mountPoint: C.mountPoint,
+      planId: 'plan-1',
+      message: 'a plan is already running',
+    });
+    expect(s.locked).toBe(false);
+    const r = runOf(s, C);
+    expect(r?.phase === 'failed' && r.message).toBe('a plan is already running');
+    expect(reclaimableOf(scanOf(s, C.mountPoint))).toBeGreaterThan(0);
+    s = run(s, { type: 'leaveRun', mountPoint: C.mountPoint });
+    expect(runOf(s, C)).toBeNull();
+  });
+
+  it('keeps a drive’s summary until it is scanned again, and other drives keep theirs', () => {
+    let s = run(start, ...scanned(C, 1), started(C), ended(C), { type: 'showSummary', mountPoint: C.mountPoint });
+    s = run(s, { type: 'switch', mountPoint: D.mountPoint }, ...scanned(D, 2));
+    expect(runOf(s, D)).toBeNull();
+    s = run(s, started(D, 'plan-2'), ended(D, 'plan-2'), { type: 'showSummary', mountPoint: D.mountPoint });
+
+    // Back to C:: its summary is still there.
+    s = run(s, { type: 'switch', mountPoint: C.mountPoint });
+    expect(s.screen).toBe('map');
+    expect(runOf(s, C)?.phase).toBe('summary');
+    expect(runOf(s, D)?.phase).toBe('summary');
+
+    // Scanning C: again starts afresh; D: keeps its summary.
+    s = run(s, { type: 'showScanScreen' }, ...scanned(C, 3));
+    expect(runOf(s, C)).toBeNull();
+    expect(reclaimableOf(scanOf(s, C.mountPoint))).toBeGreaterThan(0);
+    expect(runOf(s, D)?.phase).toBe('summary');
+  });
+
+  it('unlocks when a run ends even if its drive went away meanwhile', () => {
+    const s = run(start, { type: 'switch', mountPoint: E.mountPoint }, ...scanned(E, 1), started(E), listed([C, D]));
+    expect(s.locked).toBe(true);
+    expect(run(s, ended(E)).locked).toBe(false);
   });
 });

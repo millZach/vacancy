@@ -1,0 +1,368 @@
+/* Variant D's resting summary: the Before/After swipe map, and the panel of what the run did (in the tray's frame). */
+
+/* ---------- the swipe ---------- */
+.seg {
+  display: inline-flex;
+  flex: none;
+  padding: 2px;
+  border-radius: var(--radius-md);
+  background: var(--color-seg);
+  border: 1px solid var(--color-line);
+}
+.seg button {
+  border: 0;
+  background: none;
+  padding: 4px 13px 3px;
+  border-radius: var(--radius-sm);
+  font: 600 var(--text-sm) var(--font-sans);
+  color: var(--color-text-2);
+  cursor: pointer;
+}
+.seg button.is-on {
+  background: var(--color-seg-on);
+  color: var(--color-text);
+}
+.toolbar-hint {
+  min-width: 0;
+  color: var(--color-text-3);
+  font-size: var(--text-sm);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.summary-stage {
+  --split: 0;
+}
+/* Each map is its own stacking context, so a lit tile in the Before map never rises over the After map. */
+.summary-before,
+.summary-after {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+.summary-after {
+  z-index: 2;
+  clip-path: inset(0 calc((1 - var(--split)) * 100%) 0 0);
+}
+.swipe {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--split) * 100%);
+  z-index: 8;
+  width: 0;
+  pointer-events: none;
+}
+.swipe::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -1px;
+  width: 2px;
+  background: var(--color-swipe);
+  box-shadow: var(--glow-swipe);
+}
+.swipe-tag {
+  position: absolute;
+  top: calc(50% - 44px);
+  padding: 3px 9px 2px;
+  border-radius: var(--radius-pill);
+  background: var(--color-swipe-tag);
+  font: 700 var(--text-2xs) / 1.4 var(--font-sans);
+  color: var(--color-text);
+  white-space: nowrap;
+}
+.swipe-tag--l {
+  right: 12px;
+}
+.swipe-tag--r {
+  left: 12px;
+}
+.swipe-knob {
+  position: absolute;
+  top: 50%;
+  left: clamp(18px, calc(var(--split) * 100%), calc(100% - 18px));
+  z-index: 9;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--color-swipe);
+  box-shadow: var(--shadow-knob);
+  transform: translate(-50%, -50%);
+  cursor: ew-resize;
+  touch-action: none;
+}
+.swipe-knob span {
+  width: 10px;
+  height: 11px;
+  border-left: 2px solid var(--color-swipe-grip);
+  border-right: 2px solid var(--color-swipe-grip);
+}
+.swipe-knob:focus-visible {
+  outline: 2px solid var(--color-neon);
+  outline-offset: 3px;
+}
+
+/* ---------- the panel ---------- */
+.tray.summary {
+  width: var(--summary-w);
+}
+.summary-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: var(--space-5);
+}
+.summary-hero {
+  padding: 24px 24px 4px;
+}
+.summary-num {
+  margin: 0;
+  font: 200 var(--text-hero) / 0.92 var(--font-sans);
+  letter-spacing: -0.05em;
+  color: var(--color-neon-ink);
+  text-shadow: var(--glow-hero);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  animation: neon-on 1.3s linear both 0.4s;
+}
+.summary-frac {
+  font-size: 0.5em;
+  letter-spacing: -0.02em;
+}
+.summary-unit {
+  margin-left: 0.3em;
+  font-size: 0.24em;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--color-hero-unit);
+}
+.summary-sub {
+  max-width: 36ch;
+  margin: 12px 0 0;
+  font-size: var(--text-md);
+  line-height: 1.5;
+  color: var(--color-text-2);
+}
+.summary-note {
+  max-width: 44ch;
+  margin: var(--space-3) 0 0;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--color-text-3);
+}
+.summary-note.is-stopped {
+  color: var(--color-review);
+}
+
+.diskba {
+  display: grid;
+  gap: var(--space-3);
+  padding: 16px 24px 4px;
+}
+.diskbar {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  gap: var(--space-4);
+  align-items: center;
+  font-size: var(--text-sm);
+}
+.diskbar-label {
+  color: var(--color-text-3);
+}
+.diskbar-track {
+  display: flex;
+  height: 10px;
+  border-radius: 3px;
+  background: var(--ground);
+  box-shadow: inset 0 0 0 1px var(--color-line-2);
+  overflow: hidden;
+}
+.diskbar-used {
+  display: block;
+  height: 100%;
+  background: var(--color-meter);
+}
+.diskbar-freed {
+  display: block;
+  height: 100%;
+  background: var(--color-freed-fill);
+  box-shadow: var(--edge-freed);
+}
+.diskbar-num {
+  min-width: 92px;
+  text-align: right;
+  color: var(--color-text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 16px 24px 2px;
+  padding: 12px 0;
+  border-top: 1px solid var(--color-line);
+  border-bottom: 1px solid var(--color-line);
+}
+.stats div {
+  display: flex;
+  flex-direction: column-reverse;
+  justify-content: flex-end;
+}
+.stats dd {
+  margin: 0;
+  font: 600 var(--text-stat) / 1.2 var(--font-sans);
+  letter-spacing: -0.01em;
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.stats dt {
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  color: var(--color-text-3);
+}
+
+.summary-sec {
+  padding: 16px 24px 2px;
+}
+.summary-sec h3 {
+  margin: 0 0 9px;
+  font: 700 var(--text-ui) var(--font-sans);
+  color: var(--color-text);
+}
+
+.win {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  padding: 12px var(--space-5);
+  border: 1px solid var(--color-win-edge);
+  border-radius: var(--radius-lg);
+  background: var(--color-win);
+}
+.win-num {
+  font: 300 var(--text-win) / 1 var(--font-sans);
+  letter-spacing: -0.025em;
+  color: var(--color-neon-ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.win-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.win-text b {
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--color-text);
+}
+.win-text span {
+  font-size: var(--text-sm);
+  color: var(--color-text-2);
+}
+
+.cats,
+.skips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.cats {
+  display: grid;
+  gap: 11px;
+}
+.cats li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px 12px;
+  align-items: center;
+}
+.cat-name {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--text-ui);
+  color: var(--color-text);
+}
+.cat-name i {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  background: oklch(var(--map-chip-l) var(--map-chip-c) var(--h));
+}
+.cat-num {
+  font: 700 var(--text-ui) var(--font-sans);
+  color: var(--color-neon-ink);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.cat-bar {
+  display: flex;
+  height: 7px;
+  border-radius: 2px;
+  overflow: hidden;
+}
+.cat-kept {
+  display: block;
+  height: 100%;
+  background: oklch(var(--map-kept-l) var(--map-kept-c) var(--h));
+}
+.cat-freed {
+  display: block;
+  height: 100%;
+  background: var(--color-freed-fill);
+  box-shadow: var(--edge-freed-thin);
+}
+.cat-ba {
+  font-size: var(--text-2xs);
+  color: var(--color-text-3);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.skips li {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 9px;
+  padding: var(--space-2) 0;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--color-text-2);
+}
+.skips li svg {
+  margin-top: 2px;
+  color: var(--color-review);
+}
+.skips b {
+  color: var(--color-text);
+  font-weight: 600;
+}
+.skips code {
+  display: block;
+  margin-top: 3px;
+  font: 400 var(--text-2xs) / 1.45 var(--font-mono);
+  color: var(--color-text-3);
+  word-break: break-all;
+}
+.skips-more {
+  color: var(--color-text-3);
+}
+
+.summary-foot {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 24px;
+  border-top: 1px solid var(--color-line);
+}

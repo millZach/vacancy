@@ -50,6 +50,16 @@
     opacity: 0;
   }
 }
+/* While a run frees space, tiles resize with each batch of its events, at the pace of their fills draining. */
+.map.is-freeing .map-region,
+.map.is-freeing .map-tile {
+  transition:
+    left var(--drain),
+    top var(--drain),
+    width var(--drain),
+    height var(--drain),
+    opacity 0.35s ease;
+}
 
 .map-region {
   border-radius: 5px;
@@ -118,13 +128,19 @@
   border-radius: inherit;
   pointer-events: none;
 }
+/* The tile's colour, anchored at the bottom: while a run deletes the tile it drains from the top. */
 .map-fill {
   position: absolute;
-  inset: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 100%;
   background: oklch(
     calc(var(--map-tile-l) + var(--shade, 0) * var(--map-tile-step)) var(--map-tile-c) var(--h)
   );
-  transition: filter 0.15s;
+  transition:
+    filter 0.15s,
+    height var(--drain);
 }
 .map-tile.is-locked .map-fill {
   background: oklch(
@@ -370,4 +386,90 @@
 .key-reclaim {
   background: var(--key-reclaim-fill);
   box-shadow: var(--glow-key-reclaim);
+}
+.key-vacant {
+  background: var(--ground);
+  border: 1.5px dashed var(--color-neon);
+}
+
+/* ---------- a running plan: queued, draining, vacant ---------- */
+.map-tile.is-queued {
+  z-index: 2;
+}
+.map-tile.is-queued::after {
+  box-shadow: var(--edge-queued);
+}
+.map-tile.is-running {
+  z-index: 3;
+  box-shadow: var(--glow-running);
+}
+.map-tile.is-running::after {
+  box-shadow: var(--edge-running);
+}
+.map-tile.is-running .map-fill {
+  border-top: 2px solid var(--color-neon);
+  box-shadow: var(--glow-drain);
+}
+.map-tile.is-vacant {
+  z-index: 2;
+}
+.map-tile.is-vacant::after {
+  border: 1.5px dashed var(--color-vacant-edge);
+}
+.map-tile.is-vacant.is-lit {
+  box-shadow: var(--glow-vacant);
+}
+.map-tile.is-vacant.is-lit::after {
+  box-shadow: var(--glow-vacant-in);
+  animation: neon-on 0.9s linear both;
+}
+.map-tile.is-vacant .map-name {
+  color: var(--color-text-2);
+}
+/* What a cleared tile freed, in place of its size. */
+.map-freed {
+  color: var(--color-neon-ink);
+  font-weight: 700;
+}
+
+/* The free-space tile's figure while a run adds to it. */
+.free-grow {
+  color: var(--color-neon-ink);
+  font-weight: 700;
+  text-shadow: var(--glow-reclaim-text);
+}
+
+/* The sign on a cleared tile in the summary's After map. */
+.vacant {
+  position: relative;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: var(--space-2) 9px;
+  min-width: 0;
+  pointer-events: none;
+}
+.vacant-word {
+  padding: 4px 0 2px;
+  font: 400 var(--text-vacant) / 0.9 var(--font-script);
+  color: var(--color-neon-ink);
+  text-shadow: var(--glow-neon-text);
+  opacity: 0;
+}
+.is-lit .vacant-word {
+  animation: neon-on 0.9s linear both 0.05s;
+}
+.vacant-num {
+  font: 700 var(--text-ui) / 1.2 var(--font-sans);
+  color: var(--color-neon-ink);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.vacant-was {
+  font-size: var(--text-2xs);
+  color: var(--color-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

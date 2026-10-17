@@ -1,0 +1,243 @@
+/* Variant D's run panel (where the plan tray was: it reuses the tray's frame and head) and the confirm dialog. */
+
+.tray-head .run-error {
+  color: var(--color-careful);
+}
+
+.run-counter {
+  flex: none;
+  padding: 16px var(--space-6) 15px;
+  border-bottom: 1px solid var(--color-line);
+}
+.run-counter-num {
+  display: block;
+  font: 200 var(--text-counter) / 1 var(--font-sans);
+  letter-spacing: -0.035em;
+  color: var(--color-neon-ink);
+  text-shadow: var(--glow-counter);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.run-counter-of {
+  display: block;
+  margin-top: var(--space-2);
+  font-size: var(--text-ui);
+  color: var(--color-text-2);
+}
+.run-meter {
+  position: relative;
+  display: block;
+  height: 4px;
+  margin-top: 13px;
+  border-radius: 2px;
+  background: var(--color-meter-track);
+  overflow: hidden;
+}
+.run-meter i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: var(--color-neon);
+  box-shadow: var(--glow-meter);
+  transition: width var(--drain);
+}
+
+.run-steps {
+  flex: 0 1 auto;
+  max-height: 44%;
+  margin: 0;
+  padding: var(--space-3) var(--space-4);
+  list-style: none;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--color-line);
+}
+.run-step {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  gap: 3px 9px;
+  align-items: center;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-ui);
+}
+.run-step.is-pending {
+  color: var(--color-text-3);
+}
+.run-step.is-running {
+  background: var(--color-step-on);
+}
+.run-step.is-done {
+  color: var(--color-text-2);
+}
+.run-step.is-hot:not(.is-running) {
+  background: var(--color-row-hover);
+}
+.run-step-icon {
+  display: grid;
+  place-items: center;
+  color: var(--color-text-3);
+}
+.run-step-icon i {
+  width: 7px;
+  height: 7px;
+  border: 1.5px solid var(--color-check);
+  border-radius: 50%;
+}
+.run-step.is-done .run-step-icon {
+  color: var(--color-safe);
+}
+.run-step.has-skip .run-step-icon {
+  color: var(--color-review);
+}
+.run-step.is-notrun .run-step-icon {
+  color: var(--color-text-3);
+}
+.run-step.is-running .run-step-icon {
+  color: var(--color-neon);
+}
+.run-step-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.run-step-num {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.run-step-bar {
+  grid-column: 2 / 4;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--color-step-track);
+  overflow: hidden;
+}
+.run-step-bar i {
+  display: block;
+  height: 100%;
+  background: var(--color-neon);
+  transition: width var(--drain);
+}
+.run-step-skip {
+  grid-column: 2 / 4;
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--color-review);
+}
+.run-step-skip.is-quiet {
+  color: var(--color-text-3);
+}
+.run-spin {
+  animation: spin 0.9s linear infinite;
+}
+
+.run-log {
+  flex: 1;
+  min-height: 80px;
+  overflow-y: auto;
+  padding: var(--space-4) var(--space-6);
+  background: var(--color-log);
+  font: 400 var(--text-2xs) / 1.65 var(--font-mono);
+  color: var(--color-text-3);
+}
+.run-log-line {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.run-log-line.is-del {
+  color: var(--color-log-del);
+}
+.run-log-line.is-skip {
+  color: var(--color-review);
+}
+.run-log-line.is-sum {
+  color: var(--color-log-sum);
+}
+
+.run-foot {
+  flex: none;
+  padding: var(--space-5) var(--space-6) 16px;
+  border-top: 1px solid var(--color-line);
+}
+.run-foot p {
+  margin: 0 0 11px;
+  font-size: var(--text-ui);
+  line-height: 1.45;
+  color: var(--color-text-2);
+}
+.run-going {
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+}
+.run-going p {
+  flex: 1;
+  margin: 0;
+}
+.run-cta {
+  width: 100%;
+  padding: 12px 16px 11px;
+  font-size: var(--text-md);
+}
+
+/* ---------- confirm ---------- */
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: var(--color-scrim);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+  animation: scrim-in 0.16s ease both;
+}
+@keyframes scrim-in {
+  from {
+    opacity: 0;
+  }
+}
+.dialog {
+  width: min(500px, calc(100% - 48px));
+  padding: 24px 26px 22px;
+  border: 1px solid var(--color-line-2);
+  border-radius: var(--radius-dialog);
+  background: var(--color-pop);
+  box-shadow: var(--shadow-dialog);
+  animation: dialog-in 0.2s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+}
+.dialog h2 {
+  margin: 0 0 12px;
+  font: 700 var(--text-dialog) / 1.25 var(--font-sans);
+  letter-spacing: -0.015em;
+  color: var(--color-text);
+}
+.dialog p {
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-dialog-body);
+  line-height: 1.55;
+  color: var(--color-text-2);
+}
+.dialog .dialog-lead {
+  color: var(--color-text);
+}
+.dialog .dialog-quiet {
+  font-size: var(--text-ui);
+  color: var(--color-text-3);
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-4);
+  margin-top: 20px;
+}

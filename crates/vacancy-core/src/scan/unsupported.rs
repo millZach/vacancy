@@ -8,6 +8,12 @@ use super::{Collector, ListError, RootSpec};
 #[derive(Clone, Debug)]
 pub(crate) struct Volume;
 
+impl Volume {
+    pub(crate) fn id(&self) -> Option<u64> {
+        None
+    }
+}
+
 pub(crate) fn roots(_path: &Path) -> io::Result<Vec<RootSpec>> {
     Err(io::Error::from(io::ErrorKind::Unsupported))
 }

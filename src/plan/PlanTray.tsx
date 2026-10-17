@@ -1,4 +1,4 @@
-import { ChevronDown, PanelRightClose } from 'lucide-react';
+import { ChevronDown, LoaderCircle, PanelRightClose } from 'lucide-react';
 import { useId, useState } from 'react';
 import type { Proposal } from '../bridge';
 import { formatBytes, formatCount } from '../format';
@@ -18,20 +18,23 @@ interface Props {
   onHot: (tile: string | null) => void;
   onToggle: (id: string) => void;
   onClose: () => void;
+  /** "Free X GB": turn the plan into one to confirm. */
+  onFree: () => void;
+  /** The plan is being checked before the confirm dialog opens. */
+  checking: boolean;
+  /** Why the plan couldn't be made, if it couldn't. */
+  error: string | null;
 }
-
-/** Why the plan's button can't run yet. Running a plan arrives with ticket 04. */
-export const NOT_YET = 'Vacancy can’t run plans yet. This version only proposes.';
 
 /**
  * Variant D's plan tray, beside the map: the drive's delete proposals with tick boxes, risk chips, a source tag and
- * an expandable why with sample paths; and the plan's total, with the button that will run it.
+ * an expandable why with sample paths; and the plan's total, with the button that asks to free it.
  */
-export function PlanTray({ proposals, plan, agent, hot, onHot, onToggle, onClose }: Props) {
+export function PlanTray({ proposals, plan, agent, hot, onHot, onToggle, onClose, onFree, checking, error }: Props) {
   const deletes = proposals.filter((p) => p.action === 'delete');
   const on = deletes.filter((p) => plan.includes(p.id)).length;
   const t = planTotals(proposals, plan);
-  const later = useId();
+  const note = useId();
   return (
     <aside className="tray" aria-label="Plan" data-no-ripple>
       <div className="tray-head">
@@ -78,12 +81,25 @@ export function PlanTray({ proposals, plan, agent, hot, onHot, onToggle, onClose
             deleted permanently
           </li>
         </ul>
-        <button type="button" className="cta tray-cta" disabled aria-describedby={later} title={NOT_YET}>
-          {t.bytes > 0 ? `Free ${formatBytes(t.bytes)}` : 'Nothing selected yet'}
+        <button
+          type="button"
+          className="cta tray-cta"
+          disabled={on === 0 || checking}
+          aria-describedby={checking || error ? note : undefined}
+          onClick={onFree}
+        >
+          {on > 0 ? `Free ${formatBytes(t.bytes)}` : 'Nothing selected yet'}
         </button>
-        <p className="tray-later" id={later}>
-          {NOT_YET}
-        </p>
+        {checking && (
+          <p className="tray-later" id={note}>
+            <LoaderCircle className="tray-spin" size={12} aria-hidden /> Checking every place in the plan again
+          </p>
+        )}
+        {!checking && error && (
+          <p className="tray-error" id={note} role="alert">
+            {error}
+          </p>
+        )}
       </div>
     </aside>
   );

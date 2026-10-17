@@ -1,5 +1,5 @@
 import { createContext, use } from 'react';
-import type { FullDiskAccess, VolumeInfo } from '../bridge';
+import type { FullDiskAccess, PlanSummary, VolumeInfo } from '../bridge';
 import type { DriveScan, Gone, Screen } from './session';
 
 /** The drives, this computer's name and (on macOS) whether Vacancy can see everything, once they are known. */
@@ -42,8 +42,19 @@ export interface ReadyDrives {
   cancelScan: () => void;
   /** Puts a proposal in the plan of the drive on screen, or takes it out. */
   setInPlan: (id: string, on: boolean) => void;
-  /** For the run (ticket 04): while a plan runs, switching drives is disabled. */
+  /** While a plan runs, switching drives is disabled. `runPlan` sets it; this is for anything else that must hold. */
   setRunning: (running: boolean) => void;
+  /**
+   * Runs a confirmed plan of the drive on screen. Locks drive switching, feeds the run's events to the drive as they
+   * arrive, and unlocks when the run ends, either way. The drive keeps the run, then its summary.
+   */
+  runPlan: (plan: PlanSummary) => void;
+  /** Stops the running plan after the file being deleted. The run then ends, saying it was stopped. */
+  cancelRun: () => void;
+  /** From the ended run of the drive on screen to its summary ("See what changed"). */
+  showSummary: () => void;
+  /** From a failed run of the drive on screen back to its plan. */
+  leaveRun: () => void;
   dismissGone: () => void;
 }
 

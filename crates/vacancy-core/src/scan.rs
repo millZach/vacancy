@@ -167,6 +167,7 @@ pub(crate) fn scan_inner(
     hooks: &Hooks<'_>,
 ) -> Result<Snapshot, ScanError> {
     let started = Instant::now();
+    let started_at = SystemTime::now();
     let fail = |source| ScanError::Root {
         path: volume.to_path_buf(),
         source,
@@ -183,11 +184,11 @@ pub(crate) fn scan_inner(
         .build()
         .map_err(|e| fail(io::Error::other(e)))?;
 
-    let mut builder = Builder::new(options.keep_files_from);
+    let mut builder = Builder::new(options.keep_files_from, started_at);
     let tasks: Vec<Task> = roots
         .into_iter()
         .map(|root| Task {
-            dir: builder.add_root(root.real.clone(), root.shown, root.kind),
+            dir: builder.add_root(root.real.clone(), root.shown, root.kind, root.volume.id()),
             path: root.real,
             expect: None,
             volume: root.volume,
@@ -333,13 +334,18 @@ pub(crate) struct Entry<'n> {
     pub(crate) kind: EntryKind,
     /// Allocated bytes, files only.
     pub(crate) allocated: u64,
+    /// Length in bytes, files only.
+    pub(crate) logical: u64,
     pub(crate) modified: UnixTime,
     pub(crate) accessed: UnixTime,
     /// Identifies the file across its hard links, when it may have more than one name.
     pub(crate) link_key: Option<LinkKey>,
-    /// For folders: what identifies this folder (Windows file id; Unix device and inode), checked when it is
-    /// opened.
+    /// For folders and files: what identifies it (Windows file id; Unix device and inode). A folder's is checked
+    /// when it is opened; a kept file's is its fingerprint for the plan.
     pub(crate) identity: Option<u128>,
+    /// What identifies the entry, whatever it is (Windows file id; Unix device and inode; 0 where the file system
+    /// has no ids), for its folder's digest (see [`crate::snapshot::digest_key`]).
+    pub(crate) key: u128,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -415,6 +421,16 @@ pub(crate) struct Collector<'a> {
 impl Collector<'_> {
     pub(crate) fn add(&mut self, e: &Entry<'_>) {
         let listing = &mut *self.listing;
+        // Every name the folder lists, hard links and all, before anything is merged or skipped.
+        if e.kind == EntryKind::File {
+            let key = crate::snapshot::file_digest_key(e.key, e.logical, e.allocated);
+            listing.digest_all = listing.digest_all.wrapping_add(key);
+            listing.digest_files = listing.digest_files.wrapping_add(key);
+        } else {
+            listing.digest_all = listing
+                .digest_all
+                .wrapping_add(crate::snapshot::digest_key(e.key));
+        }
         match e.kind {
             EntryKind::File => {
                 if let Some(key) = e.link_key
@@ -428,7 +444,7 @@ impl Collector<'_> {
                 listing.own_files += 1;
                 listing.own_last_used = listing.own_last_used.max(used);
                 if e.allocated >= self.keep_from || is_installer(e.name) {
-                    listing.push_kept(e.name, e.allocated, used);
+                    listing.push_kept(e.name, e.allocated, used, e.identity, e.logical);
                 }
                 let len = e.name.len();
                 if Markers::may_mark(len)

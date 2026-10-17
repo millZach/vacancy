@@ -1,7 +1,9 @@
 // The map's model: regions (categories, or an opened folder) holding leaves (tiles), plus the free-space region,
 // and the squarified treemap layout that places them. The layout maths (squarify ratio, padding, header band, the
 // zoom that pushes other regions out of view) is the prototype's, kept as-is because it is what makes the look.
-import { hierarchy, treemap, treemapSquarify } from 'd3-hierarchy';
+// While a run frees space the map is laid out against the map it started from, so tiles keep their places and only
+// change size as their space moves to the free region.
+import { hierarchy, treemap, treemapResquarify } from 'd3-hierarchy';
 import type {
   CategoryId,
   CategoryTotal,
@@ -30,6 +32,11 @@ export interface Leaf {
   proposal: string | null;
   /** 0..2: varies lightness between neighbouring tiles. */
   shade: number;
+  /**
+   * Bytes of vacant ground the tile shows above what it holds: a share of what a run freed from it, so a cleared
+   * tile still marks where the space came from. Laid out with `bytes`; 0 except on a run's tiles.
+   */
+  vacant: number;
 }
 
 export interface Region {
@@ -85,6 +92,7 @@ function leaf(item: MapItem, regionId: string): Leaf {
     note: item.note,
     proposal: item.proposal,
     shade: 0,
+    vacant: 0,
   };
 }
 
@@ -111,15 +119,19 @@ function freeRegion(bytes: number): Region {
 }
 
 function finish(regions: Region[], volume: VolumeInfo): AtlasModel {
+  return assemble(regions, volume.totalBytes, volume.usedBytes);
+}
+
+function assemble(regions: Region[], totalBytes: number, usedBytes: number): AtlasModel {
   const leaves = regions.flatMap((r) => r.leaves);
   return {
     regions,
     leaves,
     leafById: new Map(leaves.map((l) => [l.id, l])),
     regionById: new Map(regions.map((r) => [r.id, r])),
-    totalBytes: volume.totalBytes,
-    usedBytes: volume.usedBytes,
-    freeBytes: Math.max(0, volume.totalBytes - volume.usedBytes),
+    totalBytes,
+    usedBytes,
+    freeBytes: Math.max(0, totalBytes - usedBytes),
   };
 }
 
@@ -153,6 +165,7 @@ function soleLeaf(id: string, regionId: string, kind: 'free' | 'scanned', name: 
     note: null,
     proposal: null,
     shade: 0,
+    vacant: 0,
   };
 }
 
@@ -216,6 +229,40 @@ export function folderModel(
   return finish([region], volume);
 }
 
+/** What a run has done to one tile so far. */
+export interface Freed {
+  /** Bytes freed from it. */
+  bytes: number;
+  /** Bytes it is known to have left in place. */
+  kept: number;
+}
+
+/** The share of what a tile freed that it keeps as vacant ground: a sliver, once it is cleared. */
+export const VACANT_SHARE = 0.15;
+
+/**
+ * The map as a run has left it so far. Each tile in `freed` holds what is still there (its bytes less what was
+ * freed, never below what was left in place) under a sliver of vacant ground, its region is smaller by as much, and
+ * free space has grown by `total`, everything the run freed. Laid out against `model` (`layoutAtlas`'s `base`),
+ * every tile keeps its place and only changes size.
+ */
+export function freedModel(model: AtlasModel, freed: ReadonlyMap<string, Freed>, total: number): AtlasModel {
+  const gone = Math.max(0, total);
+  const regions = model.regions.map((r): Region => {
+    if (r.free) return { ...r, bytes: r.bytes + gone, leaves: r.leaves.map((l) => ({ ...l, bytes: l.bytes + gone })) };
+    let less = 0;
+    const leaves = r.leaves.map((l) => {
+      const f = freed.get(l.id);
+      if (!f || f.bytes <= 0) return l;
+      const bytes = Math.max(0, l.bytes - f.bytes, Math.min(l.bytes, f.kept));
+      less += l.bytes - bytes;
+      return { ...l, bytes, vacant: f.bytes * VACANT_SHARE };
+    });
+    return leaves.some((l, i) => l !== r.leaves[i]) ? { ...r, bytes: Math.max(0, r.bytes - less), leaves } : r;
+  });
+  return assemble(regions, model.totalBytes, Math.max(0, model.usedBytes - gone));
+}
+
 interface Datum {
   id: string;
   bytes: number;
@@ -226,32 +273,54 @@ interface Datum {
 /** Free space goes last; the not-yet-scanned area just before it. */
 const rank = (r: Region) => (r.free ? 2 : r.pending ? 1 : 0);
 
-/** Squarified layout. Region rects are keyed `r:<id>`, tiles by leaf id. */
-export function layoutRegions(regions: Region[], w: number, h: number): Map<string, Rect> {
+/** What a tile takes up on the map: what it holds, and its vacant ground. */
+const weight = (l: Leaf) => l.bytes + l.vacant;
+
+/** Whether two maps hold the same tiles in the same regions, whatever their sizes. */
+function sameTiles(a: Region[], b: Region[]): boolean {
+  const ids = (rs: Region[]) => new Set(rs.flatMap((r) => r.leaves.map((l) => `${r.id}/${l.id}`)));
+  const x = ids(a);
+  const y = ids(b);
+  return x.size === y.size && [...x].every((id) => y.has(id));
+}
+
+/**
+ * Squarified layout. Region rects are keyed `r:<id>`, tiles by leaf id. With `base` (the same regions and tiles at
+ * other sizes) the arrangement is `base`'s: it is laid out first, then each tile is resized to its size in `regions`
+ * where it stands, rows and order kept (d3's resquarify), so nothing reshuffles as sizes change.
+ */
+export function layoutRegions(regions: Region[], w: number, h: number, base?: Region[]): Map<string, Rect> {
   const out = new Map<string, Rect>();
   if (w < 20 || h < 20 || !regions.length) return out;
+  const stable = base && base !== regions && sameTiles(base, regions) ? base : null;
   const data: Datum = {
     id: '__root',
     bytes: 0,
     rank: 0,
-    children: regions.map((r) => ({
+    children: (stable ?? regions).map((r) => ({
       id: regionKey(r.id),
       bytes: 0,
       rank: rank(r),
-      children: r.leaves.map((l) => ({ id: l.id, bytes: l.bytes, rank: 0 })),
+      children: r.leaves.map((l) => ({ id: l.id, bytes: weight(l), rank: 0 })),
     })),
   };
   const root = hierarchy<Datum>(data)
     .sum((d) => (d.children ? 0 : d.bytes))
     .sort((a, b) => a.data.rank - b.data.rank || (b.value ?? 0) - (a.value ?? 0));
   const headed = (n: { depth: number; data: Datum }) => n.depth === 1 && n.data.rank === 0;
-  const laid = treemap<Datum>()
+  // Resquarify squarifies a node the first time it is laid out, and keeps its rows every time after.
+  const lay = treemap<Datum>()
     .size([w, h])
-    .tile(treemapSquarify.ratio(1.1))
+    .tile(treemapResquarify.ratio(1.1))
     .round(true)
     .paddingInner((n) => (n.depth === 0 ? 4 : 2))
     .paddingOuter((n) => (headed(n) ? 2 : 0))
-    .paddingTop((n) => (headed(n) ? HEADER : 0))(root);
+    .paddingTop((n) => (headed(n) ? HEADER : 0));
+  let laid = lay(root);
+  if (stable) {
+    const now = new Map(regions.flatMap((r) => r.leaves.map((l) => [l.id, weight(l)] as const)));
+    laid = lay(root.sum((d) => (d.children ? 0 : (now.get(d.id) ?? 0))));
+  }
   laid.each((n) => {
     if (n.depth === 0) return;
     out.set(n.data.id, { x: n.x0, y: n.y0, w: Math.max(0, n.x1 - n.x0), h: Math.max(0, n.y1 - n.y0) });
@@ -259,14 +328,24 @@ export function layoutRegions(regions: Region[], w: number, h: number): Map<stri
   return out;
 }
 
-/** The top-level layout, or the focused region filling the map with everything else pushed out of view. */
-export function layoutAtlas(model: AtlasModel, w: number, h: number, focus: string | null): Map<string, Rect> {
-  const top = layoutRegions(model.regions, w, h);
+/**
+ * The top-level layout, or the focused region filling the map with everything else pushed out of view. With
+ * `base`, the map `model` was made from (the same tiles, at their sizes before a run), tiles keep `base`'s places.
+ */
+export function layoutAtlas(
+  model: AtlasModel,
+  w: number,
+  h: number,
+  focus: string | null,
+  base?: AtlasModel,
+): Map<string, Rect> {
+  const top = layoutRegions(model.regions, w, h, base?.regions);
   if (!focus) return top;
   const region = model.regionById.get(focus);
   const fr = top.get(regionKey(focus));
   if (!region || !fr || fr.w < 1 || fr.h < 1) return top;
-  const zoomed = layoutRegions([region], w, h);
+  const was = base?.regionById.get(focus);
+  const zoomed = layoutRegions([region], w, h, was && [was]);
   const sx = w / fr.w;
   const sy = h / fr.h;
   const out = new Map<string, Rect>();

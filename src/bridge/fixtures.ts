@@ -9,6 +9,7 @@ import type {
   Platform,
   Proposal,
   Risk,
+  Skip,
   VolumeInfo,
 } from './types';
 
@@ -28,6 +29,18 @@ export interface Fixture {
   proposals: Proposal[];
   /** What opening a folder tile shows, by tile id. */
   folders: Record<string, MapFolder>;
+  /**
+   * What a mock run of the system drive leaves in place, if the proposal is in the plan: a place in use when its
+   * step runs, and one that changed since the scan, which planning finds and leaves out.
+   */
+  runSkips: RunSkip[];
+}
+
+/** Something a mock run leaves in place: found when planning (`plan`) or while its step runs (`run`). */
+export interface RunSkip {
+  proposal: string;
+  when: 'plan' | 'run';
+  skip: Skip;
 }
 
 const GB = 1e9;
@@ -678,6 +691,30 @@ export const fixtures = {
     overview: win.overview,
     proposals: winProposals,
     folders: win.folders,
+    runSkips: [
+      {
+        proposal: 'w-browser',
+        when: 'run',
+        skip: {
+          path: `${local}\\Microsoft\\Edge\\User Data\\Default\\Cache\\Cache_Data`,
+          reason: '212 files are open in Microsoft Edge',
+          kind: 'inUse',
+          bytes: 0.41 * GB,
+          items: 212,
+        },
+      },
+      {
+        proposal: 'w-installers',
+        when: 'plan',
+        skip: {
+          path: `${home}\\Downloads\\Installers\\Docker Desktop Installer.exe`,
+          reason: 'It changed since the scan',
+          kind: 'changed',
+          bytes: 0.62 * GB,
+          items: 1,
+        },
+      },
+    ],
   },
   macos: {
     platform: 'macos',
@@ -687,6 +724,30 @@ export const fixtures = {
     overview: mac.overview,
     proposals: macProposals,
     folders: mac.folders,
+    runSkips: [
+      {
+        proposal: 'm-appcache',
+        when: 'run',
+        skip: {
+          path: `${mlib}/Application Support/Slack/Cache/Cache_Data`,
+          reason: '48 files are open in Slack',
+          kind: 'inUse',
+          bytes: 0.58 * GB,
+          items: 48,
+        },
+      },
+      {
+        proposal: 'm-dmgs',
+        when: 'plan',
+        skip: {
+          path: `${mhome}/Downloads/Docker.dmg`,
+          reason: 'It changed since the scan',
+          kind: 'changed',
+          bytes: 0.71 * GB,
+          items: 1,
+        },
+      },
+    ],
   },
 } satisfies Record<Platform, Fixture>;
 

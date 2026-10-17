@@ -3,7 +3,9 @@ import { fixtures } from '../bridge';
 import {
   FREE_ID,
   PENDING_ID,
+  VACANT_SHARE,
   folderModel,
+  freedModel,
   layoutAtlas,
   layoutRegions,
   overviewModel,
@@ -133,6 +135,88 @@ describe('the folder model', () => {
       'Adobe Creative Cloud',
     ]);
     everyTileInItsRegion(model, layoutRegions(model.regions, W, H));
+  });
+});
+
+describe('the map as a run frees space', () => {
+  const model = overviewModel(fixtures.windows.overview);
+  const NODE = 'p:w-node';
+  const BROWSER = 'p:w-browser';
+  const bytesOf = (id: string) => model.leafById.get(id)!.bytes;
+  // Mid-run: node_modules has freed two thirds of itself; the browser caches freed 5 GB and kept 2 GB that were in
+  // use, more than the 1.3 GB its figures alone would leave.
+  const freed = new Map([
+    [NODE, { bytes: 14e9, kept: 0 }],
+    [BROWSER, { bytes: 5e9, kept: 2e9 }],
+  ]);
+  const total = 19e9;
+  const grown = freedModel(model, freed, total);
+
+  /** How many neighbouring tiles (side by side, or one above the other) in `a` have swapped sides in `b`. */
+  function swapped(a: Map<string, Rect>, b: Map<string, Rect>) {
+    const ids = model.leaves.map((l) => l.id);
+    const overlap = (p0: number, p1: number, q0: number, q1: number) => Math.min(p1, q1) - Math.max(p0, q0) > 1;
+    let n = 0;
+    for (const x of ids)
+      for (const y of ids) {
+        const [ax, ay, bx, by] = [a.get(x)!, a.get(y)!, b.get(x)!, b.get(y)!];
+        const leftOf = ax.x + ax.w <= ay.x && overlap(ax.y, ax.y + ax.h, ay.y, ay.y + ay.h);
+        const above = ax.y + ax.h <= ay.y && overlap(ax.x, ax.x + ax.w, ay.x, ay.x + ay.w);
+        if ((leftOf && bx.x + bx.w > by.x + 1) || (above && bx.y + bx.h > by.y + 1)) n++;
+      }
+    return n;
+  }
+
+  it('shrinks a tile by what its step freed, never below what it left in place, and grows free space by it all', () => {
+    expect(grown.leafById.get(NODE)!.bytes).toBe(bytesOf(NODE) - 14e9);
+    expect(grown.leafById.get(NODE)!.vacant).toBe(14e9 * VACANT_SHARE);
+    expect(grown.leafById.get(BROWSER)!.bytes).toBe(2e9);
+    expect(grown.regionById.get('dev')!.bytes).toBe(model.regionById.get('dev')!.bytes - 14e9);
+    expect(grown.regionById.get(FREE_ID)!.bytes).toBe(model.regionById.get(FREE_ID)!.bytes + total);
+    expect(grown.leafById.get('free:space')!.bytes).toBe(model.leafById.get('free:space')!.bytes + total);
+    expect(grown.freeBytes).toBe(model.freeBytes + total);
+    // Tiles the run didn't touch are the same tiles; a region with none of its tiles touched is the same region.
+    const apps = model.regionById.get('apps')!;
+    expect(grown.regionById.get('apps')).toBe(apps);
+    expect(grown.leafById.get(apps.leaves[0]!.id)).toBe(apps.leaves[0]);
+    expect(freedModel(model, new Map(), 0).regions.filter((r) => !r.free)).toEqual(model.regions.filter((r) => !r.free));
+  });
+
+  it('grows the free region by about the share freed and shrinks the draining tiles, reshuffling nothing', () => {
+    const before = layoutAtlas(model, W, H, null);
+    const after = layoutAtlas(grown, W, H, null, model);
+    const share = (rects: Map<string, Rect>, id: string) => area(rects.get(id)!) / (W * H);
+
+    const grew = share(after, 'free:space') - share(before, 'free:space');
+    expect(grew).toBeGreaterThan((total / model.totalBytes) * 0.8);
+    expect(grew).toBeLessThan((total / model.totalBytes) * 1.2);
+    expect(area(after.get(regionKey(FREE_ID))!)).toBeGreaterThan(area(before.get(regionKey(FREE_ID))!));
+    // node_modules keeps a third of itself and a sliver of vacant ground: under half its area.
+    expect(area(after.get(NODE)!)).toBeLessThan(area(before.get(NODE)!) * 0.5);
+    expect(area(after.get(BROWSER)!)).toBeLessThan(area(before.get(BROWSER)!) * 0.6);
+    everyTileInItsRegion(grown, after);
+
+    // Nothing reshuffles: every tile keeps its neighbours on the same sides, and the ones the run didn't touch stay
+    // about as big, a little way from where they were (the space freed before them has gone).
+    expect(swapped(before, after)).toBe(0);
+    for (const l of model.leaves) {
+      if (freed.has(l.id) || l.kind === 'free') continue;
+      const [a, b] = [before.get(l.id)!, after.get(l.id)!];
+      if (area(a) < 2000) continue;
+      expect(Math.abs(area(b) / area(a) - 1), `${l.name} keeps its size`).toBeLessThan(0.1);
+      expect(Math.hypot(b.x - a.x, b.y - a.y), `${l.name} stays near`).toBeLessThan(W * 0.08);
+    }
+    // Laid out afresh instead, the same sizes would shuffle tiles around.
+    expect(swapped(before, layoutAtlas(grown, W, H, null))).toBeGreaterThan(5);
+  });
+
+  it('settles back to the map it started from when nothing was freed', () => {
+    expect(layoutAtlas(freedModel(model, new Map(), 0), W, H, null, model)).toEqual(layoutAtlas(model, W, H, null));
+  });
+
+  it('lays out afresh against a map with other tiles', () => {
+    const scanning = scanModel(fixtures.windows.overview.volume, [], 100e9);
+    expect(layoutRegions(scanning.regions, W, H, model.regions)).toEqual(layoutRegions(scanning.regions, W, H));
   });
 });
 

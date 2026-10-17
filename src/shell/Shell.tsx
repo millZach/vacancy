@@ -15,6 +15,8 @@ interface Props {
   reclaimable?: number | null;
   /** The screen's call to action in the header ("Build a plan"), if it has one. */
   action?: ReactNode;
+  /** Light the sign: a run has just made vacancy. */
+  lit?: boolean;
   children: ReactNode;
 }
 
@@ -24,14 +26,14 @@ interface Props {
  * On macOS the title bar is an overlay, so the traffic lights sit in the header's left end and the header drags
  * the window. On Windows the native title bar does both.
  */
-export function Shell({ platform, drive, agent, reclaimable = null, action = null, children }: Props) {
+export function Shell({ platform, drive, agent, reclaimable = null, action = null, lit = false, children }: Props) {
   const overlay = platform === 'macos';
   // "deep": anywhere in the header drags the window, except on its controls.
   const drag = overlay ? { 'data-tauri-drag-region': 'deep' } : {};
   return (
     <div className="shell" data-chrome={overlay ? 'overlay' : 'native'}>
       <header className="shell-head" {...drag}>
-        <Wordmark />
+        <Wordmark lit={lit} />
         {drive}
         <div className="head-right">
           {reclaimable !== null && (

@@ -32,6 +32,11 @@ pub(crate) struct Volume {
 }
 
 impl Volume {
+    /// The device number, the volume part of an identity.
+    pub(crate) fn id(&self) -> Option<u64> {
+        Some(self.dev)
+    }
+
     fn of(path: &Path) -> io::Result<Self> {
         let meta = std::fs::symlink_metadata(path)?;
         if !meta.is_dir() {
@@ -247,7 +252,8 @@ fn entry<'n>(name: &'n OsStr, st: &libc::stat, volume: &Volume) -> Entry<'n> {
         libc::S_IFLNK => EntryKind::FileLink,
         _ => EntryKind::Other,
     };
-    let identity = (kind == EntryKind::Dir).then(|| identity(st));
+    let identity_of = identity;
+    let identity = matches!(kind, EntryKind::Dir | EntryKind::File).then(|| identity_of(st));
     let link_key = (kind == EntryKind::File && st.st_nlink > 1)
         .then(|| LinkKey::Id((u128::from(st.st_dev as u64) << 64) | u128::from(st.st_ino)));
     Entry {
@@ -255,10 +261,16 @@ fn entry<'n>(name: &'n OsStr, st: &libc::stat, volume: &Volume) -> Entry<'n> {
         kind,
         // st_blocks counts 512-byte units whatever the file system's block size. A dataless iCloud file has none.
         allocated: (st.st_blocks.max(0) as u64).saturating_mul(512),
+        logical: if kind == EntryKind::File {
+            st.st_size.max(0) as u64
+        } else {
+            0
+        },
         modified: st.st_mtime as UnixTime,
         accessed: st.st_atime as UnixTime,
         link_key,
         identity,
+        key: identity_of(st),
     }
 }
 

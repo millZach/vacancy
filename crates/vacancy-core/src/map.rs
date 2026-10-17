@@ -259,6 +259,26 @@ pub fn scan_for_map(
     on_update: &mut dyn FnMut(ScanUpdate),
     cancel: &CancelToken,
 ) -> Result<ScannedVolume, ScanError> {
+    scan_for_map_with(
+        volume,
+        env,
+        moment,
+        &|_| volume_info(volume).ok(),
+        on_update,
+        cancel,
+    )
+}
+
+/// [`scan_for_map`], with the drive's figures from `figures` (given the finished scan) instead of the OS: fixture
+/// mode's pseudo-drive has the figures of the folder it is (see [`crate::fixture::volume`]).
+pub fn scan_for_map_with(
+    volume: &Path,
+    env: &Env,
+    moment: &Moment,
+    figures: &dyn Fn(&Snapshot) -> Option<VolumeInfo>,
+    on_update: &mut dyn FnMut(ScanUpdate),
+    cancel: &CancelToken,
+) -> Result<ScannedVolume, ScanError> {
     let mut next_preview = Duration::ZERO;
     let snapshot = scan(
         volume,
@@ -278,8 +298,10 @@ pub fn scan_for_map(
     )?;
     // Building the map takes a moment on a big drive; a cancel during it stops it and means no map.
     let (categories, proposals, overview) =
-        build_map(&snapshot, env, moment, volume, &|| cancel.is_cancelled())
-            .ok_or(ScanError::Cancelled)?;
+        build_map_with(&snapshot, env, moment, volume, figures, &|| {
+            cancel.is_cancelled()
+        })
+        .ok_or(ScanError::Cancelled)?;
     if cancel.is_cancelled() {
         return Err(ScanError::Cancelled);
     }
@@ -294,11 +316,33 @@ pub fn scan_for_map(
 /// Categorizes a finished scan, proposes cleanups, carves their tiles out of the categories and builds the overview
 /// against the volume's own numbers, read now. Gives up (`None`) as soon as `stop` says so; it is asked all along
 /// the way, not only between the steps.
+#[cfg(test)]
 pub(crate) fn build_map(
     snapshot: &Snapshot,
     env: &Env,
     moment: &Moment,
     volume: &Path,
+    stop: &dyn Fn() -> bool,
+) -> Option<(Categories, Proposals, Overview)> {
+    build_map_with(
+        snapshot,
+        env,
+        moment,
+        volume,
+        &|_| volume_info(volume).ok(),
+        stop,
+    )
+}
+
+/// Categorizes a finished scan, proposes cleanups, carves their tiles out of the categories and builds the overview
+/// against the drive's figures from `figures`, read now. Gives up (`None`) as soon as `stop` says so; it is asked
+/// all along the way, not only between the steps.
+fn build_map_with(
+    snapshot: &Snapshot,
+    env: &Env,
+    moment: &Moment,
+    volume: &Path,
+    figures: &dyn Fn(&Snapshot) -> Option<VolumeInfo>,
     stop: &dyn Fn() -> bool,
 ) -> Option<(Categories, Proposals, Overview)> {
     if stop() {
@@ -314,7 +358,7 @@ pub(crate) fn build_map(
         .collect();
     let categories = categories.carve(snapshot, &claims, stop)?;
     let scanned = snapshot.stats().bytes;
-    let info = volume_info(volume).unwrap_or_else(|_| VolumeInfo {
+    let info = figures(snapshot).unwrap_or_else(|| VolumeInfo {
         name: volume.display().to_string(),
         mount_point: volume.display().to_string(),
         id: String::new(),

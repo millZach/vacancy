@@ -1,23 +1,29 @@
 // Screenshots the map's screens in Edge: the scan plate, scanning (the HUD over the map filling in), the overview,
-// a hover card, a category zoomed in, a folder opened from it, and the plan tray beside the map with its tiles lit.
+// a hover card, a category zoomed in, a folder opened from it, the plan tray beside the map with its tiles lit, and
+// then freeing the plan: the confirm dialog, the run mid-way and done, and the summary.
 //
 //   npm run dev                       (the UI on the mock bridge, http://localhost:1420)
 //   npm run map-shots -- [options]
 //
 // Options (all optional):
-//   --url <url>          page to open             (default http://localhost:1420/?fixture=windows)
+//   --url <url>          page to open             (default http://localhost:1420/?fixture=windows; add &run=<ms>
+//                        to change how long the mock run takes)
 //   --out <dir>          where PNGs go            (default shots)
 //   --name <prefix>      file name prefix         (default map)
 //   --viewport <WxH>     browser viewport         (default 1280x820, the app window's default size)
 //   --scanning-at <ms>   when to take the scanning shot after pressing Scan (default 1600)
-//   --timeout <ms>       how long a scan may take (default 600000: a real drive)
+//   --midway <share>     take the mid-run shot once this share of the plan is freed (default 0.45)
+//   --timeout <ms>       how long a scan, or a run, may take (default 600000: a real drive)
 //   --cdp <url>          drive an already running page over CDP instead of opening --url, e.g. the installed
 //                        app started with WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333
 //                        and --cdp http://127.0.0.1:9333 (the window keeps its own size; --viewport is ignored)
+//   --run                over CDP, also free the plan. The app deletes for real, so only ever pass this to an app
+//                        in fixture mode (VACANCY_FIXTURE_ROOT). Against the mock bridge the plan is always freed.
 //
 // Writes <name>-1-plate.png, -2-scanning.png, -3-map.png, -4-hover.png, -5-category.png, -6-folder.png,
-// -7-plan.png (the tray open, a reclaimable tile's hover card) and -8-plan-why.png (the biggest proposal's why and
-// sample paths). Fails if the page logs an error.
+// -7-plan.png (the tray open, a reclaimable tile's hover card), -8-plan-why.png (the biggest proposal's why and
+// sample paths), -9-confirm.png, -10-run.png (mid-way), -11-run-done.png and -12-summary.png. Fails if the page
+// logs an error.
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -30,8 +36,10 @@ const { values: o } = parseArgs({
     name: { type: 'string', default: 'map' },
     viewport: { type: 'string', default: '1280x820' },
     'scanning-at': { type: 'string', default: '1600' },
+    midway: { type: 'string', default: '0.45' },
     timeout: { type: 'string', default: '600000' },
     cdp: { type: 'string' },
+    run: { type: 'boolean', default: false },
   },
 });
 const [vw, vh] = o.viewport.split('x').map(Number);
@@ -119,6 +127,41 @@ try {
     await page.locator('.tray-row-title').first().click();
     await settle(page, 400);
     await shot(page, '8-plan-why');
+
+    // Free the plan. Over CDP that deletes for real, so only with --run (an app in fixture mode).
+    const free = page.locator('.tray-cta');
+    if ((!remote || o.run) && (await free.isEnabled())) {
+      await free.click();
+      await page.getByRole('alertdialog').waitFor({ timeout: 60_000 });
+      await settle(page, 500);
+      await shot(page, '9-confirm');
+
+      await page.getByRole('button', { name: /permanently$/ }).click();
+      await page.locator('.tray.run').waitFor({ timeout: 10_000 });
+      const share = Number(o.midway) * 100;
+      await page.waitForFunction(
+        (at) => parseFloat(document.querySelector('.run-meter i')?.style.width ?? '0') >= at,
+        share,
+        { timeout: Number(o.timeout) },
+      );
+      // Over a draining tile, so its hover card says how far it has got.
+      const running = await biggest('.map-tile.is-running');
+      if (running) await page.mouse.move(running.x, running.y);
+      await settle(page, 250);
+      await shot(page, '10-run');
+
+      await page.mouse.move(2, 2);
+      const seeChanges = page.getByRole('button', { name: 'See what changed' });
+      await seeChanges.waitFor({ timeout: Number(o.timeout) });
+      await settle(page, 1300);
+      await shot(page, '11-run-done');
+
+      await seeChanges.click();
+      await page.locator('.tray.summary').waitFor({ timeout: 10_000 });
+      // The swipe sweeps to After and the Vacant signs catch.
+      await settle(page, 2800);
+      await shot(page, '12-summary');
+    }
   }
 } finally {
   await browser?.close();

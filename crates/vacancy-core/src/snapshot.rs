@@ -12,7 +12,9 @@
 use std::ffi::OsStr;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+
+use crate::fsid::Identity;
 
 /// A folder in a [`Snapshot`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -211,6 +213,10 @@ pub struct Root {
     pub shown: PathBuf,
     /// What it is.
     pub kind: RootKind,
+    /// The volume it is on: Windows' volume serial number, the Unix device number. `None` where the file system
+    /// gives none. With the file ids the scan records, it names what the scan saw: a different disk mounted at the
+    /// same letter has another.
+    pub volume: Option<u64>,
 }
 
 /// The scan's own numbers.
@@ -261,6 +267,45 @@ struct DirRec {
     tree: Totals,
     flags: DirFlags,
     markers: Markers,
+    digests: Digests,
+}
+
+/// Which entries a folder listed, as two sums of [`digest_key`]s: of every entry, and of its files alone. Two
+/// listings with the same sum list the same entries (barring a 64-bit collision of ids nobody chooses): the
+/// executor proves a folder holds exactly what the scan saw this way, since on Windows times can be copied over
+/// with a file and say nothing about whether it is new.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Digests {
+    pub(crate) all: u64,
+    pub(crate) files: u64,
+}
+
+/// An identity from what the scanner records: on Windows the file id, named on the root's volume; on Unix the device
+/// and inode, which the key holds both of.
+fn full_identity(root: &Root, key: u128) -> Option<Identity> {
+    if cfg!(windows) {
+        Some(Identity::new(root.volume?, key))
+    } else {
+        Some(Identity::new(
+            (key >> 64) as u64,
+            key & u128::from(u64::MAX),
+        ))
+    }
+}
+
+/// A file's part of a folder's [`Digests`]: its identity with its logical and allocated sizes, so that a file
+/// rewritten in place to another size, even with its times set back, no longer adds up the same.
+pub(crate) fn file_digest_key(id: u128, logical: u64, allocated: u64) -> u64 {
+    digest_key(id) ^ digest_key((u128::from(logical) << 64) | u128::from(allocated)).rotate_left(1)
+}
+
+/// One entry's part of a folder's [`Digests`]: its identity (Windows file id; Unix device and inode), mixed so that
+/// sums of different sets don't meet by accident. Files add their sizes too ([`file_digest_key`]).
+pub(crate) fn digest_key(id: u128) -> u64 {
+    let mut z = (id as u64) ^ ((id >> 64) as u64).rotate_left(29) ^ 0x9E37_79B9_7F4A_7C15;
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -269,6 +314,11 @@ struct FileRec {
     name: NameRef,
     bytes: u64,
     last_used: UnixTime,
+    /// What identified the file when it was listed (Windows file id; Unix device and inode), or 0 where the file
+    /// system has none.
+    identity: u128,
+    /// Its length in bytes.
+    logical: u64,
 }
 
 const NO_PARENT: u32 = u32::MAX;
@@ -285,6 +335,8 @@ pub struct Snapshot {
     names: Vec<u8>,
     stats: ScanStats,
     keep_files_from: u64,
+    /// When the scan began. Anything modified or changed since then is not what the scan saw.
+    started: SystemTime,
 }
 
 impl Snapshot {
@@ -378,13 +430,57 @@ impl Snapshot {
         self.dir(dir).flags
     }
 
-    /// Which marker files and folders it holds.
     /// What identified a folder when the scan listed it (Windows file id; Unix device and inode), if the file system
     /// has one. A folder found with another identity now is not the folder the scan saw.
     pub(crate) fn identity(&self, dir: DirId) -> Option<u128> {
         self.ids.get(dir.0 as usize).copied().filter(|&id| id != 0)
     }
 
+    /// A folder's identity as the scan recorded it, the volume included: on Windows its root's volume serial and
+    /// its file id, on Unix its device and inode. `None` where the scan has no identity for it.
+    pub(crate) fn dir_identity(&self, dir: DirId) -> Option<Identity> {
+        full_identity(self.root_of(dir), self.identity(dir)?)
+    }
+
+    /// A kept file's length in bytes when the scan listed it.
+    pub(crate) fn file_logical(&self, file: FileId) -> u64 {
+        self.files[file.0 as usize].logical
+    }
+
+    /// A kept file's identity as the scan recorded it, the volume included, as [`dir_identity`](Self::dir_identity).
+    pub(crate) fn file_full_identity(&self, file: FileId) -> Option<Identity> {
+        let f = self.file(file);
+        full_identity(self.root_of(f.parent), self.file_identity(file)?)
+    }
+
+    /// Test hook: the scan as if it had read another volume with the same file ids (another disk at the same letter).
+    #[cfg(all(test, windows))]
+    pub(crate) fn set_volume_for_test(&mut self, volume: Option<u64>) {
+        for root in &mut self.roots {
+            root.volume = volume;
+        }
+    }
+
+    /// The digests of what the folder listed when the scan read it (zero for a folder it didn't).
+    pub(crate) fn digests(&self, dir: DirId) -> Digests {
+        self.dir(dir).digests
+    }
+
+    /// What identified a kept file when the scan listed it, as [`identity`](Self::identity) does for folders.
+    pub(crate) fn file_identity(&self, file: FileId) -> Option<u128> {
+        self.files
+            .get(file.0 as usize)
+            .map(|f| f.identity)
+            .filter(|&id| id != 0)
+    }
+
+    /// When the scan began: anything in the snapshot that was modified or changed on disk since then is no longer
+    /// what the scan saw.
+    pub fn started(&self) -> SystemTime {
+        self.started
+    }
+
+    /// Which marker files and folders it holds.
     pub fn markers(&self, dir: DirId) -> Markers {
         self.dir(dir).markers
     }
@@ -483,6 +579,9 @@ pub(crate) struct Listing {
     pub(crate) own_last_used: UnixTime,
     pub(crate) markers: Markers,
     pub(crate) flags: DirFlags,
+    /// See [`Digests`].
+    pub(crate) digest_all: u64,
+    pub(crate) digest_files: u64,
     /// File-shaped links (symlinks) seen and not followed.
     pub(crate) file_links: u32,
     /// Extra names of hard-linked files, not counted again.
@@ -507,6 +606,8 @@ pub(crate) struct PendingFile {
     name: Range<usize>,
     bytes: u64,
     last_used: UnixTime,
+    identity: Option<u128>,
+    logical: u64,
 }
 
 impl Listing {
@@ -516,6 +617,8 @@ impl Listing {
         self.own_last_used = 0;
         self.markers = Markers::default();
         self.flags = DirFlags::default();
+        self.digest_all = 0;
+        self.digest_files = 0;
         self.file_links = 0;
         self.hard_links = 0;
         self.subdirs.clear();
@@ -539,12 +642,21 @@ impl Listing {
         });
     }
 
-    pub(crate) fn push_kept(&mut self, name: &OsStr, bytes: u64, last_used: UnixTime) {
+    pub(crate) fn push_kept(
+        &mut self,
+        name: &OsStr,
+        bytes: u64,
+        last_used: UnixTime,
+        identity: Option<u128>,
+        logical: u64,
+    ) {
         let name = self.push_name(name);
         self.kept.push(PendingFile {
             name,
             bytes,
             last_used,
+            identity,
+            logical,
         });
     }
 
@@ -568,7 +680,7 @@ pub(crate) struct Builder {
 }
 
 impl Builder {
-    pub(crate) fn new(keep_files_from: u64) -> Self {
+    pub(crate) fn new(keep_files_from: u64, started: SystemTime) -> Self {
         Self {
             snap: Snapshot {
                 roots: Vec::new(),
@@ -578,6 +690,7 @@ impl Builder {
                 names: Vec::new(),
                 stats: ScanStats::default(),
                 keep_files_from,
+                started,
             },
         }
     }
@@ -586,7 +699,13 @@ impl Builder {
         &self.snap
     }
 
-    pub(crate) fn add_root(&mut self, real: PathBuf, shown: PathBuf, kind: RootKind) -> DirId {
+    pub(crate) fn add_root(
+        &mut self,
+        real: PathBuf,
+        shown: PathBuf,
+        kind: RootKind,
+        volume: Option<u64>,
+    ) -> DirId {
         let id = DirId(self.snap.dirs.len() as u32);
         self.snap.dirs.push(DirRec {
             parent: NO_PARENT,
@@ -603,6 +722,7 @@ impl Builder {
             tree: Totals::default(),
             flags: DirFlags::default(),
             markers: Markers::default(),
+            digests: Digests::default(),
         });
         self.snap.ids.push(0);
         self.snap.roots.push(Root {
@@ -610,6 +730,7 @@ impl Builder {
             real,
             shown,
             kind,
+            volume,
         });
         self.snap.stats.folders += 1;
         id
@@ -660,6 +781,7 @@ impl Builder {
                 },
                 flags: sub.flags,
                 markers: Markers::default(),
+                digests: Digests::default(),
             });
             snap.ids.push(sub.identity.unwrap_or(0));
             if sub.flags.contains(DirFlags::LINK) {
@@ -676,6 +798,8 @@ impl Builder {
                 name,
                 bytes: kept.bytes,
                 last_used: kept.last_used,
+                identity: kept.identity.unwrap_or(0),
+                logical: kept.logical,
             });
         }
         let child_count = listing.subdirs.len() as u32;
@@ -690,6 +814,10 @@ impl Builder {
             d.own.last_used = d.own.last_used.max(listing.own_last_used);
             d.flags = d.flags.with(listing.flags);
             d.markers = listing.markers;
+            d.digests = Digests {
+                all: listing.digest_all,
+                files: listing.digest_files,
+            };
         }
         let mut at = dir.0;
         while at != NO_PARENT {
