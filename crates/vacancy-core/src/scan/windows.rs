@@ -22,11 +22,11 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE,
     FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS, FILE_ATTRIBUTE_RECALL_ON_OPEN,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_SPARSE_FILE, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_ID_EXTD_DIR_INFO,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_ID_EXTD_DIR_INFO, FILE_ID_INFO,
     FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
     FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FileFullDirectoryInfo,
-    FileIdExtdDirectoryInfo, FileStandardInfo, GetFileInformationByHandleEx, GetVolumeInformationW,
-    GetVolumePathNameW, OPEN_EXISTING, SYNCHRONIZE,
+    FileIdExtdDirectoryInfo, FileIdInfo, FileStandardInfo, GetFileInformationByHandleEx,
+    GetVolumeInformationW, GetVolumePathNameW, OPEN_EXISTING, SYNCHRONIZE,
 };
 
 use super::{Collector, Entry, EntryKind, LinkKey, ListError, RootSpec};
@@ -54,6 +54,8 @@ const SPARSE_LIKE: u32 = FILE_ATTRIBUTE_SPARSE_FILE
 pub(crate) struct Volume {
     /// NTFS: file ids are record numbers, so hard links are tracked in a bitmap.
     ntfs: bool,
+    /// The volume's serial number, when it has file ids: every opened folder must be on it.
+    serial: Option<u64>,
 }
 
 pub(crate) fn roots(path: &Path) -> io::Result<Vec<RootSpec>> {
@@ -62,11 +64,15 @@ pub(crate) fn roots(path: &Path) -> io::Result<Vec<RootSpec>> {
         return Err(io::Error::new(io::ErrorKind::NotADirectory, "not a folder"));
     }
     let ntfs = file_system(&real).is_some_and(|fs| fs.eq_ignore_ascii_case("NTFS"));
+    let serial = open_dir(&real, &mut Vec::new())
+        .ok()
+        .and_then(|h| identity_of(&h))
+        .map(|(serial, _)| serial);
     Ok(vec![RootSpec {
         shown: real.clone(),
         real,
         kind: RootKind::Volume,
-        volume: Volume { ntfs },
+        volume: Volume { ntfs, serial },
     }])
 }
 
@@ -154,34 +160,31 @@ impl Drop for Handle {
 }
 
 impl Lister {
+    /// Lists the folder at `dir`. `expect` is the file id its parent's listing gave it: the folder opened must
+    /// have it, on the walk's volume, or it is not listed (`Changed`). That is what keeps a folder above it that
+    /// was swapped for a junction after being listed from redirecting the walk: the path would lead elsewhere,
+    /// and elsewhere has another id.
     pub(crate) fn list(
         &mut self,
         dir: &Path,
+        expect: Option<u128>,
         volume: &Volume,
         out: &mut Collector<'_>,
     ) -> Result<(), ListError> {
-        verbatim(dir, &mut self.path);
-        self.path.push(0);
-        // SAFETY: `self.path` is NUL-terminated. Opening with FILE_FLAG_OPEN_REPARSE_POINT never follows a link:
-        // if the folder was swapped for a junction, this opens the junction itself, which lists empty.
-        let handle = unsafe {
-            CreateFileW(
-                self.path.as_ptr(),
-                FILE_LIST_DIRECTORY | SYNCHRONIZE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                ptr::null(),
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-                ptr::null_mut(),
-            )
-        };
-        self.path.pop();
-        if handle == INVALID_HANDLE_VALUE {
-            return Err(open_error());
+        let handle = open_dir(dir, &mut self.path)?;
+        if let Some(expect) = expect {
+            match identity_of(&handle) {
+                Some((serial, id)) if id == expect && volume.serial.is_none_or(|s| s == serial) => {
+                }
+                Some(_) => return Err(ListError::Changed),
+                None => return Err(ListError::Failed),
+            }
         }
-        let handle = Handle(handle);
         let mut first = true;
         loop {
+            if out.cancelled() {
+                return Err(ListError::Cancelled);
+            }
             let class = if self.full_only {
                 FileFullDirectoryInfo
             } else {
@@ -219,6 +222,53 @@ impl Lister {
             read_batch(&self.buf, class, dir, volume, &mut self.scratch, out);
         }
     }
+}
+
+/// Opens a folder for listing. FILE_FLAG_OPEN_REPARSE_POINT never follows a link at the last step: if the folder
+/// itself was swapped for a junction, this opens the junction, which lists empty. Links further up the path are
+/// caught by the identity check in [`Lister::list`].
+fn open_dir(dir: &Path, buf: &mut Vec<u16>) -> Result<Handle, ListError> {
+    verbatim(dir, buf);
+    buf.push(0);
+    // SAFETY: `buf` is NUL-terminated.
+    let handle = unsafe {
+        CreateFileW(
+            buf.as_ptr(),
+            FILE_LIST_DIRECTORY | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            ptr::null_mut(),
+        )
+    };
+    buf.pop();
+    if handle == INVALID_HANDLE_VALUE {
+        Err(open_error())
+    } else {
+        Ok(Handle(handle))
+    }
+}
+
+/// An open folder's volume serial number and file id, or `None` when the file system has no ids (FAT, exFAT).
+fn identity_of(handle: &Handle) -> Option<(u64, u128)> {
+    // SAFETY: an all-zero FILE_ID_INFO is valid.
+    let mut info: FILE_ID_INFO = unsafe { mem::zeroed() };
+    // SAFETY: `info` is writable and sized as passed; the handle is open.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            handle.0,
+            FileIdInfo,
+            (&raw mut info).cast(),
+            mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    (ok != 0).then(|| {
+        (
+            info.VolumeSerialNumber,
+            u128::from_le_bytes(info.FileId.Identifier),
+        )
+    })
 }
 
 /// Walks one buffer of entries.
@@ -275,6 +325,10 @@ impl Scratch {
         {
             allocated = real;
         }
+        let identity = match kind {
+            EntryKind::Dir | EntryKind::CloudDir => raw.file_id,
+            _ => None,
+        };
         let link_key = match (kind, raw.file_id) {
             (EntryKind::File, Some(id)) if volume.ntfs => {
                 // An NTFS file id is a 48-bit record number and a 16-bit sequence number.
@@ -290,6 +344,7 @@ impl Scratch {
             modified: unix_time(raw.modified),
             accessed: unix_time(raw.accessed),
             link_key,
+            identity,
         }
     }
 

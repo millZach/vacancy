@@ -145,6 +145,17 @@ pub fn scan(
     progress: &mut dyn FnMut(&ScanProgress<'_>),
     cancel: &CancelToken,
 ) -> Result<Snapshot, ScanError> {
+    scan_inner(volume, options, progress, cancel, None)
+}
+
+/// [`scan`], with a hook the tests use to change the tree just before a folder is opened.
+pub(crate) fn scan_inner(
+    volume: &Path,
+    options: &ScanOptions,
+    progress: &mut dyn FnMut(&ScanProgress<'_>),
+    cancel: &CancelToken,
+    before_enter: Option<&(dyn Fn(&Path) + Sync)>,
+) -> Result<Snapshot, ScanError> {
     let started = Instant::now();
     let fail = |source| ScanError::Root {
         path: volume.to_path_buf(),
@@ -168,6 +179,7 @@ pub fn scan(
         .map(|root| Task {
             dir: builder.add_root(root.real.clone(), root.shown, root.kind),
             path: root.real,
+            expect: None,
             volume: root.volume,
         })
         .collect();
@@ -182,6 +194,7 @@ pub fn scan(
         bytes: AtomicU64::new(0),
         unreadable: AtomicU64::new(0),
         current: Mutex::new(tasks.first().map(|t| t.path.clone()).unwrap_or_default()),
+        before_enter,
     };
 
     std::thread::scope(|threads| {
@@ -257,6 +270,8 @@ pub(crate) struct RootSpec {
 struct Task {
     dir: DirId,
     path: PathBuf,
+    /// The identity its parent's listing recorded; the folder opened at `path` must have it.
+    expect: Option<u128>,
     volume: platform::Volume,
 }
 
@@ -271,6 +286,7 @@ struct Shared<'a> {
     bytes: AtomicU64,
     unreadable: AtomicU64,
     current: Mutex<PathBuf>,
+    before_enter: Option<&'a (dyn Fn(&Path) + Sync)>,
 }
 
 /// Why a folder could not be listed.
@@ -289,6 +305,11 @@ pub(crate) enum ListError {
     OtherVolume,
     /// It disappeared, or became a link, since its parent was listed. Nothing to count.
     Gone,
+    /// Its path now leads to a different folder than its parent listed: it or a folder above it was replaced or
+    /// moved, perhaps by a link. Not entered.
+    Changed,
+    /// The scan was cancelled mid-listing. Nothing is recorded.
+    Cancelled,
     /// Anything else. Counted like a refusal.
     Failed,
 }
@@ -304,6 +325,9 @@ pub(crate) struct Entry<'n> {
     pub(crate) accessed: UnixTime,
     /// Identifies the file across its hard links, when it may have more than one name.
     pub(crate) link_key: Option<LinkKey>,
+    /// For folders: what identifies this folder (Windows file id; Unix device and inode), checked when it is
+    /// opened.
+    pub(crate) identity: Option<u128>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -345,6 +369,7 @@ pub(crate) struct Collector<'a> {
     links: &'a LinkSet,
     keep_from: u64,
     now: UnixTime,
+    cancel: &'a CancelToken,
 }
 
 impl Collector<'_> {
@@ -378,13 +403,15 @@ impl Collector<'_> {
                 } else {
                     DirFlags::default()
                 };
-                listing.push_dir(e.name, flags, e.modified.min(self.now));
+                listing.push_dir(e.name, flags, e.modified.min(self.now), e.identity);
                 if let Some(name) = e.name.to_str() {
                     listing.markers = listing.markers.with(Markers::for_dir(name));
                 }
             }
-            EntryKind::DirLink => listing.push_dir(e.name, DirFlags::LINK, 0),
-            EntryKind::DirOtherVolume => listing.push_dir(e.name, DirFlags::OTHER_VOLUME, 0),
+            EntryKind::DirLink => listing.push_dir(e.name, DirFlags::LINK, 0, None),
+            EntryKind::DirOtherVolume => {
+                listing.push_dir(e.name, DirFlags::OTHER_VOLUME, 0, None);
+            }
             EntryKind::FileLink => listing.file_links += 1,
             EntryKind::Other => {}
         }
@@ -392,6 +419,25 @@ impl Collector<'_> {
 
     pub(crate) fn mark_incomplete(&mut self) {
         self.listing.flags = self.listing.flags.with(DirFlags::INCOMPLETE);
+    }
+
+    /// An entry the OS listed but would not describe (no search permission on the folder): the folder counts as
+    /// unreadable, with what could be read.
+    #[cfg_attr(
+        windows,
+        allow(dead_code, reason = "Windows listings describe every entry")
+    )]
+    pub(crate) fn mark_entry_unreadable(&mut self) {
+        self.listing.flags = self
+            .listing
+            .flags
+            .with(DirFlags::UNREADABLE)
+            .with(DirFlags::INCOMPLETE);
+    }
+
+    /// Whether the scan was cancelled. Listers check it between batches of entries.
+    pub(crate) fn cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
     }
 }
 
@@ -419,25 +465,38 @@ fn walk<'s>(s: &rayon::Scope<'s>, shared: &'s Shared<'s>, task: Task) {
             current.clone_from(&task.path);
         }
         w.listing.clear();
+        if let Some(hook) = shared.before_enter {
+            hook(&task.path);
+        }
         let mut collector = Collector {
             listing: &mut w.listing,
             links: &shared.links,
             keep_from: shared.keep_from,
             now: shared.now,
+            cancel: shared.cancel,
         };
-        let listed = w.lister.list(&task.path, &task.volume, &mut collector);
+        let listed = w
+            .lister
+            .list(&task.path, task.expect, &task.volume, &mut collector);
         let flag = match listed {
             Ok(()) => None,
-            Err(ListError::Gone) => return Vec::new(),
+            Err(ListError::Gone | ListError::Cancelled) => return Vec::new(),
             Err(ListError::OtherVolume) => Some(DirFlags::OTHER_VOLUME),
+            Err(ListError::Changed) => Some(DirFlags::CHANGED),
             Err(ListError::Denied | ListError::Failed) => Some(DirFlags::UNREADABLE),
         };
+        if shared.cancel.is_cancelled() {
+            return Vec::new();
+        }
         if let Some(flag) = flag {
             if flag == DirFlags::UNREADABLE {
                 shared.unreadable.fetch_add(1, Ordering::Relaxed);
             }
             lock(&shared.builder).flag(task.dir, flag);
             return Vec::new();
+        }
+        if w.listing.flags.contains(DirFlags::UNREADABLE) {
+            shared.unreadable.fetch_add(1, Ordering::Relaxed);
         }
         let ids = lock(&shared.builder).commit(task.dir, &w.listing);
         shared
@@ -457,11 +516,15 @@ fn walk<'s>(s: &rayon::Scope<'s>, shared: &'s Shared<'s>, task: Task) {
             .map(|(sub, id)| Task {
                 dir: DirId(id),
                 path: task.path.join(w.listing.dir_name(sub)),
+                expect: sub.identity,
                 volume: task.volume.clone(),
             })
             .collect::<Vec<_>>()
     });
     for child in children {
+        if shared.cancel.is_cancelled() {
+            break;
+        }
         s.spawn(move |s| walk(s, shared, child));
     }
 }
@@ -475,4 +538,138 @@ fn unix_now() -> UnixTime {
         .duration_since(UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::atomic::AtomicBool;
+
+    use super::*;
+
+    const MIB: u64 = 1 << 20;
+
+    fn write(path: &Path, len: usize) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, vec![7u8; len]).unwrap();
+    }
+
+    /// A folder link, the way an attacker or a sync tool would make one: a junction on Windows (no privilege
+    /// needed), a symlink elsewhere.
+    fn link_dir(link: &Path, target: &Path) {
+        #[cfg(windows)]
+        {
+            let out = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .expect("run mklink");
+            assert!(
+                out.status.success(),
+                "mklink /J: {}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).expect("symlink");
+    }
+
+    /// A folder is listed, then (before its subfolder is opened) swapped for a link to a tree outside the scan.
+    /// Opening the subfolder by path would walk through the link; the identity check refuses it.
+    #[test]
+    fn never_follows_a_folder_swapped_for_a_link_after_it_was_listed() {
+        let fx = tempfile::tempdir().unwrap();
+        let root = fx.path().join("scanned");
+        let outside = fx.path().join("outside");
+        write(
+            &root.join("cache").join("inner").join("blob.bin"),
+            64 * 1024,
+        );
+        write(&outside.join("inner").join("secret.bin"), 4 * MIB as usize);
+        let swapped = AtomicBool::new(false);
+        let hook = |path: &Path| {
+            if path.ends_with(Path::new("cache").join("inner"))
+                && !swapped.swap(true, Ordering::SeqCst)
+            {
+                fs::rename(root.join("cache"), root.join("cache-moved"))
+                    .expect("move the listed folder");
+                link_dir(&root.join("cache"), &outside);
+                assert!(
+                    root.join("cache").join("inner").join("secret.bin").exists(),
+                    "the queued path now leads outside the scan"
+                );
+            }
+        };
+
+        let snap = scan_inner(
+            &root,
+            &ScanOptions::default(),
+            &mut |_| {},
+            &CancelToken::new(),
+            Some(&hook),
+        )
+        .expect("scan");
+
+        assert!(swapped.load(Ordering::SeqCst), "the hook ran");
+        let total = snap.tree(snap.roots()[0].dir).bytes;
+        assert!(total < MIB, "the outside tree is not counted: {total}");
+        assert_eq!(snap.stats().changed, 1);
+        let inner = snap
+            .dirs()
+            .find(|&d| snap.name(d) == "inner")
+            .expect("the queued folder is recorded");
+        assert!(snap.flags(inner).contains(DirFlags::CHANGED));
+        assert_eq!(snap.children(inner).len(), 0, "never listed");
+    }
+
+    /// A cancel lands while a big folder is being listed: the listing stops early instead of reading it all.
+    #[test]
+    fn cancel_stops_a_listing_part_way() {
+        let fx = tempfile::tempdir().unwrap();
+        for i in 0..3000 {
+            fs::write(
+                fx.path()
+                    .join(format!("file-{i:05}-with-a-longish-name.txt")),
+                b"x",
+            )
+            .unwrap();
+        }
+        let roots = platform::roots(fx.path()).unwrap();
+        let links = LinkSet::new();
+        let cancel = CancelToken::new();
+        let mut listing = Listing::default();
+        let mut lister = platform::Lister::default();
+
+        let mut collector = Collector {
+            listing: &mut listing,
+            links: &links,
+            keep_from: u64::MAX,
+            now: i64::MAX,
+            cancel: &cancel,
+        };
+        assert!(
+            lister
+                .list(fx.path(), None, &roots[0].volume, &mut collector)
+                .is_ok()
+        );
+        assert_eq!(listing.own_files, 3000);
+
+        listing.clear();
+        cancel.cancel();
+        let mut collector = Collector {
+            listing: &mut listing,
+            links: &links,
+            keep_from: u64::MAX,
+            now: i64::MAX,
+            cancel: &cancel,
+        };
+        let result = lister.list(fx.path(), None, &roots[0].volume, &mut collector);
+        assert!(matches!(result, Err(ListError::Cancelled)), "{result:?}");
+        assert!(
+            listing.own_files < 3000,
+            "stopped part way: {}",
+            listing.own_files
+        );
+    }
 }

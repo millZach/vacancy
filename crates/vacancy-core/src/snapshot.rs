@@ -55,6 +55,9 @@ impl DirFlags {
     /// A cloud-sync placeholder folder (OneDrive, Dropbox). Entered: it is a real local folder, and only the bytes
     /// actually on this disk are counted.
     pub const CLOUD: Self = Self(1 << 4);
+    /// When the scanner came to open it, its path led to a different folder than the one its parent listed: it,
+    /// or a folder above it, was replaced or moved (perhaps by a link) during the scan. Never entered.
+    pub const CHANGED: Self = Self(1 << 5);
 
     /// Whether every flag in `other` is set.
     pub fn contains(self, other: Self) -> bool {
@@ -63,7 +66,7 @@ impl DirFlags {
 
     /// Whether the scanner looked inside this folder.
     pub fn entered(self) -> bool {
-        self.0 & (Self::UNREADABLE.0 | Self::LINK.0 | Self::OTHER_VOLUME.0) == 0
+        self.0 & (Self::UNREADABLE.0 | Self::LINK.0 | Self::OTHER_VOLUME.0 | Self::CHANGED.0) == 0
     }
 
     pub(crate) fn with(self, other: Self) -> Self {
@@ -202,6 +205,8 @@ pub struct ScanStats {
     pub other_volumes_skipped: u64,
     /// Extra names of hard-linked files: seen again, not counted again.
     pub hard_links_merged: u64,
+    /// Folders that were replaced or moved between being listed and being opened, and so were not entered.
+    pub changed: u64,
     /// How long the scan took.
     pub elapsed: Duration,
 }
@@ -458,6 +463,9 @@ pub(crate) struct PendingDir {
     name: Range<usize>,
     pub(crate) flags: DirFlags,
     pub(crate) modified: UnixTime,
+    /// What identified the folder when it was listed (Windows file id; Unix device and inode), if known. Opening
+    /// it later must find the same folder.
+    pub(crate) identity: Option<u128>,
 }
 
 #[derive(Debug)]
@@ -481,12 +489,19 @@ impl Listing {
         self.names.clear();
     }
 
-    pub(crate) fn push_dir(&mut self, name: &OsStr, flags: DirFlags, modified: UnixTime) {
+    pub(crate) fn push_dir(
+        &mut self,
+        name: &OsStr,
+        flags: DirFlags,
+        modified: UnixTime,
+        identity: Option<u128>,
+    ) {
         let name = self.push_name(name);
         self.subdirs.push(PendingDir {
             name,
             flags,
             modified,
+            identity,
         });
     }
 
@@ -574,6 +589,9 @@ impl Builder {
         if flags.contains(DirFlags::OTHER_VOLUME) {
             self.snap.stats.other_volumes_skipped += 1;
         }
+        if flags.contains(DirFlags::CHANGED) {
+            self.snap.stats.changed += 1;
+        }
     }
 
     /// Records a folder's listing: its own files, its kept files and its subfolders, and adds its numbers to every
@@ -650,6 +668,10 @@ impl Builder {
         snap.stats.folders += u64::from(child_count);
         snap.stats.links_skipped += u64::from(listing.file_links);
         snap.stats.hard_links_merged += u64::from(listing.hard_links);
+        if listing.flags.contains(DirFlags::UNREADABLE) {
+            // Listed, but some entries could not be read (macOS: a folder readable without search permission).
+            snap.stats.unreadable += 1;
+        }
         first_child..first_child + child_count
     }
 

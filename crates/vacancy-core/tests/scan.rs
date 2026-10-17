@@ -445,3 +445,39 @@ fn small_files_are_folded_into_their_folder() {
         "only the big file is kept by name"
     );
 }
+
+/// A folder whose entries can be listed but not described (read permission without search permission): its
+/// entries' sizes are unknown, so it counts as unreadable instead of silently empty.
+#[cfg(unix)]
+#[test]
+fn counts_a_folder_it_may_list_but_not_search_as_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fixture::new();
+    fx.file("open/visible.bin", MIB);
+    let locked = fx.dir("locked");
+    fx.file("locked/inside.bin", MIB);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).expect("chmod 644");
+    let listable = fs::read_dir(&locked).is_ok();
+    let searchable = fs::metadata(locked.join("inside.bin")).is_ok();
+    if !listable || searchable {
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            !in_ci(),
+            "CI must be able to make a folder listable but not searchable"
+        );
+        eprintln!("skipped: this account ignores folder permissions");
+        return;
+    }
+
+    let snap = fx.scan();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    let dir = snap.find(&locked).expect("the folder is recorded");
+    assert!(snap.flags(dir).contains(DirFlags::UNREADABLE));
+    assert_eq!(snap.stats().unreadable, 1);
+    assert_eq!(snap.unreadable().count(), 1);
+    assert_eq!(
+        snap.tree(snap.roots()[0].dir).bytes,
+        MIB,
+        "only the readable file counts"
+    );
+}

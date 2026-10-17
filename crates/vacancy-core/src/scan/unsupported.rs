@@ -19,6 +19,7 @@ impl Lister {
     pub(crate) fn list(
         &mut self,
         _dir: &Path,
+        _expect: Option<u128>,
         _volume: &Volume,
         _out: &mut Collector<'_>,
     ) -> Result<(), ListError> {

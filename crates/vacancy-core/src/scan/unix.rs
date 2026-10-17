@@ -137,9 +137,14 @@ pub(crate) struct Lister {
 }
 
 impl Lister {
+    /// Lists the folder at `dir`. `expect` is the device and inode its parent's listing gave it: the folder
+    /// opened must have them, or it is not listed (`Changed`). That is what keeps a folder above it that was
+    /// swapped for a symlink after being listed from redirecting the walk: the path would lead elsewhere, and
+    /// elsewhere is another inode.
     pub(crate) fn list(
         &mut self,
         dir: &Path,
+        expect: Option<u128>,
         volume: &Volume,
         out: &mut Collector<'_>,
     ) -> Result<(), ListError> {
@@ -171,6 +176,11 @@ impl Lister {
             unsafe { libc::close(fd) };
             return Err(ListError::OtherVolume);
         }
+        if expect.is_some_and(|expect| expect != identity(&st)) {
+            // SAFETY: `fd` is open and not used again.
+            unsafe { libc::close(fd) };
+            return Err(ListError::Changed);
+        }
         // SAFETY: `fd` is an open directory; on success the stream owns it.
         let stream = unsafe { libc::fdopendir(fd) };
         if stream.is_null() {
@@ -181,7 +191,12 @@ impl Lister {
         let stream = Dir(stream);
         // SAFETY: `stream` is an open directory stream.
         let dir_fd = unsafe { libc::dirfd(stream.0) };
+        let mut seen = 0u32;
         loop {
+            seen = seen.wrapping_add(1);
+            if seen.is_multiple_of(256) && out.cancelled() {
+                return Err(ListError::Cancelled);
+            }
             set_errno(0);
             // SAFETY: `stream` is open and only this thread uses it.
             let ent = unsafe { libc::readdir(stream.0) };
@@ -208,7 +223,12 @@ impl Lister {
                 )
             };
             if rc != 0 {
-                continue; // vanished since the listing, or not ours to stat
+                // Vanished since the listing: nothing to count. Anything else (no search permission on the
+                // folder) means the folder can't be fully read.
+                if io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT) {
+                    out.mark_entry_unreadable();
+                }
+                continue;
             }
             // SAFETY: fstatat returned 0, so it filled `st`.
             let st = unsafe { st.assume_init() };
@@ -226,6 +246,7 @@ fn entry<'n>(name: &'n OsStr, st: &libc::stat, volume: &Volume) -> Entry<'n> {
         libc::S_IFLNK => EntryKind::FileLink,
         _ => EntryKind::Other,
     };
+    let identity = (kind == EntryKind::Dir).then(|| identity(st));
     let link_key = (kind == EntryKind::File && st.st_nlink > 1)
         .then(|| LinkKey::Id((u128::from(st.st_dev as u64) << 64) | u128::from(st.st_ino)));
     Entry {
@@ -236,7 +257,13 @@ fn entry<'n>(name: &'n OsStr, st: &libc::stat, volume: &Volume) -> Entry<'n> {
         modified: st.st_mtime as UnixTime,
         accessed: st.st_atime as UnixTime,
         link_key,
+        identity,
     }
+}
+
+/// A folder's device and inode, as one number.
+fn identity(st: &libc::stat) -> u128 {
+    (u128::from(st.st_dev as u64) << 64) | u128::from(st.st_ino)
 }
 
 fn open_error(err: io::Error) -> ListError {
@@ -306,13 +333,15 @@ mod tests {
     fn list(dir: &str, volume: &Volume) -> Result<(), ListError> {
         let mut listing = crate::snapshot::Listing::default();
         let links = super::super::LinkSet::new();
+        let cancel = super::super::CancelToken::new();
         let mut collector = Collector {
             listing: &mut listing,
             links: &links,
             keep_from: u64::MAX,
             now: i64::MAX,
+            cancel: &cancel,
         };
-        Lister::default().list(Path::new(dir), volume, &mut collector)
+        Lister::default().list(Path::new(dir), None, volume, &mut collector)
     }
 
     /// The firmlinks from the system volume lead into the Data volume, which has the same device number: the walk
