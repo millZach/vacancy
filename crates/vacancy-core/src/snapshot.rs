@@ -454,7 +454,7 @@ impl Snapshot {
     }
 
     /// Test hook: the scan as if it had read another volume with the same file ids (another disk at the same letter).
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(crate) fn set_volume_for_test(&mut self, volume: Option<u64>) {
         for root in &mut self.roots {
             root.volume = volume;

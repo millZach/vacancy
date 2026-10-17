@@ -1625,6 +1625,26 @@ mod tests {
         );
     }
 
+    /// On macOS a folder's volume is told by its mount as well as its device. When the mount can't be read, no
+    /// folder on the way can be vouched for: every target is skipped, never taken as on the right volume.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_mount_that_cant_be_read_skips_everything() {
+        let fx = Fx::new();
+        crate::fsid::test_hooks::set_fail_mount(true);
+        let report = fx.run(cache(), &Hooks::default(), &CancelToken::new());
+        crate::fsid::test_hooks::set_fail_mount(false);
+        assert_eq!(report.deleted_items, 0, "{:#?}", report.steps);
+        assert!(fx.profile.cache.join("f_000001").exists());
+        assert!(
+            skips(&report)
+                .iter()
+                .all(|k| k.reason.contains("which volume it is on can't be read")),
+            "{:#?}",
+            report.steps
+        );
+    }
+
     #[test]
     fn the_threshold_is_the_scan_start_to_the_second_less_the_margin() {
         let at = UNIX_EPOCH + Duration::from_millis(10_700);

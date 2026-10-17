@@ -111,15 +111,19 @@ fn changed_of(st: &libc::stat) -> i128 {
     m.max(c)
 }
 
-/// Where the volume an open folder is on is mounted (macOS).
-fn mount_of(fd: &Fd) -> Option<OsString> {
+/// Where the volume an open folder is on is mounted (macOS; `None` elsewhere). A mount macOS can't report fails the
+/// walk: a folder whose volume can't be compared is never vouched for.
+fn mount_of(fd: &Fd) -> Result<Option<OsString>, Fail> {
     #[cfg(target_os = "macos")]
     {
+        if crate::fsid::test_hooks::fail_mount() {
+            return Err(Fail::Failed("which volume it is on can't be read".into()));
+        }
         // SAFETY: an all-zero statfs is a valid value of a plain C struct.
         let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
         // SAFETY: `fd` is open and `fs` is writable.
         if unsafe { libc::fstatfs(fd.0, &mut fs) } != 0 {
-            return None;
+            return Err(Fail::Failed("which volume it is on can't be read".into()));
         }
         let name: Vec<u8> = fs
             .f_mntonname
@@ -127,12 +131,12 @@ fn mount_of(fd: &Fd) -> Option<OsString> {
             .take_while(|&&c| c != 0)
             .map(|&c| c as u8)
             .collect();
-        Some(OsString::from_vec(name))
+        Ok(Some(OsString::from_vec(name)))
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = fd;
-        None
+        Ok(None)
     }
 }
 
@@ -168,7 +172,7 @@ pub(crate) fn walk_to_parent(path: &Path) -> Result<Parent, Fail> {
     let mut steps = vec![Step {
         name: "/".into(),
         id: Identity::new(dev, u128::from(ino)),
-        mount: mount_of(&root),
+        mount: mount_of(&root)?,
     }];
     let mut dir = Dir { fd: root };
     let mut above = Vec::new();
@@ -263,7 +267,7 @@ pub(crate) fn open_dir(
     let step = Step {
         name: name.to_owned(),
         id: Identity::new(looked.0, u128::from(looked.1)),
-        mount: mount_of(&fd),
+        mount: mount_of(&fd)?,
     };
     Ok((Dir { fd }, step))
 }

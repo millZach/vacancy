@@ -10,6 +10,29 @@
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
+/// Points where the tests make a query fail that doesn't fail on its own.
+pub(crate) mod test_hooks {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static FAIL_MOUNT: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Makes reading which volume a folder is mounted from (macOS's `fstatfs`) fail on this thread, until set back.
+    #[cfg(all(test, target_os = "macos"))]
+    pub(crate) fn set_fail_mount(fail: bool) {
+        FAIL_MOUNT.with(|f| f.set(fail));
+    }
+
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(dead_code, reason = "only macOS reads mounts")
+    )]
+    pub(crate) fn fail_mount() -> bool {
+        FAIL_MOUNT.with(Cell::get)
+    }
+}
+
 /// A file or folder's identity: on Windows the volume's serial number and the 128-bit file id
 /// (`GetFileInformationByHandleEx(FileIdInfo)`), on macOS the device and inode numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -498,7 +521,7 @@ mod sys {
         let step = Step {
             name: "/".into(),
             id: id(&fstat(&dir)?),
-            mount: mount_of(&dir),
+            mount: mount_of(&dir).ok()?,
         };
         Some((dir, step, parts.count()))
     }
@@ -539,7 +562,7 @@ mod sys {
         if id(&fstat(&next)?) != step.id {
             return None;
         }
-        step.mount = mount_of(&next);
+        step.mount = mount_of(&next).ok()?;
         Some((step, Some(next)))
     }
 
@@ -584,16 +607,21 @@ mod sys {
         }
     }
 
-    /// Where the volume an open folder is on is mounted (`fstatfs`'s `f_mntonname`). macOS only.
-    fn mount_of(dir: &Fd) -> Option<std::ffi::OsString> {
+    /// Where the volume an open folder is on is mounted (`fstatfs`'s `f_mntonname`), on macOS; `Ok(None)`
+    /// elsewhere, where the device alone tells volumes apart. `Err` when macOS can't say: then nothing on the way
+    /// can be vouched for, since a mount that can't be read can't be compared.
+    pub(crate) fn mount_of(dir: &Fd) -> Result<Option<std::ffi::OsString>, ()> {
         #[cfg(target_os = "macos")]
         {
             use std::os::unix::ffi::OsStringExt;
+            if super::test_hooks::fail_mount() {
+                return Err(());
+            }
             // SAFETY: an all-zero statfs is a valid value of a plain C struct.
             let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
             // SAFETY: `dir` is open and `fs` is writable.
             if unsafe { libc::fstatfs(dir.0, &mut fs) } != 0 {
-                return None;
+                return Err(());
             }
             let name: Vec<u8> = fs
                 .f_mntonname
@@ -601,12 +629,12 @@ mod sys {
                 .take_while(|&&c| c != 0)
                 .map(|&c| c as u8)
                 .collect();
-            Some(std::ffi::OsString::from_vec(name))
+            Ok(Some(std::ffi::OsString::from_vec(name)))
         }
         #[cfg(not(target_os = "macos"))]
         {
             let _ = dir;
-            None
+            Ok(None)
         }
     }
 
@@ -791,6 +819,20 @@ mod tests {
             chain(&cache).unwrap().last().unwrap().id,
             "the new folder"
         );
+    }
+
+    /// A folder whose mount can't be read (macOS) can't be shown to be on its volume: no chain passes through it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_chain_needs_every_folder_s_mount() {
+        let (_fx, root) = real_tempdir();
+        let deep = root.join("a").join("b");
+        std::fs::create_dir_all(&deep).unwrap();
+        assert!(chain(&deep).is_some());
+        test_hooks::set_fail_mount(true);
+        let refused = chain(&deep).is_none();
+        test_hooks::set_fail_mount(false);
+        assert!(refused, "an unreadable mount is never a wildcard");
     }
 
     #[test]
