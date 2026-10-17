@@ -201,7 +201,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
       return run ? answer(run) : failure(`This run can’t be opened: the history has no run ${id}.`);
     },
     // Browser fixtures never open host apps or claim an external launch succeeded.
-    openHint: () => failure('Steam can’t be opened from this fixture preview. No app was launched.'),
+    openHint: () => failure('External advice can’t be opened from this fixture preview. No app was launched.'),
     unplug,
   };
 }
@@ -265,6 +265,7 @@ function onDrive(map: ScanOutcomeMap, system: VolumeInfo, volume: VolumeInfo): S
 /** The system drive's proposals as another drive's: scaled like its map, their sample paths moved onto it. */
 function proposalsOnDrive(proposals: Proposal[], system: VolumeInfo, volume: VolumeInfo): Proposal[] {
   if (volume.mountPoint === system.mountPoint) return proposals;
+  proposals = proposals.filter(p => !p.hintAction?.kind.startsWith('windows'));
   const scale = volume.usedBytes / system.usedBytes;
   for (const p of proposals) {
     p.bytes *= scale;

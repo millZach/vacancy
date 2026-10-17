@@ -5,6 +5,7 @@ import { formatBytes, formatCount } from '../format';
 import { Checkbox, RiskChip, SourceTag } from './bits';
 import { planTotals, tileOf } from './totals';
 import { HintActionButton } from './HintActionButton';
+import { AdviceText } from './AdviceText';
 import './plan.css';
 
 interface Props {
@@ -165,7 +166,7 @@ function ProposalRow({ proposal: p, mountPoint, agent, on, hot, onToggle, onHot 
         </div>
         {open && (
           <div className="tray-row-more" id={more}>
-            <p>{p.why}</p>
+            {hint ? <AdviceText why={p.why} action={p.hintAction} mountPoint={mountPoint} proposalId={p.id} /> : <p>{p.why}</p>}
             {hint && p.hintAction?.kind === 'steamUninstall' && <HintActionButton mountPoint={mountPoint} proposalId={p.id} />}
             {p.regenerable && !hint && <p className="tray-regen">Comes back on its own if you need it.</p>}
             <ul className="tray-paths" aria-label="Sample paths">

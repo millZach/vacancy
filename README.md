@@ -20,7 +20,7 @@ Cleanup tools that choose their own targets are advice only. Vacancy does not ru
 
 The current advice covers Steam games with a known last-played date at least six months ago, and the Logic Pro sound library. You can open a game's uninstall screen in Steam, or follow the instructions inside Logic. Selecting advice saves a reminder under **Left for you** in the report; it does not uninstall anything or count as freed space.
 
-Advice for Docker images and build cache, Xcode simulators and runtimes, Homebrew cleanup commands, and Windows system cleanup is not yet available. Cleaning known user-level package caches or Xcode build folders through an approved file plan is separate from running those tools.
+Windows cleanup and Delivery Optimization reminders appear when the Windows folder is present in the scan. Known Docker folders offer image and build-cache review; on Mac, Xcode and Homebrew folders offer simulator/runtime review and cleanup-preview instructions. These are passive presence checks, not inventories of unused objects or estimates of recoverable space. Guides start unchecked; selected instructions stay in the recap, highlights and history. Vendor references open only from a retained scan on the same current volume; fixture mode never launches host apps or browsers. Cleaning known user-level package caches or Xcode build folders through an approved file plan is separate from running those tools.
 
 ## What Vacancy never touches
 

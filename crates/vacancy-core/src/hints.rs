@@ -26,9 +26,19 @@ const MAX_DISCOVERY_BYTES: u64 = 8 * 1024 * 1024;
 pub enum HintAction {
     SteamUninstall { app_id: u32 },
     LogicInstructions,
+    WindowsCleanupInstructions,
+    WindowsDeliveryInstructions,
+    DockerImagesInstructions,
+    DockerCacheInstructions,
+    XcodeInstructions,
+    HomebrewInstructions,
 }
 
 impl HintAction {
+    /// Only compiled guide URLs or a numeric Steam URI can leave the app. No UI/history URL is accepted.
+    pub fn external_uri(&self) -> Option<String> {
+        self.steam_uri().or_else(|| guidance::guide(self).map(|g| g.source_url.clone()))
+    }
     /// Only a known Steam id can produce an external URI. Logic is an in-app instruction.
     pub fn steam_uri(&self) -> Option<String> {
         match self {
@@ -36,7 +46,7 @@ impl HintAction {
                 Some(format!("steam://uninstall/{app_id}"))
             }
             Self::SteamUninstall { .. } => None,
-            Self::LogicInstructions => None,
+            _ => None,
         }
     }
 }
@@ -248,6 +258,7 @@ pub fn discover_until(
     if let Some(hint) = logic_until(env, snapshot, stop)? {
         found.push(hint);
     }
+    found.extend(guidance::discover(env, snapshot, stop)?);
     if stop() { None } else { Some(found) }
 }
 
@@ -360,15 +371,19 @@ fn logic_until(env: &Env, snapshot: &Snapshot, stop: &dyn Fn() -> bool) -> Optio
 /// Native registered-app dispatch for the one numeric Steam affordance. Callers must first authorize a retained
 /// scan and reject fixture mode. No URL, program, arguments or filesystem target are accepted from the UI.
 pub fn open_steam_uninstall(app_id: u32) -> io::Result<()> {
+    open_external_hint(&HintAction::SteamUninstall { app_id })
+}
+
+/// Dispatch a retained catalog action after the shell validates scan/volume authority. Fixtures fail closed.
+pub fn open_external_hint(action: &HintAction) -> io::Result<()> {
     if std::env::var_os(crate::fixture::ROOT_VAR).is_some() {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "fixture mode never opens host apps",
         ));
     }
-    let uri = HintAction::SteamUninstall { app_id }
-        .steam_uri()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid Steam app id"))?;
+    let uri = action.external_uri()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid external advice"))?;
     #[cfg(windows)]
     {
         let operation: Vec<u16> = "open\0".encode_utf16().collect();
@@ -389,7 +404,7 @@ pub fn open_steam_uninstall(app_id: u32) -> io::Result<()> {
             Ok(())
         } else {
             Err(io::Error::other(
-                "Steam could not be opened. Check that Steam is installed.",
+                "The registered app could not be opened. No cleanup was performed.",
             ))
         }
     }
@@ -402,7 +417,7 @@ pub fn open_steam_uninstall(app_id: u32) -> io::Result<()> {
             Ok(())
         } else {
             Err(io::Error::other(
-                "Steam could not be opened. Check that Steam is installed.",
+                "The registered app could not be opened. No cleanup was performed.",
             ))
         }
     }
@@ -411,7 +426,7 @@ pub fn open_steam_uninstall(app_id: u32) -> io::Result<()> {
         let _ = uri;
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "Steam opening is supported on Windows and macOS",
+            "External advice is supported on Windows and macOS",
         ))
     }
 }
@@ -425,9 +440,11 @@ impl Hint {
             category: match self.action {
                 HintAction::SteamUninstall { .. } => crate::CategoryId::Apps,
                 HintAction::LogicInstructions => crate::CategoryId::Media,
+                HintAction::WindowsCleanupInstructions | HintAction::WindowsDeliveryInstructions => crate::CategoryId::System,
+                _ => crate::CategoryId::Dev,
             },
             title: self.title.clone(),
-            summary: "Advice only · no space counted".into(),
+            summary: guidance::guide(&self.action).map_or_else(|| "Advice only · no space counted".into(), |g| g.summary.clone()),
             why: self.why.clone(),
             bytes: 0,
             item_count: 0,
@@ -443,6 +460,8 @@ impl Hint {
         }
     }
 }
+
+mod guidance;
 
 #[derive(Debug)]
 enum Vdf {

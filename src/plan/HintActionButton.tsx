@@ -3,9 +3,10 @@ import { useState } from 'react';
 import { useBridge } from '../bridge';
 
 /** The shell resolves scan authority by these ids; the UI never supplies an external URL or command. */
-export function HintActionButton({ mountPoint, proposalId }: {
+export function HintActionButton({ mountPoint, proposalId, label = 'Open Steam uninstall' }: {
   mountPoint: string;
   proposalId: string;
+  label?: string;
 }) {
   const bridge = useBridge();
   const [pending, setPending] = useState(false);
@@ -24,7 +25,7 @@ export function HintActionButton({ mountPoint, proposalId }: {
   };
   return <span className="hint-action">
     <button type="button" className="btn" onClick={open} disabled={pending}>
-      <ExternalLink size={12} aria-hidden /> {pending ? 'Opening Steam…' : 'Open Steam uninstall'}
+      <ExternalLink size={12} aria-hidden /> {pending ? 'Opening…' : label}
     </button>
     {error && <span className="hint-action-error" role="alert">{error}</span>}
   </span>;

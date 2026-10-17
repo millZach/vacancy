@@ -13,6 +13,20 @@ import type {
   Skip,
   VolumeInfo,
 } from './types';
+import toolGuides from '../data/toolGuidance.json';
+import type { HintAction } from '../bindings/HintAction';
+
+function toolAdvice(platform: Platform): Proposal[] {
+  return toolGuides.filter(g => platform === 'windows'
+    ? !['xcodeInstructions', 'homebrewInstructions'].includes(g.action.kind)
+    : !g.action.kind.startsWith('windows')).map(g => ({
+      id: g.id, category: g.action.kind.startsWith('windows') ? 'system' : 'dev',
+      title: g.title, summary: g.summary,
+      why: [g.intro, ...g.steps.map((step, i) => `${i + 1}. ${step}`), g.caution, `Reference: ${g.sourceLabel}`].join('\n'),
+      bytes: 0, itemCount: 0, placeCount: 0, risk: 'review', source: 'rule', aiNote: null,
+      action: 'hint', hintAction: g.action as HintAction, regenerable: false, samplePaths: [], defaultOn: false,
+    }));
+}
 
 /**
  * What the mock bridge answers with. One per platform, with the prototype's datasets (variant D) and drives shaped
@@ -715,7 +729,7 @@ export const fixtures = {
       why: 'Uninstall from Steam so its library stays consistent. Vacancy won’t delete the game or open Steam during a run.',
       bytes: 0, itemCount: 0, placeCount: 0, risk: 'review', source: 'rule', aiNote: null,
       action: 'hint', hintAction: { kind: 'steamUninstall', appId: 1091500 }, regenerable: false, samplePaths: [], defaultOn: false,
-    }],
+    }, ...toolAdvice('windows')],
     folders: win.folders,
     runSkips: [
       {
@@ -773,7 +787,7 @@ export const fixtures = {
       why: "In Logic Pro, open Sound Library and review your downloaded content (Manage Packs in Logic Pro 12; Sound Library Manager in earlier versions). Use the app's controls for content you no longer need, or relocate the library through Logic. Existing projects may need these sounds. Shared or cloned content means the library's size is not a promise of space recovered.",
       bytes: 0, itemCount: 0, placeCount: 0, risk: 'review', source: 'rule', aiNote: null,
       action: 'hint', hintAction: { kind: 'logicInstructions' }, regenerable: false, samplePaths: [], defaultOn: false,
-    }],
+    }, ...toolAdvice('macos')],
     folders: mac.folders,
     runSkips: [
       {

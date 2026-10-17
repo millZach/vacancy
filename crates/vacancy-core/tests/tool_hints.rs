@@ -85,6 +85,18 @@ fn steam_root(env: &Env) -> PathBuf {
         Platform::MacOs => env.home.join("Library/Application Support/Steam"),
     }
 }
+
+fn seed_tool_presence(env: &Env) {
+    let paths = match env.platform {
+        Platform::Windows => vec![env.system_root.clone(), env.local_app_data.join("Docker")],
+        Platform::MacOs => vec![
+            env.home.join("Library/Containers/com.docker.docker"),
+            env.home.join("Library/Developer/CoreSimulator"),
+            env.home.join("Library/Caches/Homebrew"),
+        ],
+    };
+    for path in paths { write(&path.join("fixture-presence.txt"), "passive presence only"); }
+}
 const MANIFEST: &str = r#""AppState" { "appid" "42" "name" "Fixture game" "LastPlayed" "100000" "SizeOnDisk" "123456789" }"#;
 
 fn moment() -> vacancy_core::Moment {
@@ -113,6 +125,7 @@ fn scan_advice_makes_zero_byte_reminder_runs_and_round_trips_without_mutation() 
     for platform in [Platform::Windows, Platform::MacOs] {
         let fx = Fixture::new();
         let env = fx.env(platform);
+        seed_tool_presence(&env);
         let manifest = steam_root(&env).join("steamapps/appmanifest_42.acf");
         write(&manifest, MANIFEST);
         if platform == Platform::MacOs {
@@ -128,7 +141,7 @@ fn scan_advice_makes_zero_byte_reminder_runs_and_round_trips_without_mutation() 
             .iter()
             .filter(|p| p.action == ProposalAction::Hint)
             .collect();
-        assert_eq!(hints.len(), if platform == Platform::MacOs { 2 } else { 1 });
+        assert_eq!(hints.len(), if platform == Platform::MacOs { 6 } else { 5 });
         let ids: Vec<_> = hints.iter().map(|p| p.id.clone()).collect();
         for hint in hints {
             assert_eq!((hint.bytes, hint.item_count, hint.place_count), (0, 0, 0));
@@ -269,6 +282,7 @@ fn scan_advice_makes_zero_byte_reminder_runs_and_round_trips_without_mutation() 
 fn mixed_cleanup_and_advice_keep_only_real_deletions_in_the_totals() {
     let fx = Fixture::new();
     let env = fx.env(Platform::Windows);
+    seed_tool_presence(&env);
     write(
         &steam_root(&env).join("steamapps/appmanifest_42.acf"),
         MANIFEST,
@@ -289,7 +303,7 @@ fn mixed_cleanup_and_advice_keep_only_real_deletions_in_the_totals() {
     let plan = vacancy_core::plan(
         &scanned,
         &env,
-        &[cleanup.id.clone(), "hint-steam-42".into()],
+        &[cleanup.id.clone(), "hint-steam-42".into(), "hint-windows-cleanup".into(), "hint-docker-cache".into()],
     )
     .unwrap();
     assert_eq!(plan.summary().bytes, cleanup.bytes);
@@ -302,7 +316,7 @@ fn mixed_cleanup_and_advice_keep_only_real_deletions_in_the_totals() {
     );
     assert_eq!(report.freed_bytes, cleanup.bytes);
     assert_eq!(report.deleted_items, cleanup.item_count);
-    assert_eq!(report.left_for_you.len(), 1);
+    assert_eq!(report.left_for_you.len(), 3);
     assert_eq!(report.left_for_you[0].bytes, 0);
     assert!(!old.exists());
     assert!(
@@ -561,4 +575,46 @@ fn library_replaced_by_junction_or_symlink_after_scan_is_not_read() {
     fs::remove_dir(&apps).unwrap();
     #[cfg(unix)]
     fs::remove_file(&apps).unwrap();
+}
+
+#[test]
+fn passive_guides_require_current_scanned_nofollow_presence_and_never_fall_back_to_host() {
+    for platform in [Platform::Windows, Platform::MacOs] {
+        let fx = Fixture::new();
+        let env = fx.env(platform);
+        let empty = hints::discover_until(&env, &fx.snapshot(), moment().now, &|| false).unwrap();
+        assert!(empty.is_empty(), "missing tools are not invented");
+        seed_tool_presence(&env);
+        let snap = fx.snapshot();
+        let hints = hints::discover_until(&env, &snap, moment().now, &|| false).unwrap();
+        assert_eq!(hints.len(), 4);
+        assert!(hints.iter().all(|h| h.reported_bytes.is_none() && h.action.external_uri().is_some_and(|u| u.starts_with("https://"))));
+        let outside = Fixture::new();
+        let outside_env = outside.env(platform);
+        seed_tool_presence(&outside_env);
+        let before = fixture::inventory(&outside.root).unwrap();
+        let mut wrong_env = outside_env.clone();
+        wrong_env.confined_to = Some(fx.root.clone());
+        assert!(hints::discover_until(&wrong_env, &snap, moment().now, &|| false).unwrap().is_empty());
+        assert_eq!(fixture::inventory(&outside.root).unwrap(), before);
+
+        let evidence = if platform == Platform::Windows { env.local_app_data.join("Docker") }
+            else { env.home.join("Library/Containers/com.docker.docker") };
+        let moved = evidence.with_file_name("docker-old");
+        fs::rename(&evidence, &moved).unwrap();
+        #[cfg(windows)]
+        support::win::junction(&evidence, &moved);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&moved, &evidence).unwrap();
+        let found = hints::discover_until(&env, &snap, moment().now, &|| false).unwrap();
+        assert!(found.iter().all(|h| !h.id.starts_with("hint-docker")), "replaced/link evidence is omitted");
+        assert_eq!(fs::read_to_string(moved.join("fixture-presence.txt")).unwrap(), "passive presence only");
+        #[cfg(windows)]
+        fs::remove_dir(&evidence).unwrap();
+        #[cfg(unix)]
+        fs::remove_file(&evidence).unwrap();
+
+        // Even a snapshot listing of a different profile cannot bypass positive confinement.
+        assert!(hints::discover_until(&wrong_env, &outside.snapshot(), moment().now, &|| false).unwrap().is_empty());
+    }
 }

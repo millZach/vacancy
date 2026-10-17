@@ -8,6 +8,7 @@ import { layoutAtlas, type AtlasModel, type Leaf, type Rect } from '../map/model
 import { useSize } from '../map/useSize';
 import { tileOf } from '../plan/totals';
 import { HintActionButton } from '../plan/HintActionButton';
+import { AdviceText } from '../plan/AdviceText';
 import { asSentence, neverReached } from '../run/progress';
 import { biggestWin, categoryOf, count, keptOf, remindersOnly } from '../wrapped/deck';
 import { tokenMs } from '../wrapped/motion';
@@ -429,12 +430,12 @@ export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onCl
               {r.leftForYou.map((a) => (
                 <li key={a.id} onMouseEnter={() => onHot(tileOf(a.id))} onMouseLeave={() => onHot(null)}>
                   <Signpost size={14} aria-hidden />
-                  <span>
+                  <div>
                     <b>{a.title}</b>
                     {a.summary}
-                    <span className="advice-why">{a.why}</span>
+                    <AdviceText why={a.why} action={a.hintAction} mountPoint={r.mountPoint} proposalId={a.id} compact />
                     {a.hintAction?.kind === 'steamUninstall' && <HintActionButton mountPoint={r.mountPoint} proposalId={a.id} />}
-                  </span>
+                  </div>
                   {a.bytes > 0 && <span className="advice-num">{formatBytes(a.bytes, 0)}</span>}
                 </li>
               ))}

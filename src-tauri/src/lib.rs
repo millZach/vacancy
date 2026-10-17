@@ -66,19 +66,16 @@ impl Mode {
         mount_point: &str,
         lookup: impl FnOnce() -> Option<(String, vacancy_core::hints::HintAction)>,
         volumes: impl FnOnce() -> Result<Vec<VolumeInfo>, String>,
-        launch: impl FnOnce(u32) -> Result<(), String>,
+        launch: impl FnOnce(vacancy_core::hints::HintAction) -> Result<(), String>,
     ) -> Result<(), String> {
         if !matches!(self, Mode::Real) {
-            return Err("Steam can't be opened from fixture mode. No app was launched.".into());
+            return Err("External advice can't be opened from fixture mode. No app was launched.".into());
         }
         let (expected_volume, action) = lookup().ok_or(
-            "This advice needs a current scan. Scan this drive again before opening Steam.",
+            "This advice needs a current scan. Scan this drive again before opening it.",
         )?;
-        let vacancy_core::hints::HintAction::SteamUninstall { app_id } = action else {
+        if action.external_uri().is_none() {
             return Err("This advice has local instructions and does not open an app.".into());
-        };
-        if app_id == 0 {
-            return Err("This Steam advice is not valid. Scan this drive again.".into());
         }
         let current = volumes()?.into_iter().find(|v| v.mount_point == mount_point)
             .ok_or("This drive is no longer available. Connect it and scan again before opening Steam.")?;
@@ -87,7 +84,7 @@ impl Mode {
                 "The drive changed since this scan. Scan it again before opening Steam.".into(),
             );
         }
-        launch(app_id)
+        launch(action)
     }
 
     /// The mode `VACANCY_FIXTURE_ROOT` asks for, its folder checked by `fixture::check_root`.
@@ -385,7 +382,7 @@ async fn open_hint(mount_point: String, proposal_id: String, app: AppHandle) -> 
                 })
             },
             || vacancy_core::list_volumes().map_err(|e| e.to_string()),
-            |app_id| vacancy_core::hints::open_steam_uninstall(app_id).map_err(|e| e.to_string()),
+            |action| vacancy_core::hints::open_external_hint(&action).map_err(|e| e.to_string()),
         )
     })
     .await
@@ -697,10 +694,10 @@ mod tests {
                 C,
                 || Some(("volume-a".into(), HintAction::SteamUninstall { app_id: 42 })),
                 || Ok(vec![hint_volume("volume-a")]),
-                |app_id| {
+                |action| {
                     called = true;
                     assert_eq!(
-                        HintAction::SteamUninstall { app_id }.steam_uri().as_deref(),
+                        action.steam_uri().as_deref(),
                         Some("steam://uninstall/42")
                     );
                     Ok(())
@@ -773,6 +770,30 @@ mod tests {
                 .unwrap_err(),
             "Steam is not installed"
         );
+    }
+
+    #[test]
+    fn vendor_references_use_compiled_https_only_and_the_same_volume_authority() {
+        use vacancy_core::hints::HintAction;
+        for action in [HintAction::WindowsCleanupInstructions, HintAction::WindowsDeliveryInstructions,
+            HintAction::DockerImagesInstructions, HintAction::DockerCacheInstructions,
+            HintAction::XcodeInstructions, HintAction::HomebrewInstructions] {
+            let expected = action.external_uri().unwrap();
+            assert!(expected.starts_with("https://"));
+            let mut launched = false;
+            Mode::Real.open_hint_with(C, || Some(("volume-a".into(), action.clone())),
+                || Ok(vec![hint_volume("volume-a")]), |actual| {
+                    launched = true;
+                    assert_eq!(actual.external_uri().as_deref(), Some(expected.as_str()));
+                    Ok(())
+                }).unwrap();
+            assert!(launched);
+            assert!(Mode::Real.open_hint_with(C, || Some(("volume-a".into(), action.clone())),
+                || Ok(vec![hint_volume("changed")]), |_| panic!("changed drive never launches")).is_err());
+            assert!(Mode::Fixture { root: PathBuf::from("fixture"), capacity: 1 }.open_hint_with(C,
+                || Some(("volume-a".into(), action)), || panic!("no host volumes"),
+                |_| panic!("no host launcher")).is_err());
+        }
     }
 
     #[test]

@@ -58,7 +58,8 @@ describe('the mock bridge', () => {
     expect(c.proposals.map((p) => p.id)).toEqual(fixtures.windows.proposals.map((p) => p.id));
     const tiles = c.overview.categories.flatMap((cat) => cat.items.filter((i) => i.kind === 'proposal'));
     expect(tiles.map((t) => t.proposal).sort()).toEqual(c.proposals.filter((p) => p.action === 'delete').map((p) => p.id).sort());
-    expect(c.proposals.filter((p) => p.action === 'hint')).toEqual([expect.objectContaining({ bytes: 0, itemCount: 0, placeCount: 0, defaultOn: false })]);
+    expect(c.proposals.filter((p) => p.action === 'hint')).toHaveLength(5);
+    for (const p of c.proposals.filter(p => p.action === 'hint')) expect(p).toMatchObject({ bytes: 0, itemCount: 0, placeCount: 0, defaultOn: false });
     for (const t of tiles) expect(t.bytes).toBe(c.proposals.find((p) => p.id === t.proposal)!.bytes);
 
     const node = d.proposals.find((p) => p.id === 'w-node')!;

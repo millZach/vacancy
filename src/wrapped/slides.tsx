@@ -6,6 +6,7 @@ import type { MapCategory, RunReport } from '../bridge';
 import { formatBytes, formatCount, formatDuration, NBSP } from '../format';
 import { asSentence } from '../run/progress';
 import { HeroNumber } from '../summary/HeroNumber';
+import { AdviceText } from '../plan/AdviceText';
 import { KeyFob, Letterboard, NeonSign } from './bits';
 import {
   biggestWin,
@@ -259,7 +260,7 @@ export function KeptSlide({ report: r }: SlideProps) {
                     <Signpost size={14} aria-hidden />
                     <div>
                       <b>{a.title}</b>
-                      <span>{a.why}</span>
+                      <AdviceText why={a.why} action={a.hintAction} mountPoint={r.mountPoint} proposalId={a.id} compact />
                     </div>
                     {a.bytes > 0 && <em>{formatBytes(a.bytes)}</em>}
                   </li>

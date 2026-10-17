@@ -497,6 +497,23 @@ fn build_options(root: &Path, bulk: usize, advice: bool) -> io::Result<Profile> 
             r#""AppState" { "appid" "42" "name" "Vacancy fixture game" "LastPlayed" "100000" "SizeOnDisk" "123456789" }"#,
         )?;
         advice_files.push(manifest);
+        // Passive instruction evidence only. No installed tools or host app data are consulted.
+        let docker = if windows { env.local_app_data.join("Docker") }
+            else { env.home.join("Library/Containers/com.docker.docker") };
+        let marker = docker.join("fixture-presence.txt");
+        write_file(&marker, KIB)?;
+        advice_files.push(marker);
+        if windows {
+            let marker = env.system_root.join("fixture-presence.txt");
+            write_file(&marker, KIB)?;
+            advice_files.push(marker);
+        } else {
+            for folder in ["Library/Developer/CoreSimulator", "Library/Caches/Homebrew"] {
+                let marker = env.home.join(folder).join("fixture-presence.txt");
+                write_file(&marker, KIB)?;
+                advice_files.push(marker);
+            }
+        }
         if !windows {
             let sample = sub(
                 &env.home,

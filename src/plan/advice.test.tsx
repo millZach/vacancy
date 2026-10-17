@@ -85,4 +85,43 @@ describe.each(['windows', 'macos'] as const)('%s advice reminders', (platform) =
     expect({ bytes: plan.bytes, items: plan.items, places: plan.places, steps: plan.steps }).toEqual({ bytes: without.bytes, items: without.items, places: without.places, steps: without.steps });
     expect(plan.leftForYou).toEqual([hint.id]);
   });
+
+  it('keeps tool instructions default-off, ordered, fixture-safe and intact in the recap and history', async () => {
+    const { bridge, run, tray } = await openPlan();
+    const guides = fixture.proposals.filter(p => p.action === 'hint' && p.id.startsWith('hint-'));
+    expect(guides).toHaveLength(4);
+    const launch = vi.spyOn(bridge, 'openHint');
+    for (const guide of guides) {
+      const box = within(tray).getByRole('checkbox', { name: `Remind me: ${guide.title}` });
+      expect(box).toHaveAttribute('aria-checked', 'false');
+      await userEvent.click(within(tray).getByRole('button', { name: guide.title }));
+      const row = box.closest('.tray-row')! as HTMLElement;
+      expect(row.querySelectorAll('ol > li')).toHaveLength(3);
+      const reference = within(row).getByRole('button', { name: /↗/ });
+      await userEvent.click(reference);
+      expect(await within(row).findByRole('alert')).toHaveTextContent('No app was launched.');
+      expect(launch).toHaveBeenLastCalledWith(mount, guide.id);
+      await userEvent.click(box);
+    }
+    for (const box of within(within(tray).getByRole('region', { name: 'Delete' })).getAllByRole('checkbox')) {
+      if (box.getAttribute('aria-checked') === 'true') await userEvent.click(box);
+    }
+    await userEvent.click(within(tray).getByRole('button', { name: 'Review reminders' }));
+    const confirm = await screen.findByRole('alertdialog');
+    expect(confirm).toHaveAccessibleName('Save 4 reminders?');
+    await userEvent.click(within(confirm).getByRole('button', { name: 'Save reminders' }));
+    await screen.findByRole('heading', { name: 'Reminders saved' });
+    const saved: RunReport = await run.mock.results[0]!.value as RunReport;
+    expect(saved).toMatchObject({ freedBytes: 0, plannedBytes: 0, deletedItems: 0, movedItems: 0, steps: [] });
+    expect(saved.leftForYou.map(a => a.why)).toEqual(guides.map(g => g.why));
+    await userEvent.click(screen.getByRole('button', { name: 'See what changed' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Skip to recap' }));
+    for (const toggle of screen.getAllByText('Instructions and reference')) await userEvent.click(toggle);
+    for (const guide of guides) {
+      expect(screen.getByText(guide.why.split('\n')[1]!.replace(/^\d+\. /, ''))).toBeInTheDocument();
+    }
+    await userEvent.click(screen.getByRole('button', { name: 'Past runs' }));
+    await userEvent.click(await screen.findByRole('menuitem'));
+    expect((await bridge.openRun(saved.id)).leftForYou.map(a => a.why)).toEqual(guides.map(g => g.why));
+  });
 });
