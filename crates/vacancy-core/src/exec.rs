@@ -1488,6 +1488,11 @@ mod tests {
 
     impl Fx {
         fn new() -> Self {
+            Self::with(|_| {})
+        }
+
+        /// The fixture, with `prepare` run on its profile before the scan.
+        fn with(prepare: impl FnOnce(&Profile)) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let root = if cfg!(windows) {
                 dir.path().to_path_buf()
@@ -1496,6 +1501,7 @@ mod tests {
             }
             .join("fixture");
             let profile = fixture::build(&root).unwrap();
+            prepare(&profile);
             let mut env = fixture::env(&root);
             // A cloud-sync folder in the home folder, which the Guard protects whole.
             let cloud = profile.home.join("Dropbox");
@@ -1697,13 +1703,32 @@ mod tests {
     /// change time and only the others go back.
     fn rewrite_keeping_times(path: &Path, len: usize) {
         use std::io::Write;
+        keeping_times(path, |f| {
+            f.write_all(&vec![0xA5u8; len]).unwrap();
+            f.set_len(len as u64).unwrap();
+        });
+    }
+
+    /// Writes `len` bytes at `at` in `path`, inside its length, written out to disk as the system's lazy writer
+    /// would within a second (NTFS allocates a sparse file's hole only then), and sets its times back.
+    fn write_into_keeping_times(path: &Path, at: u64, len: usize) {
+        use std::io::{Seek, SeekFrom, Write};
+        keeping_times(path, |f| {
+            f.seek(SeekFrom::Start(at)).unwrap();
+            f.write_all(&vec![0xC3u8; len]).unwrap();
+            f.sync_all().unwrap();
+        });
+    }
+
+    /// Changes `path` through `change`, then sets its times back: on Windows all four, the change time included;
+    /// elsewhere the modified and accessed times (the kernel keeps the change time).
+    fn keeping_times(path: &Path, change: impl FnOnce(&mut std::fs::File)) {
         #[cfg(windows)]
         let times = win::times(path);
         #[cfg(not(windows))]
         let old = std::fs::metadata(path).unwrap();
         let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
-        f.write_all(&vec![0xA5u8; len]).unwrap();
-        f.set_len(len as u64).unwrap();
+        change(&mut f);
         drop(f);
         #[cfg(windows)]
         win::set_times(path, &times);
@@ -1772,6 +1797,137 @@ mod tests {
             };
             assert_ne!(ok, 0);
         }
+
+        /// Marks `path` sparse: from then on, extending it or zeroing ranges allocates nothing for them.
+        pub(super) fn make_sparse(path: &Path) {
+            use windows_sys::Win32::System::IO::DeviceIoControl;
+            use windows_sys::Win32::System::Ioctl::FSCTL_SET_SPARSE;
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .unwrap();
+            let mut returned = 0u32;
+            // SAFETY: the handle is open for writing, and FSCTL_SET_SPARSE without a buffer sets the flag.
+            let ok = unsafe {
+                DeviceIoControl(
+                    file.as_raw_handle(),
+                    FSCTL_SET_SPARSE,
+                    std::ptr::null(),
+                    0,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut returned,
+                    std::ptr::null_mut(),
+                )
+            };
+            assert_ne!(ok, 0);
+        }
+
+        /// The bytes allocated to `path`, as a handle to it reports them.
+        pub(super) fn allocated(path: &Path) -> u64 {
+            use windows_sys::Win32::Storage::FileSystem::{FILE_STANDARD_INFO, FileStandardInfo};
+            let file = open(path);
+            let mut info = FILE_STANDARD_INFO::default();
+            // SAFETY: `info` is writable and sized as passed; the handle is open.
+            let ok = unsafe {
+                GetFileInformationByHandleEx(
+                    file.as_raw_handle(),
+                    FileStandardInfo,
+                    (&raw mut info).cast(),
+                    std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+                )
+            };
+            assert_ne!(ok, 0);
+            u64::try_from(info.AllocationSize).unwrap()
+        }
+    }
+
+    /// The bytes allocated to `path`.
+    fn allocated(path: &Path) -> u64 {
+        #[cfg(windows)]
+        {
+            win::allocated(path)
+        }
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(path).unwrap().blocks() * 512
+        }
+    }
+
+    /// Between the checks and its delete, data is written into a hole of a sparse file, its length kept and its
+    /// times set back. The file opened for deleting has the identity and the length listed, but not the space: it
+    /// stays, and its space isn't counted as freed. A sparse file nothing touched still goes.
+    #[test]
+    fn a_sparse_file_filled_in_after_the_checks_is_left() {
+        const LEN: u64 = 1 << 20;
+        const DATA: usize = 64 * 1024;
+        let fx = Fx::with(|p| {
+            for name in ["sparse-filled.bin", "sparse-kept.bin"] {
+                let path = p.cache.join(name);
+                std::fs::write(&path, vec![0x5Au8; DATA]).unwrap();
+                #[cfg(windows)]
+                win::make_sparse(&path);
+                // The rest of it is a hole: extending a sparse file allocates nothing.
+                let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+                f.set_len(LEN).unwrap();
+                let old = SystemTime::now() - Duration::from_secs(200 * 86_400);
+                f.set_times(
+                    std::fs::FileTimes::new()
+                        .set_modified(old)
+                        .set_accessed(old),
+                )
+                .unwrap();
+            }
+            // As the fixture does: the change times settle before the scan's threshold.
+            std::thread::sleep(Duration::from_millis(3200));
+        });
+        let victim = fx.profile.cache.join("sparse-filled.bin");
+        let untouched = fx.profile.cache.join("sparse-kept.bin");
+        let before = allocated(&victim);
+        assert!(
+            before < LEN,
+            "it is sparse: {before} of {LEN} bytes allocated"
+        );
+        let filled = Cell::new(false);
+        let fill = |at: &Path| {
+            if at == victim && !filled.get() {
+                write_into_keeping_times(&victim, LEN / 2, DATA);
+                filled.set(true);
+            }
+        };
+        let report = fx.run(
+            cache(),
+            &Hooks {
+                before_file: Some(&fill),
+                ..Hooks::default()
+            },
+            &CancelToken::new(),
+        );
+        assert!(filled.get(), "the hook ran");
+        assert_eq!(
+            std::fs::metadata(&victim).map(|m| m.len()).ok(),
+            Some(LEN),
+            "it stays, at the length listed: {:#?}",
+            report.steps
+        );
+        assert!(
+            allocated(&victim) > before,
+            "filling the hole took more space"
+        );
+        assert!(
+            skips(&report)
+                .iter()
+                .any(|k| k.kind == SkipKind::Changed && Path::new(&k.path) == victim),
+            "{:#?}",
+            report.steps
+        );
+        assert!(
+            !untouched.exists(),
+            "the sparse file nothing touched goes: {:#?}",
+            report.steps
+        );
     }
 
     /// Between the checks and its delete, a file is rewritten in place to another length, its times set back. The

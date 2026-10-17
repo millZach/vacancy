@@ -27,6 +27,7 @@ The planner turns the selected proposals into a plan that can't be changed once 
 - A program allowed to write a file's attributes can set all four times, the change time included (`SetFileInformationByHandle(FileBasicInfo)`), with no privilege beyond that. So times are a first check, never the proof.
 - A file copied in has a new id; a file rewritten to another size has other sizes. Both change the digests.
 - What no check here can see: a file rewritten in place to exactly the same length and allocation, with all four times set back. Only a hash of every file's contents would, which would mean reading every byte before deleting it. Vacancy doesn't. That is the remaining limit.
+  - A sparse file's hole filled in counts as changed once NTFS has written the data out, which the system does within about a second. Until then NTFS reports the old allocation, so for that second the fill is this same limit.
 - On macOS the kernel always sets the change time, so there the digests are a second line.
 
 ## Before each action
@@ -51,7 +52,7 @@ The planner turns the selected proposals into a plan that can't be changed once 
   - **What this guarantees.** On Windows nothing on the chain can move at all: the pinned handles forbid it, and NTFS also refuses to rename a folder with handles open inside it. On macOS a folder can be moved at any moment, so the guarantee is the walk before each unlink. The one window is between that walk and the unlink, the width of a system call; a file being deleted when its folder moves can still go. The test `a_folder_moved_into_a_cloud_folder_mid_run_is_left_there` covers both platforms.
 - **Windows:**
   - The file is opened exclusively (no sharing) with `FILE_OPEN_REPARSE_POINT`.
-  - It must have the listed id, carry no link tag, be unchanged by its handle's own times, and have the listed length. The length and link count come from one query by handle; if it fails, the file stays, since its size can't be confirmed and its space couldn't be counted honestly.
+  - It must have the listed id, carry no link tag, be unchanged by its handle's own times, and have the listed length and allocation. Allocation matters for sparse files: data written into a hole keeps the length but takes more space. The length, allocation and link count come from one query by handle; if it fails, the file stays, since its size can't be confirmed and its space couldn't be counted honestly.
   - It is deleted through that handle with `FileDispositionInfoEx`: `POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE`. Where that isn't supported, the read-only attribute is cleared on that file's handle and the classic disposition used, restoring the attribute if the delete fails.
   - A file any app has open fails the exclusive open: a sharing violation, skipped as in use.
   - Folders being deleted are opened without `FILE_SHARE_DELETE`.

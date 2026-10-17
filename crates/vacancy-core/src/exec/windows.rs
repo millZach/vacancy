@@ -316,8 +316,8 @@ pub(crate) fn list(dir: &Dir) -> Result<Vec<Entry>, Fail> {
 }
 
 /// Deletes the file `e` in `dir`. It is opened exclusively, without following it, and must be the file listed
-/// (same id), not a link, and unchanged since `threshold`; then it goes through that handle. Gives the bytes freed
-/// if this was its last name, `None` if other names keep it.
+/// (same id), not a link, unchanged since `threshold`, and at the length and allocation listed; then it goes through
+/// that handle. Gives the bytes freed if this was its last name, `None` if other names keep it.
 pub(crate) fn delete_file(
     dir: &Dir,
     e: &Entry,
@@ -359,8 +359,11 @@ pub(crate) fn delete_file(
         standard(&handle)
     };
     let std = std.ok_or_else(|| Fail::Failed("its size can't be read".into()))?;
-    if u64::try_from(std.EndOfFile).ok() != Some(e.logical) {
-        // Rewritten in place to another length since it was listed, whatever its times say.
+    // Rewritten in place since it was listed, whatever its times say: to another length, or into a sparse file's
+    // hole (same length, more space).
+    if u64::try_from(std.EndOfFile).ok() != Some(e.logical)
+        || u64::try_from(std.AllocationSize).ok() != Some(e.alloc)
+    {
         return Err(Fail::Changed);
     }
     dispose(&handle, times.FileAttributes)?;
