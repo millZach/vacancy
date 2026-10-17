@@ -107,8 +107,14 @@ pub fn in_ci() -> bool {
 }
 
 /// Makes a folder unlistable until the guard drops.
+///
+/// On Unix: `chmod 000`. On Windows: an ACE denying everyone the right to list it, plus a handle held open with no
+/// sharing. CI runs as an administrator, and a deny ACE alone did not always stop it listing the folder; no
+/// privilege gets past another handle's sharing mode.
 pub struct Unreadable {
     path: PathBuf,
+    #[cfg(windows)]
+    held: win::Exclusive,
 }
 
 impl Unreadable {
@@ -119,9 +125,15 @@ impl Unreadable {
             fs::set_permissions(path, fs::Permissions::from_mode(0o000)).expect("chmod 000");
         }
         #[cfg(windows)]
-        win::deny_listing(path, true);
+        let held = {
+            let held = win::Exclusive::open(path);
+            win::deny_listing(path, true);
+            held
+        };
         Self {
             path: path.to_path_buf(),
+            #[cfg(windows)]
+            held,
         }
     }
 }
@@ -134,7 +146,10 @@ impl Drop for Unreadable {
             let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o755));
         }
         #[cfg(windows)]
-        win::deny_listing(&self.path, false);
+        {
+            self.held.close();
+            win::deny_listing(&self.path, false);
+        }
     }
 }
 
@@ -200,6 +215,48 @@ pub mod win {
         // SAFETY: `h` is open and not used again.
         unsafe { CloseHandle(h) };
         assert!(ok != 0, "ioctl on {}: {err}", path.display());
+    }
+
+    /// A folder held open for reading with no sharing: until it closes, nothing else can list the folder.
+    pub struct Exclusive(isize);
+
+    impl Exclusive {
+        pub fn open(path: &Path) -> Self {
+            let w = wide(path.as_os_str());
+            // SAFETY: `w` is NUL-terminated; share mode 0 refuses every other open that wants to read.
+            let h = unsafe {
+                CreateFileW(
+                    w.as_ptr(),
+                    GENERIC_READ,
+                    0,
+                    ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS,
+                    ptr::null_mut(),
+                )
+            };
+            assert!(
+                h != INVALID_HANDLE_VALUE,
+                "hold {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            );
+            Self(h as isize)
+        }
+
+        pub fn close(&mut self) {
+            if self.0 != 0 {
+                // SAFETY: the handle is open and closed only here.
+                unsafe { CloseHandle(self.0 as _) };
+                self.0 = 0;
+            }
+        }
+    }
+
+    impl Drop for Exclusive {
+        fn drop(&mut self) {
+            self.close();
+        }
     }
 
     pub fn set_sparse(path: &Path) {

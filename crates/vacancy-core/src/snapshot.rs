@@ -610,6 +610,9 @@ impl Builder {
             if sub.flags.contains(DirFlags::LINK) {
                 snap.stats.links_skipped += 1;
             }
+            if sub.flags.contains(DirFlags::OTHER_VOLUME) {
+                snap.stats.other_volumes_skipped += 1;
+            }
         }
         for kept in &listing.kept {
             let name = append_name(&mut snap.names, &listing.names[kept.name.clone()]);
