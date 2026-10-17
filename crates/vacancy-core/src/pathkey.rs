@@ -229,7 +229,10 @@ pub(crate) fn long_form(path: &Path) -> Cow<'_, Path> {
         let mut head = path.to_path_buf();
         let mut tail = Vec::new();
         loop {
-            if let Some(mut long) = win::long_path(&head) {
+            if let Some(long) = win::long_path(&head) {
+                // The file system answers with every name as it is spelled on disk; only the short names are
+                // replaced, so the rest keep the spelling they were given (it matters on a case-sensitive volume).
+                let mut long = keep_spelling(&head, &long);
                 for name in tail.iter().rev() {
                     long.push(name);
                 }
@@ -246,6 +249,25 @@ pub(crate) fn long_form(path: &Path) -> Cow<'_, Path> {
     }
     #[cfg(not(windows))]
     Cow::Borrowed(path)
+}
+
+/// `long` with the names of `original` that aren't short names put back as they were written. Both are the same
+/// path; if their names don't line up, `long` as it is.
+#[cfg(windows)]
+fn keep_spelling(original: &Path, long: &Path) -> std::path::PathBuf {
+    let given: Vec<Component<'_>> = original.components().collect();
+    let found: Vec<Component<'_>> = long.components().collect();
+    if given.len() != found.len() {
+        return long.to_path_buf();
+    }
+    let mut out = std::path::PathBuf::new();
+    for (g, f) in given.iter().zip(&found) {
+        match g {
+            Component::Normal(name) if !name.as_encoded_bytes().contains(&b'~') => out.push(name),
+            _ => out.push(f.as_os_str()),
+        }
+    }
+    out
 }
 
 #[cfg(windows)]
@@ -389,6 +411,33 @@ mod tests {
         if short == long {
             eprintln!("8.3 names are off on this volume; nothing more to check");
         }
+    }
+
+    /// Expanding a short name changes only that name: the others keep the spelling they were given, which on a
+    /// case-sensitive volume is a different place than the spelling on disk.
+    #[cfg(windows)]
+    #[test]
+    fn expanding_short_names_keeps_the_other_names_as_written() {
+        let fx = tempfile::tempdir().unwrap();
+        let long = fx.path().join("A folder with a long name");
+        std::fs::create_dir_all(long.join("Mixed")).unwrap();
+        let short = short_path(&long);
+        if short == long {
+            eprintln!("8.3 names are off on this volume; nothing to check");
+            return;
+        }
+        let key = PathKey::of(&short.join("mixed")).unwrap();
+        let exact = key.keys_in(Case::Sensitive);
+        assert_eq!(
+            exact[exact.len() - 1],
+            "mixed",
+            "as written, not as on disk"
+        );
+        assert_eq!(
+            exact[exact.len() - 2],
+            "A folder with a long name",
+            "the short name, expanded"
+        );
     }
 
     /// The 8.3 form of an existing path (the same path where 8.3 names are off).
