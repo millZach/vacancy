@@ -201,6 +201,7 @@ fn to_entry(name: &OsStr, st: &libc::stat) -> Entry {
         dev,
         // As the scanner measures: st_blocks counts 512-byte units whatever the block size.
         alloc: (st.st_blocks.max(0) as u64).saturating_mul(512),
+        logical: st.st_size.max(0) as u64,
         changed: changed_of(st),
         #[allow(clippy::unnecessary_cast)]
         links: Some(st.st_nlink as u64),
@@ -330,6 +331,10 @@ fn recheck(dir: &Dir, e: &Entry, c: &CString, threshold: i128) -> Result<libc::s
     let st = fstatat(dir, c)?;
     let now = to_entry(&e.name, &st);
     if (now.dev, now.id) != (e.dev, e.id) || now.kind != e.kind {
+        return Err(Fail::Changed);
+    }
+    // Rewritten to another size since it was listed.
+    if now.kind == Kind::File && (now.logical, now.alloc) != (e.logical, e.alloc) {
         return Err(Fail::Changed);
     }
     if now.changed >= threshold {

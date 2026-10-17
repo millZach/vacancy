@@ -412,6 +412,11 @@ impl Scratch {
             name: OsStr::new(self.name.as_str()),
             kind,
             allocated,
+            logical: if kind == EntryKind::File {
+                u64::try_from(raw.end_of_file).unwrap_or(0)
+            } else {
+                0
+            },
             modified: unix_time(raw.modified),
             accessed: unix_time(raw.accessed),
             link_key,

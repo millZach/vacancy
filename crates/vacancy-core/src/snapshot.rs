@@ -293,8 +293,14 @@ fn full_identity(root: &Root, key: u128) -> Option<Identity> {
     }
 }
 
+/// A file's part of a folder's [`Digests`]: its identity with its logical and allocated sizes, so that a file
+/// rewritten in place to another size, even with its times set back, no longer adds up the same.
+pub(crate) fn file_digest_key(id: u128, logical: u64, allocated: u64) -> u64 {
+    digest_key(id) ^ digest_key((u128::from(logical) << 64) | u128::from(allocated)).rotate_left(1)
+}
+
 /// One entry's part of a folder's [`Digests`]: its identity (Windows file id; Unix device and inode), mixed so that
-/// sums of different sets don't meet by accident.
+/// sums of different sets don't meet by accident. Files add their sizes too ([`file_digest_key`]).
 pub(crate) fn digest_key(id: u128) -> u64 {
     let mut z = (id as u64) ^ ((id >> 64) as u64).rotate_left(29) ^ 0x9E37_79B9_7F4A_7C15;
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -311,6 +317,8 @@ struct FileRec {
     /// What identified the file when it was listed (Windows file id; Unix device and inode), or 0 where the file
     /// system has none.
     identity: u128,
+    /// Its length in bytes.
+    logical: u64,
 }
 
 const NO_PARENT: u32 = u32::MAX;
@@ -432,6 +440,11 @@ impl Snapshot {
     /// its file id, on Unix its device and inode. `None` where the scan has no identity for it.
     pub(crate) fn dir_identity(&self, dir: DirId) -> Option<Identity> {
         full_identity(self.root_of(dir), self.identity(dir)?)
+    }
+
+    /// A kept file's length in bytes when the scan listed it.
+    pub(crate) fn file_logical(&self, file: FileId) -> u64 {
+        self.files[file.0 as usize].logical
     }
 
     /// A kept file's identity as the scan recorded it, the volume included, as [`dir_identity`](Self::dir_identity).
@@ -594,6 +607,7 @@ pub(crate) struct PendingFile {
     bytes: u64,
     last_used: UnixTime,
     identity: Option<u128>,
+    logical: u64,
 }
 
 impl Listing {
@@ -634,6 +648,7 @@ impl Listing {
         bytes: u64,
         last_used: UnixTime,
         identity: Option<u128>,
+        logical: u64,
     ) {
         let name = self.push_name(name);
         self.kept.push(PendingFile {
@@ -641,6 +656,7 @@ impl Listing {
             bytes,
             last_used,
             identity,
+            logical,
         });
     }
 
@@ -783,6 +799,7 @@ impl Builder {
                 bytes: kept.bytes,
                 last_used: kept.last_used,
                 identity: kept.identity.unwrap_or(0),
+                logical: kept.logical,
             });
         }
         let child_count = listing.subdirs.len() as u32;

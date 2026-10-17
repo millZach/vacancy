@@ -35,10 +35,10 @@ use ts_rs::TS;
 use crate::categorize::Env;
 use crate::fsid::{self, Identity, Step};
 use crate::guard::Guard;
-use crate::plan::{Action, Plan, Step as PlanStep, Target, denied_reason, next_id};
+use crate::plan::{Action, LooseFile, Plan, Step as PlanStep, Target, denied_reason, next_id};
 use crate::report::{CategoryFreed, Outcome, RunReport, Skip, SkipKind, StepReport};
 use crate::scan::CancelToken;
-use crate::snapshot::digest_key;
+use crate::snapshot::{digest_key, file_digest_key};
 use crate::text::group_digits;
 use crate::volume::VolumeInfo;
 
@@ -200,6 +200,8 @@ pub(crate) struct Entry {
     pub(crate) dev: u64,
     /// Allocated bytes, measured as the scanner measures them.
     pub(crate) alloc: u64,
+    /// Length in bytes (files).
+    pub(crate) logical: u64,
     /// The later of when it was last modified and when it last changed (renamed, moved, given a new link, its
     /// attributes set), in nanoseconds since the Unix epoch.
     pub(crate) changed: i128,
@@ -221,6 +223,15 @@ impl Entry {
             self.id
         } else {
             (u128::from(self.dev) << 64) | self.id
+        }
+    }
+
+    /// Its part of its folder's digest, as the scanner adds it up: a file's with its sizes.
+    pub(crate) fn digest(&self) -> u64 {
+        if self.counts {
+            file_digest_key(self.key(), self.logical, self.alloc)
+        } else {
+            digest_key(self.key())
         }
     }
 
@@ -619,7 +630,7 @@ impl Run<'_, '_> {
                 if entry.changed >= self.threshold {
                     return Err(Whole::new(SkipKind::Changed, "It changed since the scan"));
                 }
-                if entry.alloc != action.bytes {
+                if entry.alloc != action.bytes || entry.logical != action.logical {
                     return Err(Whole::new(
                         SkipKind::Changed,
                         "Its size changed since the scan",
@@ -919,20 +930,30 @@ impl Run<'_, '_> {
         &mut self,
         dir: &sys::Dir,
         path: &Path,
-        planned: &[(OsString, u128)],
+        planned: &[LooseFile],
         index: u32,
         busy: &sys::Busy,
         tally: &mut Tally,
     ) -> Result<(), Whole> {
         let entries = sys::list(dir).map_err(|f| Whole::of("Its files", f))?;
-        let found: Vec<Entry> = entries
-            .into_iter()
-            .filter(|e| {
-                planned
-                    .iter()
-                    .any(|(name, key)| *name == e.name && *key == e.key())
-            })
-            .collect();
+        let mut found: Vec<Entry> = Vec::new();
+        let mut seen = 0usize;
+        for e in entries {
+            let Some(p) = planned
+                .iter()
+                .find(|p| p.name == e.name && p.key == e.key())
+            else {
+                continue;
+            };
+            seen += 1;
+            if (p.logical, p.alloc) != (e.logical, e.alloc) {
+                // The file the scan saw, rewritten to another size since: not what was approved.
+                let at = path.join(&e.name);
+                tally.leave(Said::changed(), &at, e.alloc, 1);
+                continue;
+            }
+            found.push(e);
+        }
         if let Some(hook) = self.hooks.before_delete {
             hook(path);
         }
@@ -959,7 +980,7 @@ impl Run<'_, '_> {
             self.progress(index, tally, &at, false);
         }
         // The files the scan saw that aren't there now: removed by someone else, or replaced.
-        let missing = planned.len().saturating_sub(found.len()) as u64;
+        let missing = planned.len().saturating_sub(seen) as u64;
         if missing > 0 {
             tally.leave(
                 Said {
@@ -990,7 +1011,7 @@ impl Tree<'_> {
     fn lists_as_scanned(&self, step: &Step, entries: &[Entry]) -> bool {
         let digest = entries
             .iter()
-            .fold(0u64, |sum, e| sum.wrapping_add(digest_key(e.key())));
+            .fold(0u64, |sum, e| sum.wrapping_add(e.digest()));
         self.folders.get(&step.id.scan_key()) == Some(&digest)
     }
 }
@@ -1463,6 +1484,145 @@ mod tests {
             .sum();
         assert!(cancelled >= left, "every file left is counted: {step:#?}");
         assert!(fx.profile.cache.exists());
+    }
+
+    /// Rewrites `path` in place to `len` bytes and sets its times back as they were: on Windows all four, the
+    /// change time too (any program allowed to write the file's attributes can); elsewhere the kernel sets the
+    /// change time and only the others go back.
+    fn rewrite_keeping_times(path: &Path, len: usize) {
+        use std::io::Write;
+        #[cfg(windows)]
+        let times = win::times(path);
+        #[cfg(not(windows))]
+        let old = std::fs::metadata(path).unwrap();
+        let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        f.write_all(&vec![0xA5u8; len]).unwrap();
+        f.set_len(len as u64).unwrap();
+        drop(f);
+        #[cfg(windows)]
+        win::set_times(path, &times);
+        #[cfg(not(windows))]
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new()
+                    .set_modified(old.modified().unwrap())
+                    .set_accessed(old.accessed().unwrap()),
+            )
+            .unwrap();
+    }
+
+    #[cfg(windows)]
+    mod win {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use std::path::Path;
+
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_BASIC_INFO, FileBasicInfo, GetFileInformationByHandleEx,
+            SetFileInformationByHandle,
+        };
+
+        fn open(path: &Path) -> std::fs::File {
+            std::fs::OpenOptions::new()
+                .access_mode(0x0080 | 0x0100) // FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES
+                .custom_flags(0x0200_0000) // FILE_FLAG_BACKUP_SEMANTICS
+                .open(path)
+                .unwrap()
+        }
+
+        pub(super) fn times(path: &Path) -> FILE_BASIC_INFO {
+            let file = open(path);
+            let mut info = FILE_BASIC_INFO::default();
+            // SAFETY: `info` is writable and sized as passed; the handle is open.
+            let ok = unsafe {
+                GetFileInformationByHandleEx(
+                    file.as_raw_handle(),
+                    FileBasicInfo,
+                    (&raw mut info).cast(),
+                    std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+                )
+            };
+            assert_ne!(ok, 0);
+            info
+        }
+
+        pub(super) fn set_times(path: &Path, times: &FILE_BASIC_INFO) {
+            let file = open(path);
+            let info = FILE_BASIC_INFO {
+                FileAttributes: 0,
+                ..*times
+            };
+            // SAFETY: `info` is a valid FILE_BASIC_INFO of the size passed; the handle may write attributes.
+            let ok = unsafe {
+                SetFileInformationByHandle(
+                    file.as_raw_handle(),
+                    FileBasicInfo,
+                    (&raw const info).cast(),
+                    std::mem::size_of::<FILE_BASIC_INFO>() as u32,
+                )
+            };
+            assert_ne!(ok, 0);
+        }
+    }
+
+    /// Between the checks and its delete, a file is rewritten in place to another length, its times set back. The
+    /// file opened for deleting is the one listed (same identity) but not the length listed, so it stays.
+    #[test]
+    fn a_file_grown_after_the_checks_is_left() {
+        let fx = Fx::new();
+        let victim = fx.profile.cache.join("f_000003");
+        let grown = Cell::new(false);
+        let grow = |at: &Path| {
+            if at == victim && !grown.get() {
+                rewrite_keeping_times(&victim, 333 * 1024);
+                grown.set(true);
+            }
+        };
+        let report = fx.run(
+            cache(),
+            &Hooks {
+                before_file: Some(&grow),
+                ..Hooks::default()
+            },
+            &CancelToken::new(),
+        );
+        assert!(grown.get(), "the hook ran");
+        assert_eq!(
+            std::fs::metadata(&victim).unwrap().len(),
+            333 * 1024,
+            "it stays"
+        );
+        assert!(
+            skips(&report)
+                .iter()
+                .any(|k| k.kind == SkipKind::Changed && Path::new(&k.path) == victim),
+            "{:#?}",
+            report.steps
+        );
+    }
+
+    /// When a file's length and link count can't be read right before its delete, it isn't deleted: its size can't
+    /// be confirmed, and freeing it couldn't be counted honestly.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_whose_size_and_links_cant_be_read_stays() {
+        let fx = Fx::new();
+        sys::test_hooks::set_fail_standard_info(true);
+        let report = fx.run(cache(), &Hooks::default(), &CancelToken::new());
+        sys::test_hooks::set_fail_standard_info(false);
+        assert_eq!(report.freed_bytes, 0, "nothing counted as freed");
+        assert_eq!(report.deleted_items, 0);
+        assert!(fx.profile.cache.join("f_000001").exists());
+        assert!(
+            skips(&report)
+                .iter()
+                .any(|k| k.reason.contains("its size can't be read")),
+            "{:#?}",
+            report.steps
+        );
     }
 
     #[test]

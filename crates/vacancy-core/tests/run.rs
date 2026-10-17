@@ -1005,3 +1005,76 @@ fn loose_files_that_changed_before_planning_are_refused() {
         .unwrap_or_else(|| panic!("the loose files are refused: {:#?}", summary.refused));
     assert_eq!(refused.kind, SkipKind::Changed);
 }
+
+/// Rewrites `path` in place (same file, same identity) to `len` bytes, then puts all its times back as they were:
+/// on Windows the change time too; elsewhere the kernel sets the change time, and only the others go back.
+fn rewrite_keeping_times(path: &Path, len: usize) {
+    use std::io::Write;
+    #[cfg(windows)]
+    let times = times_of(path);
+    #[cfg(not(windows))]
+    let old = std::fs::metadata(path).unwrap();
+    {
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+    let mut f = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    f.write_all(&vec![0x5Au8; len]).unwrap();
+    f.set_len(len as u64).unwrap();
+    drop(f);
+    #[cfg(windows)]
+    set_times_like(path, &times);
+    #[cfg(not(windows))]
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(old.modified().unwrap())
+                .set_accessed(old.accessed().unwrap()),
+        )
+        .unwrap();
+}
+
+/// A file rewritten in place to another size after the plan, with every time set back, keeps its identity, but
+/// it isn't what the scan measured: the folder target holding it is skipped whole, and among loose files it stays.
+#[test]
+fn a_file_rewritten_to_another_size_with_old_times_is_never_deleted() {
+    let fx = Fx::new();
+    let plan = fx.plan(&fx.all_ids());
+    let in_tree = fx.profile.cache.join("f_000002");
+    rewrite_keeping_times(&in_tree, 300 * 1024);
+    rewrite_keeping_times(&fx.profile.loose, 200 * 1024);
+
+    let (report, _) = fx.run(&plan, &CancelToken::new());
+    assert_eq!(
+        std::fs::metadata(&in_tree).unwrap().len(),
+        300 * 1024,
+        "the grown file stays"
+    );
+    assert!(
+        fx.profile.cache.join("f_000001").exists(),
+        "its folder target is skipped whole"
+    );
+    assert_eq!(
+        std::fs::metadata(&fx.profile.loose).unwrap().len(),
+        200 * 1024,
+        "the grown loose file stays"
+    );
+    let changed: Vec<_> = skips(&report)
+        .into_iter()
+        .filter(|k| k.kind == SkipKind::Changed)
+        .map(|k| k.path.clone())
+        .collect();
+    assert!(
+        changed.iter().any(|p| Path::new(p) == fx.profile.cache),
+        "{changed:#?}"
+    );
+    assert!(
+        changed.iter().any(|p| Path::new(p) == fx.profile.loose),
+        "{changed:#?}"
+    );
+}

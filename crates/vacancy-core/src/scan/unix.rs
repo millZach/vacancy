@@ -261,6 +261,11 @@ fn entry<'n>(name: &'n OsStr, st: &libc::stat, volume: &Volume) -> Entry<'n> {
         kind,
         // st_blocks counts 512-byte units whatever the file system's block size. A dataless iCloud file has none.
         allocated: (st.st_blocks.max(0) as u64).saturating_mul(512),
+        logical: if kind == EntryKind::File {
+            st.st_size.max(0) as u64
+        } else {
+            0
+        },
         modified: st.st_mtime as UnixTime,
         accessed: st.st_atime as UnixTime,
         link_key,

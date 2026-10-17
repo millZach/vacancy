@@ -31,7 +31,7 @@ use crate::guard::{Denied, Guard};
 use crate::map::ScannedVolume;
 use crate::report::{Skip, SkipKind};
 use crate::rules::{ProposalAction, loose};
-use crate::snapshot::{DirId, Snapshot, digest_key};
+use crate::snapshot::{DirId, Snapshot, file_digest_key};
 
 /// A plan, as the confirm dialog shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
@@ -103,7 +103,16 @@ pub(crate) enum Target {
     /// The files directly in a folder that the scan saw and didn't keep individually, by name and identity. They
     /// are read while planning and must then be exactly the ones the scan listed (their digest is the scan's);
     /// the executor deletes only these.
-    Loose { files: Vec<(OsString, u128)> },
+    Loose { files: Vec<LooseFile> },
+}
+
+/// One of a folder's loose files, as the planner read it: its name, identity and sizes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LooseFile {
+    pub(crate) name: OsString,
+    pub(crate) key: u128,
+    pub(crate) logical: u64,
+    pub(crate) alloc: u64,
 }
 
 /// One place a plan deletes, with its fingerprint from the scan.
@@ -117,6 +126,8 @@ pub(crate) struct Action {
     /// Allocated bytes and files the scan measured.
     pub(crate) bytes: u64,
     pub(crate) files: u64,
+    /// For a file, its length when the scan listed it.
+    pub(crate) logical: u64,
 }
 
 /// One proposal of a plan.
@@ -246,6 +257,10 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
             refused: Vec::new(),
         };
         for &at in proposals.targets(i) {
+            let logical = match at {
+                ItemRef::File(f) => snap.file_logical(f),
+                _ => 0,
+            };
             let (path, scanned_id, bytes, files) = match at {
                 ItemRef::Dir(d) => {
                     let t = snap.tree(d);
@@ -329,6 +344,7 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
                 identity: now,
                 bytes,
                 files,
+                logical,
             });
         }
         steps.push(step);
@@ -373,13 +389,17 @@ fn loose_now(
     dir: DirId,
     path: &Path,
     folder: Identity,
-) -> Result<Vec<(OsString, u128)>, (SkipKind, String)> {
+) -> Result<Vec<LooseFile>, (SkipKind, String)> {
     let unconfirmable = || (SkipKind::Refused, UNCONFIRMABLE.to_owned());
     let mut expected = snap.digests(dir).files;
     let mut kept = Vec::new();
     for f in snap.files(dir) {
         let id = snap.file_identity(f).ok_or_else(unconfirmable)?;
-        expected = expected.wrapping_sub(digest_key(id));
+        expected = expected.wrapping_sub(file_digest_key(
+            id,
+            snap.file_logical(f),
+            snap.file(f).bytes,
+        ));
         kept.push(id);
     }
     let (chain, entries) = crate::exec::files_in(path).map_err(|f| {
@@ -389,17 +409,20 @@ fn loose_now(
     if chain.last().map(|s| s.id) != Some(folder) {
         return Err((SkipKind::Changed, "It was replaced since the scan".into()));
     }
-    let files: Vec<(OsString, u128)> = entries
+    let mut digest = 0u64;
+    let files: Vec<LooseFile> = entries
         .into_iter()
         .filter(|e| e.counts && !kept.contains(&e.key()))
         .map(|e| {
-            let key = e.key();
-            (e.name, key)
+            digest = digest.wrapping_add(e.digest());
+            LooseFile {
+                key: e.key(),
+                logical: e.logical,
+                alloc: e.alloc,
+                name: e.name,
+            }
         })
         .collect();
-    let digest = files
-        .iter()
-        .fold(0u64, |sum, (_, key)| sum.wrapping_add(digest_key(*key)));
     if digest != expected {
         return Err((
             SkipKind::Changed,

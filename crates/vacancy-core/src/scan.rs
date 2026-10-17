@@ -334,6 +334,8 @@ pub(crate) struct Entry<'n> {
     pub(crate) kind: EntryKind,
     /// Allocated bytes, files only.
     pub(crate) allocated: u64,
+    /// Length in bytes, files only.
+    pub(crate) logical: u64,
     pub(crate) modified: UnixTime,
     pub(crate) accessed: UnixTime,
     /// Identifies the file across its hard links, when it may have more than one name.
@@ -420,10 +422,14 @@ impl Collector<'_> {
     pub(crate) fn add(&mut self, e: &Entry<'_>) {
         let listing = &mut *self.listing;
         // Every name the folder lists, hard links and all, before anything is merged or skipped.
-        let key = crate::snapshot::digest_key(e.key);
-        listing.digest_all = listing.digest_all.wrapping_add(key);
         if e.kind == EntryKind::File {
+            let key = crate::snapshot::file_digest_key(e.key, e.logical, e.allocated);
+            listing.digest_all = listing.digest_all.wrapping_add(key);
             listing.digest_files = listing.digest_files.wrapping_add(key);
+        } else {
+            listing.digest_all = listing
+                .digest_all
+                .wrapping_add(crate::snapshot::digest_key(e.key));
         }
         match e.kind {
             EntryKind::File => {
@@ -438,7 +444,7 @@ impl Collector<'_> {
                 listing.own_files += 1;
                 listing.own_last_used = listing.own_last_used.max(used);
                 if e.allocated >= self.keep_from || is_installer(e.name) {
-                    listing.push_kept(e.name, e.allocated, used, e.identity);
+                    listing.push_kept(e.name, e.allocated, used, e.identity, e.logical);
                 }
                 let len = e.name.len();
                 if Markers::may_mark(len)

@@ -335,10 +335,40 @@ pub(crate) fn delete_file(
     if latest(&times) >= threshold {
         return Err(Fail::Changed);
     }
-    let links = standard(&handle).map_or(1, |s| s.NumberOfLinks);
+    // Its length and its names, from one query by handle. Without them the file isn't deleted: its size can't be
+    // confirmed, and its space couldn't be counted honestly either.
+    let std = if test_hooks::fail_standard_info() {
+        None
+    } else {
+        standard(&handle)
+    };
+    let std = std.ok_or_else(|| Fail::Failed("its size can't be read".into()))?;
+    if u64::try_from(std.EndOfFile).ok() != Some(e.logical) {
+        // Rewritten in place to another length since it was listed, whatever its times say.
+        return Err(Fail::Changed);
+    }
     dispose(&handle, times.FileAttributes)?;
     drop(handle);
-    Ok((links <= 1).then_some(e.alloc))
+    Ok((std.NumberOfLinks <= 1).then_some(e.alloc))
+}
+
+/// Points where the tests make a query fail that never fails on its own.
+pub(crate) mod test_hooks {
+    use std::cell::Cell;
+
+    std::thread_local! {
+        static FAIL_STANDARD_INFO: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Makes the size-and-links query of the files deleted on this thread fail, until set back.
+    #[cfg(test)]
+    pub(crate) fn set_fail_standard_info(fail: bool) {
+        FAIL_STANDARD_INFO.with(|f| f.set(fail));
+    }
+
+    pub(super) fn fail_standard_info() -> bool {
+        FAIL_STANDARD_INFO.with(Cell::get)
+    }
 }
 
 /// Deletes the link `e` in `dir` as itself: opened without following it, it must be the link listed (same id)
@@ -743,6 +773,7 @@ fn to_entry(dir: &Dir, e: &FILE_ID_EXTD_DIR_INFO, name: &[u16]) -> Entry {
         id: u128::from_le_bytes(e.FileId.Identifier),
         dev: 0,
         alloc,
+        logical: u64::try_from(e.EndOfFile).unwrap_or(0),
         changed: nanos(e.CreationTime.max(e.LastWriteTime).max(e.ChangeTime)),
         links: None,
         // As the scanner counts: everything that isn't a folder or a link.
