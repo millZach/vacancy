@@ -551,17 +551,72 @@ fn open_for_times(path: &Path) -> io::Result<fs::File> {
 fn link_dir(link: &Path, to: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
-        let out = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(link)
-            .arg(to)
-            .output()?;
-        if !out.status.success() {
-            return Err(io::Error::other(format!(
-                "mklink /J {}: {}",
-                link.display(),
-                String::from_utf8_lossy(&out.stdout)
-            )));
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+        };
+        use windows_sys::Win32::System::IO::DeviceIoControl;
+        use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
+
+        // The generator owns both locations. Canonicalization supplies native separators and a verbatim
+        // Windows target; no cmd filename parsing, quoting, metacharacters, or inherited shell settings.
+        let target: Vec<u16> = fs::canonicalize(to)?.as_os_str().encode_wide().collect();
+        let prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
+        if !target.starts_with(&prefix) {
+            return Err(io::Error::other(
+                "fixture target has no native verbatim prefix",
+            ));
+        }
+        let substitute: Vec<u16> = r"\??\"
+            .encode_utf16()
+            .chain(target[4..].iter().copied())
+            .collect();
+        let data_len = 8 + (substitute.len() + target.len() + 2) * 2;
+        if data_len + 8 > 16 * 1024 {
+            return Err(io::Error::other(
+                "fixture junction target exceeds reparse buffer limit",
+            ));
+        }
+        let mut data = Vec::new();
+        data.extend_from_slice(&0xa000_0003u32.to_le_bytes());
+        data.extend_from_slice(&(data_len as u16).to_le_bytes());
+        data.extend_from_slice(&0u16.to_le_bytes());
+        for n in [
+            0,
+            substitute.len() * 2,
+            (substitute.len() + 1) * 2,
+            target.len() * 2,
+        ] {
+            data.extend_from_slice(&(n as u16).to_le_bytes());
+        }
+        for n in substitute.into_iter().chain([0]).chain(target).chain([0]) {
+            data.extend_from_slice(&n.to_le_bytes());
+        }
+        fs::create_dir(link)?; // must be a fresh, empty, generator-owned location
+        let file = fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(link)?;
+        let mut returned = 0;
+        // SAFETY: owned directory handle, initialized bounded mount-point buffer, writable byte count.
+        if unsafe {
+            DeviceIoControl(
+                file.as_raw_handle(),
+                FSCTL_SET_REPARSE_POINT,
+                data.as_ptr().cast(),
+                data.len() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut returned,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
         }
         Ok(())
     }

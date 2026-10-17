@@ -11,12 +11,16 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::named("profile")
+    }
+    fn named(name: &str) -> Self {
         // Windows' default temp is under the real home. CI's checkout and the local D: worktree are outside it.
         // On macOS use the system temp directory, canonicalized past /var's symlink.
         let base = if cfg!(windows) {
             std::env::current_dir()
                 .unwrap()
-                .join("target/tool-fixtures")
+                .join("target")
+                .join("tool-fixtures")
         } else {
             std::env::temp_dir()
                 .canonicalize()
@@ -25,8 +29,8 @@ impl Fixture {
         };
         fs::create_dir_all(&base).unwrap();
         let temp = tempfile::tempdir_in(&base).unwrap();
-        let root = temp.path().join("profile");
-        fs::create_dir(&root).unwrap();
+        let root = temp.path().join(name);
+        fs::create_dir_all(&root).unwrap();
         fixture::check_root(&root, &std::env::home_dir().unwrap()).unwrap();
         fixture::build(&root).unwrap();
         Self { _temp: temp, root }
@@ -48,6 +52,20 @@ impl Fixture {
         )
         .unwrap()
     }
+}
+
+#[test]
+fn generated_fixture_links_work_with_mixed_separators_and_shell_metacharacters() {
+    let fx = Fixture::named("owned & (profile)/mixed-separators");
+    assert!(fixture::is_profile(&fx.root));
+    let before = fixture::inventory(&fx.root).unwrap();
+    let snapshot = fx.snapshot();
+    assert!(snapshot.stats().files > 0);
+    assert_eq!(
+        fixture::inventory(&fx.root).unwrap(),
+        before,
+        "scanner never follows fixture junctions or alters their targets"
+    );
 }
 
 fn write(path: &Path, text: &str) {

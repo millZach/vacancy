@@ -2,9 +2,8 @@
 //! reads; URI text is constructed from a validated integer, never copied from a manifest or AI response.
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::{self, Read};
-use std::path::{Component, Path, PathBuf};
+use std::io;
+use std::path::{Path, PathBuf};
 
 use crate::{Env, Platform, Snapshot};
 use serde::{Deserialize, Serialize};
@@ -342,97 +341,144 @@ fn readable_path(env: &Env, path: &Path) -> bool {
 }
 
 fn read_manifest(env: &Env, path: &Path) -> io::Result<String> {
-    if !readable_path(env, path) {
-        return Err(io::Error::other("linked or unconfined manifest"));
-    }
-    let file = open_no_links(path)?;
-    if !file.metadata()?.is_file() || file.metadata()?.len() > MAX_MANIFEST {
-        return Err(io::Error::other("not a bounded manifest"));
-    }
-    let mut text = String::new();
-    file.take(MAX_MANIFEST + 1).read_to_string(&mut text)?;
-    if text.len() as u64 > MAX_MANIFEST {
-        return Err(io::Error::other("manifest grew beyond limit"));
-    }
-    Ok(text)
-}
-
-#[cfg(windows)]
-fn open_no_links(path: &Path) -> io::Result<File> {
-    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
-    let mut pins = Vec::new();
-    let mut current = PathBuf::new();
-    let parts: Vec<_> = path.components().collect();
-    if !path.is_absolute() {
-        return Err(io::Error::other("not absolute"));
-    }
-    for (i, part) in parts.iter().enumerate() {
-        match part {
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
-                current.push(part.as_os_str())
-            }
-            _ => return Err(io::Error::other("invalid component")),
-        }
-        if matches!(part, Component::Prefix(_)) {
-            continue;
-        }
-        // Parent handles deny rename/delete until the leaf is open. Every component is opened as itself.
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .share_mode(1)
-            .custom_flags(0x0020_0000 | 0x0200_0000)
-            .open(&current)?;
-        if file.metadata()?.file_attributes() & 0x400 != 0 {
-            return Err(io::Error::other("reparse point"));
-        }
-        if i + 1 == parts.len() {
-            return Ok(file);
-        }
-        pins.push(file);
-    }
-    Err(io::Error::other("no manifest"))
-}
-
-#[cfg(unix)]
-fn open_no_links(path: &Path) -> io::Result<File> {
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
-    if !path.is_absolute() {
-        return Err(io::Error::other("not absolute"));
-    }
-    let mut dir = File::open("/")?;
-    let parts: Vec<_> = path
-        .components()
-        .filter(|c| !matches!(c, Component::RootDir))
-        .collect();
-    for (i, part) in parts.iter().enumerate() {
-        let Component::Normal(name) = part else {
-            return Err(io::Error::other("invalid component"));
-        };
-        let name = std::ffi::CString::new(name.as_bytes())?;
-        let flags = libc::O_RDONLY
-            | libc::O_NOFOLLOW
-            | libc::O_CLOEXEC
-            | libc::O_NONBLOCK
-            | if i + 1 < parts.len() {
-                libc::O_DIRECTORY
-            } else {
-                0
-            };
-        // SAFETY: `dir` owns a live directory fd; name is NUL terminated; flags take no extra argument.
-        let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: openat returned a new owned descriptor.
-        dir = unsafe { File::from_raw_fd(fd) };
-    }
-    Ok(dir)
+    crate::fsid::read_bounded(path, env.confined_to.as_deref(), MAX_MANIFEST, |_| {})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn retagging_the_held_manifest_parent_cannot_redirect_the_confined_read() {
+        use std::fs::{self, OpenOptions};
+        use std::os::windows::ffi::OsStrExt;
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
+        };
+        use windows_sys::Win32::System::IO::DeviceIoControl;
+        use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
+
+        fn retag(link: &Path, to: &Path) -> io::Result<()> {
+            // Attribute-only access is exempt from read/write sharing restrictions. The control below proves
+            // this operation succeeds even with the old reader's FILE_SHARE_READ-only directory pin.
+            let file = OpenOptions::new()
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(link)?;
+            let canonical = to.canonicalize()?;
+            let target = canonical.to_str().unwrap();
+            let substitute: Vec<u16> =
+                format!(r"\??\{}", target.strip_prefix(r"\\?\").unwrap_or(target))
+                    .encode_utf16()
+                    .collect();
+            let print: Vec<u16> = to.as_os_str().encode_wide().collect();
+            let mut data = Vec::new();
+            data.extend_from_slice(&0xa000_0003u32.to_le_bytes());
+            data.extend_from_slice(
+                &((8 + (substitute.len() + print.len() + 2) * 2) as u16).to_le_bytes(),
+            );
+            data.extend_from_slice(&0u16.to_le_bytes());
+            for n in [
+                0,
+                substitute.len() * 2,
+                (substitute.len() + 1) * 2,
+                print.len() * 2,
+            ] {
+                data.extend_from_slice(&(n as u16).to_le_bytes());
+            }
+            for n in substitute.into_iter().chain([0]).chain(print).chain([0]) {
+                data.extend_from_slice(&n.to_le_bytes());
+            }
+            let mut returned = 0;
+            // SAFETY: owned attribute handle; complete mount-point reparse buffer; valid writable byte count.
+            let ok = unsafe {
+                DeviceIoControl(
+                    file.as_raw_handle(),
+                    FSCTL_SET_REPARSE_POINT,
+                    data.as_ptr().cast(),
+                    data.len() as u32,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut returned,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+
+        let base = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join("tool-fixtures");
+        fs::create_dir_all(&base).unwrap();
+        let temp = tempfile::tempdir_in(base).unwrap();
+        let root = temp.path().join("profile");
+        let outside = temp.path().join("outside-profile");
+        for profile in [&root, &outside] {
+            fs::create_dir(profile).unwrap();
+            crate::fixture::check_root(profile, &std::env::home_dir().unwrap()).unwrap();
+            crate::fixture::build(profile).unwrap();
+        }
+        let name = "appmanifest_42.acf";
+        let sentinel = r#""AppState" { "appid" "42" "name" "EXTERNAL FIXTURE SENTINEL" "LastPlayed" "100000" }"#;
+        fs::write(outside.join(name), sentinel).unwrap();
+
+        let control = root.join("control");
+        fs::create_dir(&control).unwrap();
+        let pinned = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&control)
+            .unwrap();
+        retag(&control, &outside).unwrap();
+        assert_eq!(
+            fs::read_to_string(control.join(name)).unwrap(),
+            sentinel,
+            "the attack works against an absolute child lookup despite a read-only sharing pin"
+        );
+        drop(pinned);
+        fs::remove_dir(&control).unwrap();
+
+        let apps = root.join("Steam/steamapps");
+        fs::create_dir_all(&apps).unwrap();
+        let manifest = apps.join(name);
+        fs::write(&manifest, b"inside fixture manifest").unwrap();
+        let moved = root.join("moved-manifest.acf");
+        let mut attacked = false;
+        let result = crate::fsid::read_bounded(&manifest, Some(&root), MAX_MANIFEST, |directory| {
+            if directory == apps && !attacked {
+                fs::rename(&manifest, &moved).unwrap();
+                retag(&apps, &outside).unwrap();
+                attacked = true;
+                assert_eq!(
+                    fs::read_to_string(&manifest).unwrap(),
+                    sentinel,
+                    "actual held ancestor was successfully retagged and redirects an absolute lookup"
+                );
+            }
+        });
+        assert!(
+            attacked,
+            "the race must execute while the verified parent is held"
+        );
+        assert!(
+            result.is_err(),
+            "a confined parent-relative read must not return the outside sentinel: {result:?}"
+        );
+        assert_eq!(fs::read_to_string(outside.join(name)).unwrap(), sentinel);
+        assert_eq!(fs::read(&moved).unwrap(), b"inside fixture manifest");
+        fs::remove_dir(&apps).unwrap(); // only the fixture junction, never its target
+    }
     #[test]
     fn advice_uses_last_played_not_install_age_and_only_constructs_numeric_uris() {
         let manifest = r#""AppState" { "appid" "42" "name" "A game" "LastPlayed" "100000" "SizeOnDisk" "999999" }"#;

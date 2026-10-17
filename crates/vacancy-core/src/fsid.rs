@@ -93,6 +93,90 @@ pub(crate) fn chain(path: &Path) -> Option<Vec<Step>> {
     Walker::default().chain(path)
 }
 
+/// Read a bounded ordinary file through one retained, no-follow handle chain. Confinement is judged on that
+/// chain before opening the leaf, and the leaf is opened relative to its held parent, never by absolute path.
+/// `after_directory` is the deterministic race seam; production callers pass a no-op.
+pub(crate) fn read_bounded(
+    path: &Path,
+    confined_to: Option<&Path>,
+    limit: u64,
+    mut after_directory: impl FnMut(&Path),
+) -> std::io::Result<String> {
+    use std::io::{self, Read};
+    let refused = || io::Error::other("manifest chain is linked, unconfined, or unreadable");
+    let scope = match confined_to {
+        Some(root) => Some(
+            chain(root)
+                .and_then(|c| c.last().cloned())
+                .ok_or_else(refused)?,
+        ),
+        None => None,
+    };
+    let (dir, root, rest) = sys::root(path).ok_or_else(refused)?;
+    let parts: Vec<_> = path.components().collect();
+    let names = parts[parts.len() - rest..]
+        .iter()
+        .map(|part| match part {
+            Component::Normal(name) => Some(*name),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(refused)?;
+    let (leaf, parents) = names.split_last().ok_or_else(refused)?;
+    let mut at: PathBuf = parts[..parts.len() - rest]
+        .iter()
+        .map(|c| c.as_os_str())
+        .collect();
+    let mut chain = vec![root];
+    let mut pins = vec![dir];
+    for name in parents {
+        let (step, opened) = sys::read_directory(pins.last().unwrap(), name).ok_or_else(refused)?;
+        pins.push(opened);
+        chain.push(step);
+        at.push(name);
+        after_directory(&at);
+    }
+    if let Some(scope) = &scope {
+        let start = chain
+            .iter()
+            .position(|s| s.id == scope.id)
+            .ok_or_else(refused)?;
+        if !one_volume(&chain[start..]) {
+            return Err(refused());
+        }
+    }
+    let (file, identity) = sys::read_file(pins.last().unwrap(), leaf).ok_or_else(refused)?;
+    if scope
+        .as_ref()
+        .is_some_and(|scope| scope.id.volume() != identity.volume())
+    {
+        return Err(refused());
+    }
+    if !file.metadata()?.is_file() || file.metadata()?.len() > limit {
+        return Err(io::Error::other("not a bounded manifest"));
+    }
+    // Read-directory handles stay held throughout. Verify the held leaf and its full identity chain are
+    // still at the authorized path immediately before reading, including on POSIX where names can move.
+    let current = self::chain(path).ok_or_else(refused)?;
+    if current.len() != chain.len() + 1
+        || current
+            .iter()
+            .take(chain.len())
+            .zip(&chain)
+            .any(|(a, b)| a.id != b.id)
+        || current.last().is_none_or(|s| s.id != identity)
+    {
+        return Err(refused());
+    }
+    let mut text = String::new();
+    file.take(limit.saturating_add(1))
+        .read_to_string(&mut text)?;
+    if text.len() as u64 > limit {
+        return Err(io::Error::other("manifest grew beyond limit"));
+    }
+    Ok(text)
+}
+
 /// Walks chains, keeping the last few folders it opened, so that a path whose parent it has open is reached
 /// cheaply: still by name inside the real parent, never through a link. For many paths in a few folders (the
 /// contents of a cache folder), in one short run.
@@ -381,6 +465,15 @@ mod sys {
     /// No `OBJ_CASE_INSENSITIVE`: the file system matches the name as it matches any name, so a case-sensitive
     /// folder tells `alex` from `Alex` here as it does everywhere else.
     fn open_in(dir: &Handle, name: &OsStr) -> Option<Handle> {
+        open_in_with(
+            dir,
+            name,
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        )
+    }
+
+    fn open_in_with(dir: &Handle, name: &OsStr, access: u32, sharing: u32) -> Option<Handle> {
         const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
         const FILE_OPEN_FOR_BACKUP_INTENT: u32 = 0x0000_4000;
         const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
@@ -410,16 +503,69 @@ mod sys {
         let status = unsafe {
             NtOpenFile(
                 &mut file,
-                FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                access,
                 &attributes,
                 &mut status_block,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                sharing,
                 FILE_SYNCHRONOUS_IO_NONALERT
                     | FILE_OPEN_FOR_BACKUP_INTENT
                     | FILE_OPEN_REPARSE_POINT,
             )
         };
         (status >= 0 && !file.is_null()).then_some(Handle(file))
+    }
+
+    pub(super) fn read_file(dir: &Dir, name: &OsStr) -> Option<(std::fs::File, Identity)> {
+        use std::os::windows::fs::MetadataExt;
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::FILE_READ_DATA;
+        let handle = open_in_with(
+            dir,
+            name,
+            FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_READ,
+        )?;
+        let identity = id_of(&handle)?;
+        let raw = handle.0;
+        std::mem::forget(handle);
+        // SAFETY: ownership of the fresh NtOpenFile handle is transferred exactly once to File.
+        let file = unsafe { std::fs::File::from_raw_handle(raw) };
+        if file.metadata().ok()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return None;
+        }
+        Some((file, identity))
+    }
+
+    pub(super) fn read_directory(dir: &Dir, name: &OsStr) -> Option<(Step, Dir)> {
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
+        let next = open_in_with(
+            dir,
+            name,
+            FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_READ,
+        )?;
+        // SAFETY: zero initializes a plain output structure.
+        let mut info: FILE_ATTRIBUTE_TAG_INFO = unsafe { mem::zeroed() };
+        // SAFETY: next is live and info is writable with the size required by FileAttributeTagInfo.
+        if unsafe {
+            GetFileInformationByHandleEx(
+                next.0,
+                FileAttributeTagInfo,
+                (&raw mut info).cast(),
+                mem::size_of_val(&info) as u32,
+            )
+        } == 0
+            || info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+            || info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            return None;
+        }
+        let step = Step {
+            name: name.to_owned(),
+            id: id_of(&next)?,
+            mount: None,
+        };
+        Some((step, next))
     }
 
     /// Whether an open file or folder is a link: a symlink, a junction, or a mount point (a volume mounted in a
@@ -566,6 +712,34 @@ mod sys {
         Some((step, Some(next)))
     }
 
+    pub(super) fn read_file(dir: &Dir, name: &OsStr) -> Option<(std::fs::File, Identity)> {
+        use std::os::fd::FromRawFd;
+        let name = CString::new(name.as_bytes()).ok()?;
+        // SAFETY: live held directory fd and NUL-terminated child name. NONBLOCK avoids blocking on a FIFO;
+        // NOFOLLOW refuses a leaf link; ordinary-file metadata is checked before any bytes are read.
+        let fd = unsafe {
+            libc::openat(
+                dir.0,
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return None;
+        }
+        let owned = Fd(fd);
+        let identity = id(&fstat(&owned)?);
+        std::mem::forget(owned);
+        // SAFETY: fd is newly owned and transferred once, after its identity query.
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        Some((file, identity))
+    }
+
+    pub(super) fn read_directory(dir: &Dir, name: &OsStr) -> Option<(Step, Dir)> {
+        let (step, dir) = step(dir, name, true)?;
+        Some((step, dir?))
+    }
+
     /// The folder at `path`, opened by its whole path, the last name not through a link, with its identity.
     pub(super) fn reopen(path: &Path) -> Option<(Dir, Identity)> {
         let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
@@ -669,6 +843,14 @@ mod sys {
     }
 
     pub(super) fn real_path(_dir: &Dir) -> Option<std::ffi::OsString> {
+        None
+    }
+
+    pub(super) fn read_file(_dir: &Dir, _name: &OsStr) -> Option<(std::fs::File, super::Identity)> {
+        None
+    }
+
+    pub(super) fn read_directory(_dir: &Dir, _name: &OsStr) -> Option<(Step, Dir)> {
         None
     }
 }

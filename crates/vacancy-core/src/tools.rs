@@ -473,7 +473,8 @@ mod process_tree {
     impl Drop for Tree {
         fn drop(&mut self) {
             // SAFETY: the spawned child was made leader of its own process group. Negative pid targets that
-            // group only, never the app's group. Descendants retaining pipes cannot outlive this invocation.
+            // group only, never the app's group. This terminates members of that group; a descendant that
+            // starts another session/process group can escape it. Pipe reads remain independently bounded.
             unsafe {
                 libc::kill(-(self.0 as libc::pid_t), libc::SIGKILL);
             }
