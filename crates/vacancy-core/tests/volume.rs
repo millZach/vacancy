@@ -86,6 +86,8 @@ fn reads_the_system_volume() {
         v.total_bytes > 0 && v.used_bytes > 0 && v.used_bytes <= v.total_bytes,
         "{v:?}"
     );
+    assert_eq!(v.used_bytes + v.free_bytes, v.total_bytes, "{v:?}");
+    assert!(v.system, "{v:?}");
     #[cfg(target_os = "macos")]
     assert_eq!(v.mount_point, "/");
 }
@@ -95,21 +97,49 @@ fn names_this_machine() {
     assert!(!machine_name().trim().is_empty());
 }
 
-/// Read-only: lists the local volumes, the system volume first.
+/// Read-only: lists the drives to offer, the system drive first and marked as such.
 #[test]
-fn lists_local_volumes_with_the_system_volume_first() {
-    let volumes = list_volumes();
+fn lists_drives_with_the_system_drive_first() {
+    let drives = list_volumes().expect("the drives");
     let system = system_volume().expect("system volume");
+    let first = drives.first().expect("at least the system drive");
+    assert_eq!(first.mount_point, system.mount_point, "{drives:?}");
+    assert!(first.system, "{first:?}");
+    assert_eq!(first.kind, system.kind, "{first:?}");
     assert_eq!(
-        volumes.first().map(|v| v.mount_point.as_str()),
-        Some(system.mount_point.as_str()),
-        "{volumes:?}"
+        drives.iter().filter(|d| d.system).count(),
+        1,
+        "one system drive: {drives:?}"
     );
-    for v in &volumes {
-        assert!(v.total_bytes > 0 && v.used_bytes <= v.total_bytes, "{v:?}");
-        assert!(!v.name.trim().is_empty(), "{v:?}");
+    for d in &drives {
+        assert!(d.total_bytes > 0, "{d:?}");
+        assert_eq!(d.used_bytes + d.free_bytes, d.total_bytes, "{d:?}");
+        assert!(!d.name.trim().is_empty(), "{d:?}");
+        #[cfg(target_os = "macos")]
+        assert!(
+            !d.mount_point.starts_with("/System/Volumes"),
+            "the Data volume is scanned through /: {d:?}"
+        );
     }
-    let mut mounts: Vec<_> = volumes.iter().map(|v| &v.mount_point).collect();
+    let mut mounts: Vec<_> = drives.iter().map(|d| &d.mount_point).collect();
     mounts.dedup();
-    assert_eq!(mounts.len(), volumes.len(), "each volume once");
+    assert_eq!(mounts.len(), drives.len(), "each drive once");
+}
+
+/// The system drive is internal and says it is the system drive; any other folder's drive agrees with the listing.
+#[test]
+fn describes_a_drive_the_same_way_as_the_listing() {
+    let system = system_volume().expect("system volume");
+    assert!(system.system, "{system:?}");
+    let dir = tempfile::tempdir().expect("temp dir");
+    let here = volume_info(dir.path()).expect("volume info");
+    if let Some(listed) = list_volumes()
+        .expect("the drives")
+        .into_iter()
+        .find(|d| d.mount_point == here.mount_point)
+    {
+        assert_eq!(listed.kind, here.kind, "{listed:?} vs {here:?}");
+        assert_eq!(listed.system, here.system, "{listed:?} vs {here:?}");
+        assert_eq!(listed.name, here.name, "{listed:?} vs {here:?}");
+    }
 }

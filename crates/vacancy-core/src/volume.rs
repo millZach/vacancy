@@ -1,10 +1,16 @@
-//! Volumes: which drive a path lives on, what the OS calls it, and how full it is.
+//! Volumes: which drives Vacancy offers to scan, which drive a path lives on, what the OS calls it, what kind of
+//! drive it is, and how full it is.
+//!
+//! Each OS's module only gathers what the OS says about its volumes. Which of them to offer and how to describe
+//! them is decided in [`offer`], from plain data, so both platforms' rules are unit-tested on both CI runners.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use ts_rs::TS;
+
+mod offer;
 
 #[cfg(target_os = "macos")]
 #[path = "volume/macos.rs"]
@@ -16,7 +22,7 @@ mod imp;
 #[path = "volume/unsupported.rs"]
 mod imp;
 
-/// A mounted volume, as the scan screen's plate shows it.
+/// A drive Vacancy can scan, as the drive picker and the map show it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -25,12 +31,32 @@ pub struct VolumeInfo {
     pub name: String,
     /// Where the volume is mounted: `C:\` on Windows, `/` on macOS.
     pub mount_point: String,
+    /// Built in, on USB, or another external drive.
+    pub kind: DriveKind,
+    /// The OS runs from this drive.
+    pub system: bool,
     /// Capacity in bytes.
     #[ts(type = "number")]
     pub total_bytes: u64,
     /// Bytes in use: capacity minus free space.
     #[ts(type = "number")]
     pub used_bytes: u64,
+    /// Bytes free.
+    #[ts(type = "number")]
+    pub free_bytes: u64,
+}
+
+/// How a drive is attached to the computer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum DriveKind {
+    /// Built into the computer.
+    Internal,
+    /// A USB stick, card reader or USB disk (Windows tells these apart).
+    Usb,
+    /// Any other drive that isn't built in: on macOS every external volume; on Windows SD cards and FireWire.
+    External,
 }
 
 /// Why volume information could not be read.
@@ -45,6 +71,9 @@ pub enum VolumeError {
         #[source]
         source: io::Error,
     },
+    /// The OS would not list its volumes.
+    #[error("could not list the drives: {0}")]
+    List(#[source] io::Error),
     /// Vacancy supports Windows and macOS only.
     #[error("volume information is only available on Windows and macOS")]
     Unsupported,
@@ -67,17 +96,20 @@ pub fn system_volume() -> Result<VolumeInfo, VolumeError> {
     imp::system_volume()
 }
 
-/// The local volumes a scan can be pointed at, the system volume first. Network shares and cloud services'
-/// virtual drives are left out. Read-only, like [`volume_info`].
-pub fn list_volumes() -> Vec<VolumeInfo> {
-    let mut volumes = imp::list_volumes();
-    let system = system_volume().ok().map(|v| v.mount_point);
-    volumes.sort_by_key(|v| {
-        (
-            Some(&v.mount_point) != system.as_ref(),
-            v.mount_point.clone(),
-        )
-    });
-    volumes.dedup_by(|a, b| a.mount_point == b.mount_point);
-    volumes
+/// The drives to offer for scanning: the system drive first, then the others by mount point.
+///
+/// Internal drives plus USB and external ones. Network shares, optical and RAM drives, disk images, cloud
+/// services' virtual drives, read-only volumes, and hidden, system-only or recovery volumes are left out (Windows
+/// volumes without a drive letter; macOS's Preboot, VM, Recovery and Update volumes, and every volume under
+/// `/System/Volumes`, whose Data volume is scanned through `/`). The system drive is always listed.
+///
+/// Fast and read-only, like [`volume_info`]: it asks the OS about each volume and never lists or opens files.
+pub fn list_volumes() -> Result<Vec<VolumeInfo>, VolumeError> {
+    let drives = imp::list_volumes()?;
+    if drives.first().is_some_and(|d| d.system) {
+        return Ok(drives);
+    }
+    // The OS should always list the drive it runs from; if it didn't, ask for that drive directly.
+    let system = system_volume()?;
+    Ok(offer::system_first(system, drives))
 }

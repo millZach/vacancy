@@ -1,13 +1,17 @@
-//! macOS: sizes and the mount point from `statfs`, the volume's name ("Macintosh HD") from `getattrlist`.
+//! macOS: the mounted file systems from `getfsstat` (or one from `statfs`), the volume's name ("Macintosh HD") from
+//! `getattrlist`, and whether its device is built in from Disk Arbitration. [`super::offer::macos`] decides what to
+//! offer.
 //!
 //! On APFS the sizes are the container's, which is what Finder and System Settings show.
 
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::io;
 use std::mem::{self, MaybeUninit};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
+use std::ptr;
 
+use super::offer::macos::{self as rules, MacMount};
 use super::{VolumeError, VolumeInfo};
 
 pub(super) fn volume_info(path: &Path) -> Result<VolumeInfo, VolumeError> {
@@ -29,67 +33,68 @@ pub(super) fn volume_info(path: &Path) -> Result<VolumeInfo, VolumeError> {
     }
     // SAFETY: `statfs` returned 0, so it filled `st`.
     let st = unsafe { st.assume_init() };
-
-    let block = u64::from(st.f_bsize);
-    let total = st.f_blocks.saturating_mul(block);
-    let free = st.f_bfree.saturating_mul(block);
-    // SAFETY: the kernel NUL-terminates `f_mntonname` within its 1024 bytes.
-    let mount = unsafe { CStr::from_ptr(st.f_mntonname.as_ptr()) };
-    let mount_point = mount.to_string_lossy().into_owned();
-    let name = volume_name(mount).unwrap_or_else(|| fallback_name(&mount_point));
-    Ok(VolumeInfo {
-        name,
-        mount_point,
-        total_bytes: total,
-        used_bytes: total.saturating_sub(free),
-    })
+    Ok(rules::describe(&mount(&st, Arbitration::new().as_ref())))
 }
 
 pub(super) fn system_volume() -> Result<VolumeInfo, VolumeError> {
     super::volume_info(Path::new("/"))
 }
 
-/// File systems of local disks. Anything else (network shares, cloud services' FUSE mounts) is not offered.
-const LOCAL_FILE_SYSTEMS: [&str; 6] = ["apfs", "hfs", "exfat", "msdos", "ntfs", "ufs"];
-
-/// Local volumes Finder shows: mounted locally, browsable (which leaves out the system's own volumes under
-/// `/System/Volumes`), with a disk file system.
-pub(super) fn list_volumes() -> Vec<VolumeInfo> {
+pub(super) fn list_volumes() -> Result<Vec<VolumeInfo>, VolumeError> {
     // SAFETY: a null buffer asks only for the number of mounts.
-    let n = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
-    if n <= 0 {
-        return Vec::new();
+    let n = unsafe { libc::getfsstat(ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+    if n < 0 {
+        return Err(VolumeError::List(io::Error::last_os_error()));
     }
+    // Room for a few more, in case something is mounted between the two calls.
     let cap = n as usize + 8;
     let mut buf: Vec<libc::statfs> = Vec::with_capacity(cap);
     let bytes = (cap * mem::size_of::<libc::statfs>()) as libc::c_int;
     // SAFETY: `buf` has room for `cap` statfs records, `bytes` long; getfsstat writes at most that many.
     let got = unsafe { libc::getfsstat(buf.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
-    if got <= 0 {
-        return Vec::new();
+    if got < 0 {
+        return Err(VolumeError::List(io::Error::last_os_error()));
     }
     // SAFETY: getfsstat filled the first `got` records.
     unsafe { buf.set_len((got as usize).min(cap)) };
-    let mut out = Vec::new();
-    for st in &buf {
-        let flags = st.f_flags as u64;
-        if flags & libc::MNT_LOCAL as u64 == 0 || flags & libc::MNT_DONTBROWSE as u64 != 0 {
-            continue;
-        }
-        // SAFETY: the kernel NUL-terminates both names within their arrays.
-        let fs = unsafe { CStr::from_ptr(st.f_fstypename.as_ptr()) }.to_string_lossy();
-        if !LOCAL_FILE_SYSTEMS.contains(&fs.as_ref()) {
-            continue;
-        }
-        // SAFETY: as above.
-        let mount = unsafe { CStr::from_ptr(st.f_mntonname.as_ptr()) }
-            .to_string_lossy()
-            .into_owned();
-        if let Ok(v) = super::volume_info(Path::new(&mount)) {
-            out.push(v);
-        }
+    let arbitration = Arbitration::new();
+    let found: Vec<MacMount> = buf
+        .iter()
+        .map(|st| mount(st, arbitration.as_ref()))
+        .collect();
+    Ok(rules::drives(&found))
+}
+
+/// What macOS says about one mounted file system. Disk Arbitration is asked only about local devices.
+fn mount(st: &libc::statfs, arbitration: Option<&Arbitration>) -> MacMount {
+    // SAFETY: the kernel NUL-terminates the three names within their arrays.
+    let (on, from, fs) = unsafe {
+        (
+            CStr::from_ptr(st.f_mntonname.as_ptr()),
+            CStr::from_ptr(st.f_mntfromname.as_ptr()),
+            CStr::from_ptr(st.f_fstypename.as_ptr()),
+        )
+    };
+    let flags = st.f_flags;
+    let local = flags & libc::MNT_LOCAL as u32 != 0;
+    let mount_point = on.to_string_lossy().into_owned();
+    let block = u64::from(st.f_bsize);
+    let device = match arbitration {
+        Some(a) if local => a.device(from),
+        _ => Device::default(),
+    };
+    MacMount {
+        name: volume_name(on).unwrap_or_else(|| fallback_name(&mount_point)),
+        mount_point,
+        file_system: fs.to_string_lossy().into_owned(),
+        local,
+        browsable: flags & libc::MNT_DONTBROWSE as u32 == 0,
+        read_only: flags & libc::MNT_RDONLY as u32 != 0,
+        internal: device.internal,
+        protocol: device.protocol,
+        total_bytes: st.f_blocks.saturating_mul(block),
+        free_bytes: st.f_bfree.saturating_mul(block),
     }
-    out
 }
 
 const NAME_BUF_LEN: usize = 4 + 8 + 1024;
@@ -142,4 +147,137 @@ fn fallback_name(mount_point: &str) -> String {
         Some(name) => name.to_string_lossy().into_owned(),
         None => mount_point.to_owned(),
     }
+}
+
+// ---------- Disk Arbitration: is the device built in? ----------
+
+type CFTypeRef = *const c_void;
+type CFStringRef = *const c_void;
+type CFDictionaryRef = *const c_void;
+type CFAllocatorRef = *const c_void;
+type DASessionRef = *const c_void;
+type DADiskRef = *const c_void;
+type CFIndex = isize;
+type CFTypeID = usize;
+const UTF8: u32 = 0x0800_0100; // kCFStringEncodingUTF8
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFRelease(cf: CFTypeRef);
+    fn CFGetTypeID(cf: CFTypeRef) -> CFTypeID;
+    fn CFBooleanGetTypeID() -> CFTypeID;
+    fn CFStringGetTypeID() -> CFTypeID;
+    fn CFBooleanGetValue(boolean: CFTypeRef) -> u8;
+    fn CFStringGetCString(s: CFStringRef, buf: *mut c_char, size: CFIndex, encoding: u32) -> u8;
+    fn CFDictionaryGetValue(dict: CFDictionaryRef, key: *const c_void) -> *const c_void;
+}
+
+#[link(name = "DiskArbitration", kind = "framework")]
+unsafe extern "C" {
+    fn DASessionCreate(allocator: CFAllocatorRef) -> DASessionRef;
+    fn DADiskCreateFromBSDName(
+        allocator: CFAllocatorRef,
+        session: DASessionRef,
+        name: *const c_char,
+    ) -> DADiskRef;
+    fn DADiskCopyDescription(disk: DADiskRef) -> CFDictionaryRef;
+    static kDADiskDescriptionDeviceInternalKey: CFStringRef;
+    static kDADiskDescriptionDeviceProtocolKey: CFStringRef;
+}
+
+/// What Disk Arbitration says about the device under a volume.
+#[derive(Default)]
+struct Device {
+    internal: Option<bool>,
+    protocol: Option<String>,
+}
+
+/// A Disk Arbitration session, released when dropped. Only asks; it never mounts, unmounts or claims anything.
+struct Arbitration(DASessionRef);
+
+impl Arbitration {
+    fn new() -> Option<Self> {
+        // SAFETY: a null allocator means the default one.
+        let session = unsafe { DASessionCreate(ptr::null()) };
+        (!session.is_null()).then_some(Self(session))
+    }
+
+    /// The device behind `/dev/diskNsM`: whether it is built in, and how it is attached.
+    fn device(&self, from: &CStr) -> Device {
+        let Some(bsd) = from.to_bytes().strip_prefix(b"/dev/") else {
+            return Device::default();
+        };
+        let Ok(bsd) = CString::new(bsd) else {
+            return Device::default();
+        };
+        // SAFETY: the session is live, `bsd` is NUL-terminated, and a null allocator means the default one.
+        let disk = unsafe { DADiskCreateFromBSDName(ptr::null(), self.0, bsd.as_ptr()) };
+        if disk.is_null() {
+            return Device::default();
+        }
+        // SAFETY: `disk` is a live DADisk we own.
+        let description = unsafe { DADiskCopyDescription(disk) };
+        // SAFETY: we own `disk` (a Create call) and are done with it.
+        unsafe { CFRelease(disk) };
+        if description.is_null() {
+            return Device::default();
+        }
+        // SAFETY: `description` is a live dictionary; the keys are Disk Arbitration's constants. Get returns values
+        // the dictionary still owns, read before it is released.
+        let device = unsafe {
+            Device {
+                internal: cf_bool(CFDictionaryGetValue(
+                    description,
+                    kDADiskDescriptionDeviceInternalKey,
+                )),
+                protocol: cf_string(CFDictionaryGetValue(
+                    description,
+                    kDADiskDescriptionDeviceProtocolKey,
+                )),
+            }
+        };
+        // SAFETY: we own `description` (a Copy call) and are done with it.
+        unsafe { CFRelease(description) };
+        device
+    }
+}
+
+impl Drop for Arbitration {
+    fn drop(&mut self) {
+        // SAFETY: we own the session (a Create call), and it is released once.
+        unsafe { CFRelease(self.0) };
+    }
+}
+
+/// A CFBoolean's value; `None` for null or anything else.
+///
+/// # Safety
+/// `value` is null or a live Core Foundation object.
+unsafe fn cf_bool(value: *const c_void) -> Option<bool> {
+    // SAFETY: the caller promises `value` is null or a live CF object; the type is checked before the read.
+    unsafe {
+        (!value.is_null() && CFGetTypeID(value) == CFBooleanGetTypeID())
+            .then(|| CFBooleanGetValue(value) != 0)
+    }
+}
+
+/// A CFString as UTF-8; `None` for null, anything else, or a string too long for the buffer.
+///
+/// # Safety
+/// `value` is null or a live Core Foundation object.
+unsafe fn cf_string(value: *const c_void) -> Option<String> {
+    let mut buf = [0 as c_char; 256];
+    // SAFETY: the caller promises `value` is null or a live CF object; the type is checked before the read, and
+    // `buf` holds `buf.len()` writable bytes.
+    let ok = unsafe {
+        !value.is_null()
+            && CFGetTypeID(value) == CFStringGetTypeID()
+            && CFStringGetCString(value, buf.as_mut_ptr(), buf.len() as CFIndex, UTF8) != 0
+    };
+    // SAFETY: CFStringGetCString succeeded, so `buf` holds a NUL-terminated string.
+    ok.then(|| {
+        unsafe { CStr::from_ptr(buf.as_ptr()) }
+            .to_string_lossy()
+            .into_owned()
+    })
 }
