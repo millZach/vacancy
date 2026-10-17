@@ -261,25 +261,28 @@ pub(crate) fn propose_until(
         stop,
         checks: 0,
     };
-    let mut out = Proposals::default();
+    // Each proposal travels with its targets and kind as one entry, so sorting can't separate them.
+    let mut entries: Vec<(Proposal, Vec<ItemRef>, ActionKind)> = Vec::new();
     for rule in catalog::rules(env) {
         let found = engine.run(&rule)?;
         if found.bytes == 0 {
             continue;
         }
-        out.list.push(proposal(snapshot, &rule, &found));
-        out.targets
-            .push(found.targets.into_iter().map(|t| t.at).collect());
-        out.kinds.push(rule.action);
+        let proposal = proposal(snapshot, &rule, &found);
+        entries.push((
+            proposal,
+            found.targets.into_iter().map(|t| t.at).collect(),
+            rule.action,
+        ));
     }
-    // Biggest first; the targets travel with their proposal.
-    let mut order: Vec<usize> = (0..out.list.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(out.list[i].bytes));
-    Some(Proposals {
-        list: order.iter().map(|&i| out.list[i].clone()).collect(),
-        targets: order.iter().map(|&i| out.targets[i].clone()).collect(),
-        kinds: order.iter().map(|&i| out.kinds[i]).collect(),
-    })
+    entries.sort_by_key(|(p, _, _)| std::cmp::Reverse(p.bytes));
+    let mut out = Proposals::default();
+    for (proposal, targets, kind) in entries {
+        out.list.push(proposal);
+        out.targets.push(targets);
+        out.kinds.push(kind);
+    }
+    Some(out)
 }
 
 /// A target and its numbers.
