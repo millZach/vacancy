@@ -189,7 +189,9 @@ impl Guard {
             name,
             "backups.backupdb" | ".timemachine" | "com.apple.timemachine.localsnapshots"
         ) || ends(".backupbundle")
+            || ends(".sparsebundle")
         {
+            // A network Time Machine backup is a `.sparsebundle`; so are some disk images, which are kept too.
             return Some("Time Machine backups");
         }
         match self.platform {
@@ -540,6 +542,7 @@ mod tests {
             "Users/me/.Trash/Old.photoslibrary",
             "Users/me/.Trash/Old.photoslibrary/originals/A/1.heic",
             "Users/me/Downloads/Backups.backupdb/2026",
+            "Users/me/.Trash/MacBook.sparsebundle/bands/0",
             "Users/me/Applications/Slack.app",
             "Users/me/code/Demo.app/Contents/node_modules",
         ] {

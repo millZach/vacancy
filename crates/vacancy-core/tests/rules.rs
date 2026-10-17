@@ -824,9 +824,12 @@ mod guard {
             MIB,
         );
         fx.file("Users/alex/.Trash/Backups.backupdb/mac/x", MIB);
+        fx.file("Users/alex/.Trash/MacBook.sparsebundle/bands/0", MIB);
+        fx.file("Users/alex/.Trash/old/Studio.sparsebundle/bands/1", MIB);
         fx.file("Users/alex/.Trash/old.zip", MIB);
         bait(&fx, "Users/alex/Downloads/Mine.photoslibrary/resources");
         bait(&fx, "Users/alex/Downloads/Backups.backupdb");
+        bait(&fx, "Users/alex/Downloads/Work.sparsebundle");
         let (snap, proposals) = run(&fx, &mac(&fx), &moment(&[]));
         assert_eq!(
             all_targets(&fx, &snap, &proposals),
