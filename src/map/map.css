@@ -50,6 +50,16 @@
     opacity: 0;
   }
 }
+/* While a run frees space, tiles resize with each batch of its events, at the pace of their fills draining. */
+.map.is-freeing .map-region,
+.map.is-freeing .map-tile {
+  transition:
+    left var(--drain),
+    top var(--drain),
+    width var(--drain),
+    height var(--drain),
+    opacity 0.35s ease;
+}
 
 .map-region {
   border-radius: 5px;
@@ -415,6 +425,11 @@
 }
 .map-tile.is-vacant .map-name {
   color: var(--color-text-2);
+}
+/* What a cleared tile freed, in place of its size. */
+.map-freed {
+  color: var(--color-neon-ink);
+  font-weight: 700;
 }
 
 /* The free-space tile's figure while a run adds to it. */

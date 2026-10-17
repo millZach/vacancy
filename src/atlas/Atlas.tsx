@@ -8,7 +8,7 @@ import { errorMessage } from '../errors';
 import { formatBytes, formatCount } from '../format';
 import { Legend } from '../map/Legend';
 import { MapView, type TileLook } from '../map/MapView';
-import { folderModel, overviewModel, scanModel, type Leaf, type Region } from '../map/model';
+import { folderModel, freedModel, overviewModel, scanModel, type Freed, type Leaf, type Region } from '../map/model';
 import { useSize } from '../map/useSize';
 import { RiskChip, SourceTag } from '../plan/bits';
 import { PlanTray } from '../plan/PlanTray';
@@ -108,6 +108,14 @@ export function Atlas({ drives, agent, planOpen, onPlanOpen }: Props) {
     return top;
   }, [scanning, drive.volume, overview, top, level]);
   const focus = level?.kind === 'category' ? level.id : null;
+  // While a run frees space its tiles shrink by what their steps freed and free space grows by it all, laid out
+  // against the map the run started from so nothing moves but the sizes. The run holds the map at the whole disk.
+  const view = run?.view;
+  const freeing = view && top && model === top ? top : null;
+  const shown = useMemo(
+    () => (freeing && view ? freedModel(freeing, freedBy(view.steps), view.freedBytes) : model),
+    [freeing, view, model],
+  );
 
   const progress = scanning
     ? Math.min(ALMOST, (scanning.update?.bytes ?? 0) / Math.max(1, drive.volume.usedBytes))
@@ -187,7 +195,7 @@ export function Atlas({ drives, agent, planOpen, onPlanOpen }: Props) {
     !run && (leaf.proposal !== null || (levels.length === 0 ? leaf.kind !== 'free' : leaf.browsable));
   const look = (leaf: Leaf): TileLook => {
     if (leaf.proposal === null) return {};
-    if (run) return runLook(leaf, runSteps.get(leaf.id));
+    if (run) return runLook(runSteps.get(leaf.id));
     if (!planning) return { cls: 'is-reclaim', state: 'reclaimable' };
     const on = inPlan(leaf);
     return on
@@ -350,12 +358,13 @@ export function Atlas({ drives, agent, planOpen, onPlanOpen }: Props) {
         </div>
         {/* Kept while the summary is up (hidden), so the map's size is still followed when it comes back. */}
         <div className={onPlate ? 'atlas-stage is-empty' : 'atlas-stage'} ref={stageRef} hidden={!!summary}>
-          {model && !summary && (
+          {shown && !summary && (
             <MapView
               freeLabel={
                 freedSoFar > 0 && top ? <span className="free-grow">{formatBytes(top.freeBytes + freedSoFar)}</span> : undefined
               }
-              model={model}
+              model={shown}
+              {...(freeing ? { base: freeing } : {})}
               width={size.w}
               height={size.h}
               focus={focus}
@@ -436,15 +445,29 @@ export function Atlas({ drives, agent, planOpen, onPlanOpen }: Props) {
   );
 }
 
-/** A plan tile while its plan runs: queued, draining as its step frees space, then vacant ground. */
-function runLook(leaf: Leaf, step: StepView | undefined): TileLook {
+/** What each step has freed from its tile so far, and left in place, by tile. */
+function freedBy(steps: readonly StepView[]): Map<string, Freed> {
+  return new Map(
+    steps.map((s) => [tileOf(s.id), { bytes: s.freedBytes, kept: s.skips.reduce((sum, k) => sum + k.bytes, 0) }]),
+  );
+}
+
+/**
+ * A plan tile while its plan runs: queued, then shrinking as its step frees space (what is left of it at the
+ * bottom, the vacant ground it keeps above), then a sliver of vacant ground showing what it freed. The tile is the
+ * freed map's, so its size and fill already say how far the step has got.
+ */
+function runLook(step: StepView | undefined): TileLook {
   if (!step) return {};
-  const fill = leaf.bytes > 0 ? 1 - step.freedBytes / leaf.bytes : 0;
   if (step.status === 'pending') return { cls: 'is-queued', state: 'waiting to be deleted' };
-  if (step.status === 'running') return { cls: 'is-running', fill, state: 'being deleted' };
+  if (step.status === 'running') return { cls: 'is-running', state: 'being deleted' };
   // A step that freed nothing (it was stopped first, or everything in it was in use) leaves its tile as it was.
   if (step.freedBytes <= 0) return {};
-  return { cls: 'is-vacant is-lit', fill, state: 'vacant' };
+  return {
+    cls: 'is-vacant is-lit',
+    size: <span className="map-freed">{formatBytes(step.freedBytes)}</span>,
+    state: 'vacant',
+  };
 }
 
 /** What a plan tile's hover card says while its plan runs. */

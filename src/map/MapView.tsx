@@ -14,6 +14,11 @@ import './map.css';
 
 export interface MapViewProps {
   model: AtlasModel;
+  /**
+   * The map `model` was made from, holding the same tiles at other sizes (the map a run started from). Laid out
+   * against it, every tile keeps its place there and only grows or shrinks, gliding at the pace of the run's events.
+   */
+  base?: AtlasModel;
   width: number;
   height: number;
   /** The region filling the map, or null for the whole disk. */
@@ -44,10 +49,15 @@ export interface MapViewProps {
 /** A tile's extra look, and what assistive tech hears about it. */
 export interface TileLook {
   cls?: string;
-  /** How full the tile is, 0..1. Below 1 its colour drains from the top and shows the vacant ground under it. */
+  /**
+   * How full the tile is, 0..1. Below 1 its colour drains from the top and shows the vacant ground under it.
+   * By default, the share of the tile its vacant ground leaves.
+   */
   fill?: number;
   /** In place of the tile's name and size (a "Vacant" sign). */
   label?: ReactNode;
+  /** In place of the tile's size under its name (what a cleared tile freed). */
+  size?: ReactNode;
   badge?: ReactNode;
   /** Said after the tile's name and size ("reclaimable, in the plan"). */
   state?: string;
@@ -59,13 +69,14 @@ const LOCKED = 'Protected. Vacancy never changes anything here.';
 
 /**
  * The space map: regions (categories, or an opened folder) with a header band, tiles inside them, and free space.
- * Tiles glide to their new places when the layout changes (zooming, filling in during a scan); colours come from
- * the category hues in the design tokens.
+ * Tiles glide to their new places when the layout changes (zooming, filling in during a scan), and while a run frees
+ * space they shrink where they stand as the free space grows (`base`); colours come from the category hues in the
+ * design tokens.
  */
 export function MapView(p: MapViewProps) {
   const rects = useMemo(
-    () => layoutAtlas(p.model, p.width, p.height, p.focus),
-    [p.model, p.width, p.height, p.focus],
+    () => layoutAtlas(p.model, p.width, p.height, p.focus, p.base),
+    [p.model, p.width, p.height, p.focus, p.base],
   );
   const [tip, setTip] = useState<{ id: string; x: number; y: number } | null>(null);
   const ref = useRef<HTMLDivElement>(null);
@@ -95,7 +106,12 @@ export function MapView(p: MapViewProps) {
   };
 
   return (
-    <div ref={ref} className={p.planning ? 'map is-planning' : 'map'} onPointerMove={onMove} onPointerLeave={onLeave}>
+    <div
+      ref={ref}
+      className={['map', p.planning && 'is-planning', p.base && 'is-freeing'].filter(Boolean).join(' ')}
+      onPointerMove={onMove}
+      onPointerLeave={onLeave}
+    >
       {p.model.regions.map((r) => {
         const rect = rects.get(regionKey(r.id));
         if (!rect || r.pending) return null;
@@ -129,6 +145,7 @@ export function MapView(p: MapViewProps) {
         const shown = !p.focus || p.focus === l.regionId;
         const canClick = p.interactive && shown && (p.clickable?.(l) ?? false);
         const look = p.look?.(l, rect) ?? {};
+        const fill = look.fill ?? (l.vacant > 0 ? l.bytes / (l.bytes + l.vacant) : undefined);
         // A badge needs room; a narrow tile with one has room for its size only, its name is in the hover card.
         const badge = rect.w >= 40 && rect.h >= 26 ? look.badge : undefined;
         const compact = !!badge && rect.w < 92;
@@ -166,7 +183,7 @@ export function MapView(p: MapViewProps) {
             {l.kind !== 'free' && (
               <div
                 className="map-fill"
-                style={look.fill === undefined ? undefined : { height: `${Math.max(0, Math.min(1, look.fill)) * 100}%` }}
+                style={fill === undefined ? undefined : { height: `${Math.max(0, Math.min(1, fill)) * 100}%` }}
               />
             )}
             {look.label ??
@@ -175,7 +192,7 @@ export function MapView(p: MapViewProps) {
                   {!compact && <span className="map-name">{l.name}</span>}
                   {showSize && (
                     <span className="map-size">
-                      {l.kind === 'free' && p.freeLabel ? p.freeLabel : formatBytes(l.bytes)}
+                      {look.size ?? (l.kind === 'free' && p.freeLabel ? p.freeLabel : formatBytes(l.bytes))}
                     </span>
                   )}
                 </div>

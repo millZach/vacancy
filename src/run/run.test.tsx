@@ -21,6 +21,8 @@ const panel = () => screen.getByRole('complementary', { name: 'Run' });
 const steps = () => within(panel()).getAllByRole('listitem').map((li) => plain(li.textContent));
 const log = () => [...within(panel()).getByRole('log').children].map((l) => plain(l.textContent));
 const tile = (container: HTMLElement, id: string) => container.querySelector<HTMLElement>(`.map [data-tile="p:${id}"]`)!;
+const freeTile = (container: HTMLElement) => container.querySelector<HTMLElement>('.map .map-tile--free')!;
+const area = (el: HTMLElement) => parseFloat(el.style.width) * parseFloat(el.style.height);
 
 /** A bridge whose run is played by the test, event by event. */
 function scripted(made: PlanSummary = plan) {
@@ -150,6 +152,9 @@ describe('freeing space', () => {
     expect(screen.queryByRole('button', { name: 'Scan again' })).toBeNull();
     expect(tile(container, 'w-node')).toHaveClass('is-queued');
     expect(tile(container, 'w-temp')).not.toHaveClass('is-queued');
+    const node = area(tile(container, 'w-node'));
+    const free = area(freeTile(container));
+    const temp = area(tile(container, 'w-temp'));
 
     await run.emit(
       { kind: 'stepStarted', step: 0, id: 'w-node' },
@@ -162,17 +167,28 @@ describe('freeing space', () => {
     expect(within(panel()).getByRole('progressbar', { name: 'Freed' })).toHaveAttribute('aria-valuenow', '26');
     expect(within(panel()).getAllByRole('listitem')[0]).toHaveClass('is-running');
     expect(log()).toEqual(['deleted C:\\Users\\alex\\code\\web-shop\\node_modules']);
-    // The tile drains as its step frees space, and free space grows.
+    // The tile shrinks by what its step freed, 14 GB left under a sliver of vacant ground, and the free tile grows by
+    // it and says how much free space there is now.
     expect(tile(container, 'w-node')).toHaveClass('is-running');
-    expect(tile(container, 'w-node').querySelector<HTMLElement>('.map-fill')!.style.height).toMatch(/^66\.66+\d*%$/);
+    expect(tile(container, 'w-node').querySelector<HTMLElement>('.map-fill')!.style.height).toMatch(/^93\.0\d*%$/);
+    expect(area(tile(container, 'w-node'))).toBeLessThan(node * 0.8);
+    expect(area(freeTile(container))).toBeGreaterThan(free * 1.1);
+    // A tile the plan doesn't touch stays about the size it was.
+    expect(area(tile(container, 'w-temp')) / temp).toBeCloseTo(1, 1);
     expect(plain(container.querySelector('.map .map-tile--free .free-grow')?.textContent)).toBe('52.0 GB');
+    expect(container.querySelector('.map')).toHaveClass('is-freeing');
 
     await run.emit(
       { kind: 'stepFinished', step: 0, report: nodeDone },
       { kind: 'stepStarted', step: 1, id: 'w-browser' },
       { kind: 'skipped', step: 1, skip: inUse },
     );
+    // Cleared, it is a sliver of vacant ground; its 21 GB are in the free tile.
     expect(tile(container, 'w-node')).toHaveClass('is-vacant');
+    expect(tile(container, 'w-node').querySelector<HTMLElement>('.map-fill')!.style.height).toBe('0%');
+    expect(area(tile(container, 'w-node'))).toBeLessThan(node * 0.25);
+    expect(area(freeTile(container))).toBeGreaterThan(free * 1.35);
+    expect(plain(container.querySelector('.map .map-tile--free .free-grow')?.textContent)).toBe('66.0 GB');
     expect(log().slice(1)).toEqual([
       'node_modules in 61 idle projects: 21.0 GB freed',
       `skipped ${inUse.path} (212 files are open in Microsoft Edge)`,
@@ -183,6 +199,9 @@ describe('freeing space', () => {
 
     await run.emit({ kind: 'stepFinished', step: 1, report: browserPartial });
     await run.finish(report);
+    // The done map is the drive as the run left it.
+    expect(plain(container.querySelector('.map .map-tile--free .free-grow')?.textContent)).toBe('71.9 GB');
+    expect(tile(container, 'w-browser')).toHaveClass('is-vacant');
 
     expect(within(panel()).getByRole('heading', { name: 'Done' })).toBeInTheDocument();
     expect(within(panel()).getByText('All 2 steps finished.')).toBeInTheDocument();
