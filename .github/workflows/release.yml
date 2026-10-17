@@ -151,6 +151,19 @@ jobs:
           path: out
           merge-multiple: true
 
+      # The tag could have been moved while the builds ran; never attach these installers to a different commit.
+      - name: Check the tag still points at the commit that was built
+        run: |
+          ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" --jq '.object.type + " " + .object.sha')
+          read -r type sha <<<"$ref"
+          if [ "$type" = "tag" ]; then # an annotated tag: follow it to its commit
+            sha=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$sha" --jq .object.sha)
+          fi
+          if [ "$sha" != "$GITHUB_SHA" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME now points at $sha, but this run built $GITHUB_SHA. Nothing was drafted."
+            exit 1
+          fi
+
       - name: Create the draft with every installer
         run: |
           cd out
