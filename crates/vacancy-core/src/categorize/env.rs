@@ -292,6 +292,41 @@ mod tests {
         ));
     }
 
+    /// A folder's name may end in a space. The path Drive stored is used exactly as stored, never trimmed: the
+    /// mirror `Work ` is the cloud root and is protected, not some `Work` that may or may not be beside it.
+    #[test]
+    fn a_mirror_whose_name_ends_in_a_space() {
+        let fx = tempfile::tempdir().unwrap();
+        let home = native(fx.path(), "Users/alex");
+        let stored = if cfg!(windows) {
+            format!(r"\\?\{}\Work ", home.display())
+        } else {
+            format!("{}/Work ", home.display())
+        };
+        let mirror = PathBuf::from(&stored);
+        let target = mirror.join("app").join("node_modules");
+        std::fs::create_dir_all(&target).unwrap();
+        assert!(
+            std::fs::read_dir(&home)
+                .unwrap()
+                .any(|e| e.unwrap().file_name() == "Work "),
+            "the folder on disk ends in a space"
+        );
+        drive_db(fx.path(), &[Some(stored.as_str())], "/nowhere");
+        assert_eq!(found(fx.path()), vec![mirror.clone()], "exactly as stored");
+        let mut env = if cfg!(windows) {
+            Env::windows(fx.path(), "alex")
+        } else {
+            Env::macos(fx.path(), "alex")
+        };
+        env.cloud.extend(google_drive_roots(fx.path()));
+        let guard = crate::Guard::new(&env, fx.path());
+        assert!(matches!(
+            guard.check(&target),
+            Err(crate::Denied::Protected(_))
+        ));
+    }
+
     /// Reading the database never writes beside it (no journal, no copy) and never changes it.
     #[test]
     fn reads_drive_s_database_in_place_without_writing() {
@@ -543,16 +578,10 @@ fn drive_db_paths(db: &Path, params: &str) -> rusqlite::Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-/// A path as Drive writes it (sometimes as `\\?\C:\...`), if it is one.
+/// A path exactly as Drive stored it, if it is one. Nothing is trimmed or rewritten: a folder's name may end in a
+/// space, and on Windows Drive stores `\\?\C:\...`, the only form that names such a folder exactly (`C:\...` loses
+/// trailing spaces and dots on the way to the file system).
 fn drive_path(text: String) -> Option<PathBuf> {
-    let text = text.trim();
-    let text = match text.strip_prefix(r"\\?\") {
-        Some(rest) => match rest.strip_prefix(r"UNC\") {
-            Some(unc) => format!(r"\\{unc}"),
-            None => rest.to_owned(),
-        },
-        None => text.to_owned(),
-    };
     let path = PathBuf::from(text);
     path.is_absolute().then_some(path)
 }
