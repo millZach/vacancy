@@ -2,6 +2,7 @@
 // Requires the app already started with VACANCY_FIXTURE_ROOT and a held-open fixture file.
 // Build the handle-pinned mutation helper first: cargo build -p vacancy-core --example fixture_mutator
 // --mutator <exe> overrides target/debug/examples/fixture_mutator.exe (VACANCY_FIXTURE_MUTATOR also works).
+// --reminders also selects the single default-off reminder from a fresh fixture built with --advice.
 // Drives scan/plan/confirm/run with UI clicks; stops on the completed run for wrapped-shots (without --run).
 import assert from 'node:assert/strict';
 import { lstat, mkdir, realpath, writeFile } from 'node:fs/promises';
@@ -17,6 +18,7 @@ const { values: o } = parseArgs({ options: {
   fixture: { type: 'string' }, out: { type: 'string' },
   cdp: { type: 'string', default: 'http://127.0.0.1:9333' },
   mutator: { type: 'string', default: process.env.VACANCY_FIXTURE_MUTATOR || resolve('target/debug/examples/fixture_mutator.exe') },
+  reminders: { type: 'boolean', default: false },
 } });
 assert.equal(process.platform, 'win32', 'Installed fixture proof is Windows only');
 assert(o.fixture && o.out, '--fixture and --out are required');
@@ -87,6 +89,14 @@ try {
   mutation.stdin.end('change\n');
   await exited; // It has written via the held handle and released every pin before planning.
   await page.getByRole('button', { name: 'Build a plan' }).click();
+  if (o.reminders) {
+    const hints = page.getByRole('complementary', { name: 'Plan', exact: true })
+      .getByRole('region', { name: 'Left for you' }).getByRole('checkbox', { name: /^Remind me:/ });
+    assert.equal(await hints.count(), 1, 'The fresh Windows advice fixture must have exactly one reminder');
+    assert.equal(await hints.getAttribute('aria-checked'), 'false', 'Advice must start unselected');
+    await hints.click();
+    assert.equal(await hints.getAttribute('aria-checked'), 'true');
+  }
   const rows = page.locator('.tray-row');
   for (const row of await rows.all()) {
     const title = row.locator('.tray-row-title');
