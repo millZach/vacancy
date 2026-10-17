@@ -265,6 +265,11 @@ pub(crate) fn propose_until(
     // Each proposal travels with its targets and kind as one entry, so sorting can't separate them.
     let mut entries: Vec<(Proposal, Vec<ItemRef>, ActionKind)> = Vec::new();
     for rule in catalog::rules(env) {
+        // A sync client's folders that can't be known could be anywhere people keep their own files: the rules that
+        // search there propose nothing rather than risk a mirror.
+        if !env.unknown_clouds.is_empty() && rule.searches_own_files() {
+            continue;
+        }
         let found = engine.run(&rule)?;
         if found.bytes == 0 {
             continue;

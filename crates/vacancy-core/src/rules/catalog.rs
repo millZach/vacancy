@@ -41,6 +41,14 @@ pub(super) struct Rule {
     pub(super) text: Text,
 }
 
+impl Rule {
+    /// Whether it searches where people keep their own files (projects, Downloads), where a sync client's folders
+    /// could be. Every other rule looks only in app data and known cache, log and temp locations.
+    pub(super) fn searches_own_files(&self) -> bool {
+        matches!(self.find, Find::Projects { .. } | Find::Files { .. })
+    }
+}
+
 /// How a rule finds places.
 #[derive(Debug)]
 pub(super) enum Find {

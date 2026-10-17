@@ -991,6 +991,37 @@ mod guard {
         }
     }
 
+    /// Google Drive installed with its record of its mirrors unreadable: they could be anywhere, so the rules that
+    /// search people's own files (idle projects, old installers in Downloads) propose nothing. Caches still go.
+    #[test]
+    fn unknown_sync_folders_close_the_rules_that_search_people_s_files() {
+        for windows in [true, false] {
+            let fx = Fixture::new();
+            bait(&fx, "Users/alex/code");
+            bait(&fx, "Users/alex/Downloads");
+            fx.file("Users/alex/.npm/_cacache/content/a", MIB);
+            fx.file("Users/alex/AppData/Local/npm-cache/_cacache/content/a", MIB);
+            let mut env = if windows { win(&fx) } else { mac(&fx) };
+            let (snap, proposals) = run(&fx, &env, &moment(&[]));
+            let open = all_targets(&fx, &snap, &proposals);
+            assert!(
+                open.iter().any(|t| t.starts_with("Users/alex/code/"))
+                    && open.iter().any(|t| t.starts_with("Users/alex/Downloads/")),
+                "the control: {open:?}"
+            );
+            env.unknown_clouds = vec!["Google Drive".to_owned()];
+            let (snap, proposals) = run(&fx, &env, &moment(&[]));
+            let closed = all_targets(&fx, &snap, &proposals);
+            assert!(
+                !closed.is_empty()
+                    && closed.iter().all(|t| !t.starts_with("Users/alex/code/")
+                        && !t.starts_with("Users/alex/Downloads/")),
+                "{:?}: {closed:?}",
+                env.platform
+            );
+        }
+    }
+
     #[test]
     fn os_folders() {
         let fx = Fixture::new();
