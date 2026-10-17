@@ -277,7 +277,7 @@ fn run(mut command: Command, limits: Limits, cancel: &CancelToken) -> Output {
     let status = loop {
         // Each pass drains at most 16 KiB per pipe so a continuous writer cannot starve cancel/deadline checks.
         if let Err(e) = drain(&mut stdout, &mut out, cap, &mut truncated)
-            .and_then(|()| drain(&mut stderr, &mut err, cap, &mut truncated))
+            .and_then(|_| drain(&mut stderr, &mut err, cap, &mut truncated))
         {
             let _ = child.kill();
             let _ = child.wait();
@@ -299,14 +299,16 @@ fn run(mut command: Command, limits: Limits, cancel: &CancelToken) -> Output {
             Ok(Some(exit)) => {
                 // Pipes may be inherited by a descendant. Never wait for EOF after the owned child exits.
                 // Remaining output is bounded; mark it incomplete rather than inventing a full transcript.
+                let mut eof = (false, false);
                 for _ in 0..64 {
                     let before = (out.len(), err.len());
-                    let _ = drain(&mut stdout, &mut out, cap, &mut truncated);
-                    let _ = drain(&mut stderr, &mut err, cap, &mut truncated);
-                    if before == (out.len(), err.len()) {
+                    eof.0 = drain(&mut stdout, &mut out, cap, &mut truncated).unwrap_or(false);
+                    eof.1 = drain(&mut stderr, &mut err, cap, &mut truncated).unwrap_or(false);
+                    if eof == (true, true) || before == (out.len(), err.len()) {
                         break;
                     }
                 }
+                truncated |= eof != (true, true);
                 break if exit.success() {
                     Status::Success
                 } else {
@@ -321,12 +323,33 @@ fn run(mut command: Command, limits: Limits, cancel: &CancelToken) -> Output {
             }
         }
     };
+    let stdout = bounded_text(out, cap, &mut truncated);
+    let stderr = bounded_text(err, cap, &mut truncated);
     Output {
         status,
-        stdout: String::from_utf8_lossy(&out).into_owned(),
-        stderr: String::from_utf8_lossy(&err).into_owned(),
+        stdout,
+        stderr,
         truncated,
     }
+}
+
+fn bounded_text(bytes: Vec<u8>, cap: usize, truncated: &mut bool) -> String {
+    let mut text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(e) => {
+            *truncated = true;
+            String::from_utf8_lossy(e.as_bytes()).into_owned()
+        }
+    };
+    if text.len() > cap {
+        let mut boundary = cap;
+        while !text.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        text.truncate(boundary);
+        *truncated = true;
+    }
+    text
 }
 
 fn drain<R: Read + pipe::Pipe>(
@@ -334,18 +357,21 @@ fn drain<R: Read + pipe::Pipe>(
     data: &mut Vec<u8>,
     cap: usize,
     truncated: &mut bool,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let mut buffer = [0; 16 * 1024];
-    let available = pipe::available(pipe)?.min(buffer.len());
+    let Some(available) = pipe::available(pipe)? else {
+        return Ok(true);
+    };
+    let available = available.min(buffer.len());
     if available == 0 {
-        return Ok(());
+        return Ok(false);
     }
     match pipe.read(&mut buffer[..available]) {
         Ok(n) => {
             let keep = n.min(cap.saturating_sub(data.len()));
             data.extend_from_slice(&buffer[..keep]);
             *truncated |= keep < n;
-            Ok(())
+            Ok(n == 0)
         }
         Err(e)
             if matches!(
@@ -353,7 +379,7 @@ fn drain<R: Read + pipe::Pipe>(
                 io::ErrorKind::WouldBlock | io::ErrorKind::BrokenPipe
             ) =>
         {
-            Ok(())
+            Ok(e.kind() == io::ErrorKind::BrokenPipe)
         }
         Err(e) => Err(e),
     }
@@ -368,7 +394,7 @@ mod pipe {
     pub fn prepare<T: Pipe>(_: &T) -> io::Result<()> {
         Ok(())
     }
-    pub fn available<T: Pipe>(pipe: &T) -> io::Result<usize> {
+    pub fn available<T: Pipe>(pipe: &T) -> io::Result<Option<usize>> {
         use windows_sys::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_NO_DATA};
         use windows_sys::Win32::System::Pipes::PeekNamedPipe;
         let mut bytes = 0;
@@ -384,14 +410,14 @@ mod pipe {
             )
         } != 0
         {
-            Ok(bytes as usize)
+            Ok(Some(bytes as usize))
         } else {
             let e = io::Error::last_os_error();
             if matches!(
                 e.raw_os_error().map(|n| n as u32),
                 Some(ERROR_BROKEN_PIPE | ERROR_NO_DATA)
             ) {
-                Ok(0)
+                Ok(None)
             } else {
                 Err(e)
             }
@@ -408,21 +434,24 @@ mod pipe {
     pub fn prepare<T: Pipe>(pipe: &T) -> io::Result<()> {
         // SAFETY: fcntl receives a live pipe descriptor and integer flags, with no pointers.
         let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
         // SAFETY: same live descriptor, preserving its existing flags.
-        if flags < 0
-            || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-        {
+        let set = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
+        if set < 0 {
             Err(io::Error::last_os_error())
         } else {
             Ok(())
         }
     }
-    pub fn available<T: Pipe>(_: &T) -> io::Result<usize> {
-        Ok(16 * 1024)
+    pub fn available<T: Pipe>(_: &T) -> io::Result<Option<usize>> {
+        Ok(Some(16 * 1024))
     }
 }
 
 pub mod discovery;
+pub mod scope;
 
 #[cfg(unix)]
 mod process_tree {
@@ -564,6 +593,19 @@ mod tests {
                 }
             }
             Ok("wait") => std::thread::sleep(Duration::from_secs(30)),
+            Ok("descendant") => {
+                #[expect(
+                    clippy::zombie_processes,
+                    reason = "adversarial orphan fixture: process-tree teardown must terminate this child after its parent exits"
+                )]
+                let child = helper("wait")
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit())
+                    .spawn()
+                    .unwrap();
+                println!("fixture-descendant={}", child.id());
+                // Deliberately leave it running. The invocation's process tree owns it, not this helper.
+            }
             _ => panic!("not a tool fixture invocation"),
         }
     }
@@ -603,6 +645,23 @@ mod tests {
         );
         assert_eq!(output.status, Status::TimedOut);
         assert!(start.elapsed() < Duration::from_secs(3));
+        let cancel = CancelToken::new();
+        let other = cancel.clone();
+        let cancelling = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            other.cancel();
+        });
+        let output = run(helper("wait"), limits, &cancel);
+        cancelling.join().unwrap();
+        assert_eq!(output.status, Status::Cancelled);
+        let start = Instant::now();
+        let output = run(helper("descendant"), limits, &CancelToken::new());
+        assert_eq!(output.status, Status::Success);
+        assert!(output.stdout.contains("fixture-descendant="));
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "inherited pipes never wait for descendant EOF"
+        );
     }
     #[test]
     fn cancel_is_first_class_and_fixture_queries_never_fall_back() {

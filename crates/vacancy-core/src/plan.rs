@@ -258,6 +258,7 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
                 summary: p.summary.clone(),
                 why: p.why.clone(),
                 bytes: p.bytes,
+                hint_action: p.hint_action.clone(),
             });
             continue;
         }

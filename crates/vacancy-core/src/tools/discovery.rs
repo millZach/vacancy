@@ -30,6 +30,82 @@ pub struct Docker {
     pub context_name: Option<String>,
     pub endpoint: Option<String>,
     pub evidence: Vec<Evidence>,
+    /// Exact unused image ids, only when the full verbose usage schema was recognized. These are candidates,
+    /// not approved commands. Rounded Docker measurements are kept as text instead of invented exact bytes.
+    pub unused_images: Vec<DockerImage>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DockerImage {
+    pub id: String,
+    pub unique_size: String,
+    pub shared_size: String,
+}
+
+/// Parse the verbose formatter's `Images` array. ID is untruncated outside table mode; `Containers`,
+/// `UniqueSize` and `SharedSize` are strings. Missing fields, unknown usage, duplicate/short ids and malformed
+/// output never become deletion candidates. Human-readable size strings are deliberately never summed.
+pub fn docker_images(output: &Output) -> Result<Vec<DockerImage>, String> {
+    if !output.complete() {
+        return Err("Docker usage measurement was incomplete".into());
+    }
+    #[derive(Deserialize)]
+    struct Usage {
+        #[serde(rename = "Images")]
+        images: Vec<Image>,
+    }
+    #[derive(Deserialize)]
+    struct Image {
+        #[serde(rename = "ID")]
+        id: String,
+        #[serde(rename = "Containers")]
+        containers: String,
+        #[serde(rename = "UniqueSize")]
+        unique: String,
+        #[serde(rename = "SharedSize")]
+        shared: String,
+    }
+    let usage: Usage = serde_json::from_str(&output.stdout)
+        .map_err(|_| "Docker verbose usage schema was not recognized")?;
+    let mut ids = std::collections::HashSet::new();
+    let mut images = Vec::new();
+    for image in usage.images {
+        if !image_id(&image.id) || !ids.insert(image.id.clone()) {
+            return Err(
+                "Docker usage has a duplicate or non-content-addressed image identity".into(),
+            );
+        }
+        let containers = image
+            .containers
+            .parse::<u64>()
+            .map_err(|_| "Docker did not establish whether an image is unused")?;
+        if image.unique.len() > 64
+            || image.shared.len() > 64
+            || image
+                .unique
+                .chars()
+                .chain(image.shared.chars())
+                .any(char::is_control)
+        {
+            return Err("Docker size measurement was not recognized".into());
+        }
+        if containers == 0 {
+            images.push(DockerImage {
+                id: image.id,
+                unique_size: image.unique,
+                shared_size: image.shared,
+            });
+        }
+    }
+    Ok(images)
+}
+
+pub(super) fn image_id(id: &str) -> bool {
+    id.strip_prefix("sha256:").is_some_and(|v| {
+        v.len() == 64
+            && v.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
 }
 
 /// Capture context before and after service queries. Every daemon query pins the verified local endpoint; the
@@ -41,6 +117,7 @@ pub fn docker(runner: &mut dyn Runner, cancel: &CancelToken) -> Docker {
         context_name: None,
         endpoint: None,
         evidence: Vec::new(),
+        unused_images: Vec::new(),
     };
     let context = record(runner, &mut out.evidence, Query::DockerContext, cancel);
     if let Err(reason) = usable(&context) {
@@ -111,10 +188,26 @@ pub fn docker(runner: &mut dyn Runner, cancel: &CancelToken) -> Docker {
             out.availability = reason;
             return out;
         }
+        if matches!(
+            out.evidence.last().map(|e| &e.query),
+            Some(Query::Docker {
+                read: DockerRead::DiskUsage,
+                ..
+            })
+        ) {
+            match docker_images(&output) {
+                Ok(images) => out.unused_images = images,
+                Err(reason) => {
+                    out.availability = Availability::Unavailable(reason);
+                    return out;
+                }
+            }
+        }
     }
     let after = record(runner, &mut out.evidence, Query::DockerContext, cancel);
     if !after.complete() || after.stdout != context.stdout {
         out.availability = unavailable("Docker context changed during discovery");
+        out.unused_images.clear();
     }
     if out.availability == Availability::Ready {
         out.availability = Availability::Detected;
@@ -307,5 +400,33 @@ mod tests {
             docker(&mut runner, &CancelToken::new()).availability,
             Availability::Unavailable(_)
         ));
+    }
+
+    #[test]
+    fn verbose_images_require_exact_ids_and_known_container_usage_without_summing_sizes() {
+        let id = format!("sha256:{}", "a".repeat(64));
+        let text = serde_json::json!({"Images":[{"ID":id,"Containers":"0","UniqueSize":"1.23GB","SharedSize":"4.56GB"}]}).to_string();
+        let images = docker_images(&output(&text)).unwrap();
+        assert_eq!(images[0].id, id);
+        assert_eq!(images[0].unique_size, "1.23GB");
+        for bad in [
+            text.replace(&id, "abcdef123456"),
+            text.replace("\"0\"", "\"N/A\""),
+            text.replace("\"0\"", "0"),
+        ] {
+            assert!(docker_images(&output(&bad)).is_err());
+        }
+        assert!(
+            docker_images(&output(&text.replace("\"0\"", "\"1\"")))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            docker_images(&Output {
+                truncated: true,
+                ..output(&text)
+            })
+            .is_err()
+        );
     }
 }

@@ -118,6 +118,9 @@ pub struct Proposal {
     pub ai_note: Option<String>,
     /// What carrying it out does.
     pub action: ProposalAction,
+    /// Trusted built-in advice action. AI proposals never supply this; commands look it up by proposal id.
+    #[ts(optional = nullable)]
+    pub hint_action: Option<crate::hints::HintAction>,
     /// It comes back on its own if needed (caches, build output).
     pub regenerable: bool,
     /// A few of the places it removes, biggest first, as real paths.
@@ -1297,6 +1300,7 @@ fn proposal(snap: &Snapshot, rule: &Rule, found: &Found) -> Proposal {
         risk: rule.risk,
         source: ProposalSource::Rule,
         ai_note: None,
+        hint_action: None,
         action: match rule.action {
             ActionKind::DeleteContents | ActionKind::DeleteDirectory => ProposalAction::Delete,
             ActionKind::Tool => ProposalAction::Tool,

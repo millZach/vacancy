@@ -7,17 +7,26 @@ use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
 use crate::{Env, Platform, Snapshot};
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 const MAX_MANIFEST: u64 = 1024 * 1024;
 const SIX_MONTHS: i64 = 183 * 24 * 60 * 60;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Action {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+#[ts(export)]
+pub enum HintAction {
     SteamUninstall { app_id: u32 },
     LogicInstructions,
 }
 
-impl Action {
+impl HintAction {
     /// Only a known Steam id can produce an external URI. Logic is an in-app instruction.
     pub fn steam_uri(&self) -> Option<String> {
         match self {
@@ -35,17 +44,33 @@ pub struct Hint {
     /// Installed size reported by Steam, not measured allocated bytes and never counted as freed.
     pub reported_bytes: Option<u64>,
     pub manifest: PathBuf,
-    pub action: Action,
+    pub action: HintAction,
 }
 
 /// Discover installed games with an explicit last-played timestamp at least six months old. Unknown play
 /// history (including zero), future dates, corrupt manifests, linked paths and unreadable libraries are omitted.
 /// Only known Steam locations and libraries named by `libraryfolders.vdf` are inspected.
 pub fn steam(env: &Env, snapshot: &Snapshot, now: i64) -> Vec<Hint> {
-    let roots: Vec<PathBuf> = match env.platform {
+    let mut roots: Vec<PathBuf> = match env.platform {
         Platform::Windows => env.program_files.iter().map(|p| p.join("Steam")).collect(),
         Platform::MacOs => vec![env.home.join("Library/Application Support/Steam")],
     };
+    // HKCU belongs to the initiating, unelevated account. Fixture callers cannot read the host registry,
+    // including when a marker/environment variable is lost: the positively confined Env still blocks it.
+    if env.platform == Platform::Windows
+        && env.confined_to.is_none()
+        && std::env::var_os(crate::fixture::ROOT_VAR).is_none()
+        && let Some(root) = installed_steam()
+    {
+        roots.push(root);
+    }
+    steam_with_roots(env, snapshot, now, &roots)
+}
+
+/// Inject installed roots for recorded/platform tests. All reads still enforce fixture identity confinement;
+/// libraries on an unscanned volume never generate a result for the current volume.
+pub fn steam_with_roots(env: &Env, snapshot: &Snapshot, now: i64, roots: &[PathBuf]) -> Vec<Hint> {
+    let roots = roots.to_vec();
     let mut libraries = roots.clone();
     for root in roots {
         if let Ok(text) = read_manifest(env, &root.join("steamapps/libraryfolders.vdf"))
@@ -101,6 +126,39 @@ pub fn steam(env: &Env, snapshot: &Snapshot, now: i64) -> Vec<Hint> {
     found.into_values().collect()
 }
 
+#[cfg(windows)]
+fn installed_steam() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW};
+    let key: Vec<u16> = "Software\\Valve\\Steam\0".encode_utf16().collect();
+    let name: Vec<u16> = "SteamPath\0".encode_utf16().collect();
+    let mut buffer = vec![0u16; 16_384];
+    let mut bytes = (buffer.len() * 2) as u32;
+    // SAFETY: fixed NUL-terminated key/value names; buffer and byte count are valid output storage.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buffer.as_mut_ptr().cast(),
+            &mut bytes,
+        )
+    };
+    if status != 0 || bytes < 2 || bytes as usize > buffer.len() * 2 || !bytes.is_multiple_of(2) {
+        return None;
+    }
+    let end = buffer.iter().position(|c| *c == 0)?;
+    let path = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..end]));
+    path.is_absolute().then_some(path)
+}
+
+#[cfg(not(windows))]
+fn installed_steam() -> Option<PathBuf> {
+    None
+}
+
 /// Parse one app manifest. This is also the recorded-output seam used by fixture tests.
 pub fn steam_manifest(text: &str, expected_id: u32, now: i64, path: PathBuf) -> Option<Hint> {
     let Vdf::Object(state) = parse(text)?.remove("AppState")? else {
@@ -128,8 +186,60 @@ pub fn steam_manifest(text: &str, expected_id: u32, now: i64, path: PathBuf) -> 
         why: "Steam's manifest says this game was last played at least six months ago. Open Steam's uninstall screen to review it; Vacancy will not uninstall it. Steam's reported installed size may differ from space recovered.".into(),
         reported_bytes: value("SizeOnDisk").and_then(|s| s.parse().ok()),
         manifest: path,
-        action: Action::SteamUninstall { app_id },
+        action: HintAction::SteamUninstall { app_id },
     })
+}
+
+/// Recognize known library layouts, including Logic12's consolidated bundle. Allocated totals cannot tell how
+/// much shared APFS clone data would become free, so this advice deliberately carries no reclaim estimate.
+pub fn logic(env: &Env, snapshot: &Snapshot) -> Option<Hint> {
+    if env.platform != Platform::MacOs {
+        return None;
+    }
+    let paths = [
+        env.home.join("Music/Logic Pro Library.bundle"),
+        env.root.join("Library/Application Support/Logic"),
+        env.root.join("Library/Audio/Apple Loops/Apple"),
+    ];
+    let path = paths.into_iter().find(|p| {
+        readable_path(env, p) && snapshot.find(p).is_some_and(|d| snapshot.tree(d).bytes > 0)
+    })?;
+    Some(Hint {
+        id: "hint-logic-library".into(),
+        title: "Review the Logic sound library".into(),
+        why: "In Logic Pro, open Sound Library and review your downloaded content (Manage Packs in Logic Pro 12; Sound Library Manager in earlier versions). Use the app's controls for content you no longer need, or relocate the library through Logic. Existing projects may need these sounds. Shared or cloned content means the library's size is not a promise of space recovered.".into(),
+        reported_bytes: None,
+        manifest: path,
+        action: HintAction::LogicInstructions,
+    })
+}
+
+impl Hint {
+    /// A proposal displays advice without claiming that its reported installed size can be freed. No path is
+    /// a delete target and the action never becomes a command supplied by the UI.
+    pub fn proposal(&self) -> crate::Proposal {
+        crate::Proposal {
+            id: self.id.clone(),
+            category: match self.action {
+                HintAction::SteamUninstall { .. } => crate::CategoryId::Apps,
+                HintAction::LogicInstructions => crate::CategoryId::Media,
+            },
+            title: self.title.clone(),
+            summary: "Advice only · no space counted".into(),
+            why: self.why.clone(),
+            bytes: 0,
+            item_count: 0,
+            place_count: 0,
+            risk: crate::Risk::Review,
+            source: crate::ProposalSource::Rule,
+            ai_note: None,
+            action: crate::ProposalAction::Hint,
+            hint_action: Some(self.action.clone()),
+            regenerable: false,
+            sample_paths: vec![self.manifest.display().to_string()],
+            default_on: false,
+        }
+    }
 }
 
 #[derive(Debug)]
