@@ -314,27 +314,6 @@ pub fn scan_for_map_with(
 }
 
 /// Categorizes a finished scan, proposes cleanups, carves their tiles out of the categories and builds the overview
-/// against the volume's own numbers, read now. Gives up (`None`) as soon as `stop` says so; it is asked all along
-/// the way, not only between the steps.
-#[cfg(test)]
-pub(crate) fn build_map(
-    snapshot: &Snapshot,
-    env: &Env,
-    moment: &Moment,
-    volume: &Path,
-    stop: &dyn Fn() -> bool,
-) -> Option<(Categories, Proposals, Overview)> {
-    build_map_with(
-        snapshot,
-        env,
-        moment,
-        volume,
-        &|_| volume_info(volume).ok(),
-        stop,
-    )
-}
-
-/// Categorizes a finished scan, proposes cleanups, carves their tiles out of the categories and builds the overview
 /// against the drive's figures from `figures`, read now. Gives up (`None`) as soon as `stop` says so; it is asked
 /// all along the way, not only between the steps.
 fn build_map_with(
@@ -825,41 +804,74 @@ mod tests {
     #[test]
     fn a_cancel_during_the_last_step_still_means_no_map() {
         let (fx, snapshot) = tree(200);
-        let env = Env::windows(fx.path(), "alex");
+        let mut env = Env::windows(fx.path(), "alex");
+        env.confined_to = Some(fx.path().to_path_buf());
         let moment = Moment::default();
+        let volume = || crate::fixture::volume(fx.path(), 1 << 40, &snapshot);
         let checks = Cell::new(0);
         let categories =
             categorize_until(&snapshot, &env, &stopper(&checks, 0)).expect("categories");
         let in_categorize = checks.get();
         checks.set(0);
-        let proposals = propose_until(&snapshot, &categories, &env, &moment, &stopper(&checks, 0))
-            .expect("proposals");
+        let mut proposals =
+            propose_until(&snapshot, &categories, &env, &moment, &stopper(&checks, 0))
+                .expect("proposals");
         let in_propose = checks.get();
         checks.set(0);
+        for hint in crate::hints::discover_until(&env, &snapshot, moment.now, &stopper(&checks, 0))
+            .expect("advice")
+        {
+            assert!(!stopper(&checks, 0)());
+            proposals.append_hint(&hint);
+        }
+        let in_advice = checks.get();
+        assert!(in_advice > 0, "advice must participate in cancellation");
+        checks.set(0);
+        let claims: Vec<_> = proposals
+            .list()
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.category, proposals.targets(i)))
+            .collect();
         let categories = categories
-            .carve(&snapshot, &[], &stopper(&checks, 0))
+            .carve(&snapshot, &claims, &stopper(&checks, 0))
             .expect("carved");
         let in_carve = checks.get();
         checks.set(0);
-        let info = volume_info(fx.path()).expect("volume");
         overview_until(
             &snapshot,
             &categories,
             &proposals,
-            info,
+            volume(),
             &stopper(&checks, 0),
         )
         .expect("the overview");
         let in_overview = checks.get();
 
         // One check before categorizing, the steps' own, and one after the last step.
-        let all = 1 + in_categorize + in_propose + in_carve + in_overview + 1;
+        let all = 1 + in_categorize + in_propose + in_advice + in_carve + in_overview + 1;
         checks.set(0);
-        build_map(&snapshot, &env, &moment, fx.path(), &stopper(&checks, 0)).expect("the map");
+        build_map_with(
+            &snapshot,
+            &env,
+            &moment,
+            fx.path(),
+            &|_| Some(volume()),
+            &stopper(&checks, 0),
+        )
+        .expect("the map");
         assert_eq!(checks.get(), all, "a final check after the overview");
         checks.set(0);
         assert!(
-            build_map(&snapshot, &env, &moment, fx.path(), &stopper(&checks, all)).is_none(),
+            build_map_with(
+                &snapshot,
+                &env,
+                &moment,
+                fx.path(),
+                &|_| Some(volume()),
+                &stopper(&checks, all)
+            )
+            .is_none(),
             "a cancel after the overview's last check still means no map"
         );
     }

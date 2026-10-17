@@ -775,6 +775,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hint_opener_refuses_matching_unavailable_identities_but_accepts_a_reported_zero() {
+        use vacancy_core::hints::HintAction;
+        // Failed Windows queries now map None to an empty id (covered by the pure Windows offering test).
+        // Identical failures at scan/click time must never establish that this is the same physical volume.
+        for (scanned, current) in [("", ""), ("", "00000000"), ("00000000", "")] {
+            assert!(
+                Mode::Real
+                    .open_hint_with(
+                        C,
+                        || Some((scanned.into(), HintAction::SteamUninstall { app_id: 42 })),
+                        || Ok(vec![hint_volume(current)]),
+                        |_| panic!("unavailable volume identity must never dispatch"),
+                    )
+                    .is_err()
+            );
+        }
+        let mut launched = false;
+        Mode::Real
+            .open_hint_with(
+                C,
+                || Some(("00000000".into(), HintAction::SteamUninstall { app_id: 42 })),
+                || Ok(vec![hint_volume("00000000")]),
+                |id| {
+                    assert_eq!(id, 42);
+                    launched = true;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(
+            launched,
+            "successful numeric zero is an identity, unlike lookup failure"
+        );
+    }
+
     fn last(scans: &Scans<u32>, drive: &str) -> Option<u32> {
         scans.with_last(drive, |last| last.copied())
     }
