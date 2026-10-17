@@ -3,7 +3,7 @@
 use std::ffi::OsStr;
 use std::path::Path;
 
-use super::{Entry, Fail};
+use super::{Entry, Fail, Open};
 use crate::fsid::Step;
 
 pub(crate) struct Dir;
@@ -19,9 +19,17 @@ impl Busy {
     pub(crate) fn now() -> Self {
         Busy
     }
+
+    pub(crate) fn refresh(&mut self, _every: std::time::Duration) -> bool {
+        false
+    }
+
+    pub(crate) fn holder(&self, _dev: u64, _ino: u128) -> Option<Option<String>> {
+        None
+    }
 }
 
-pub(crate) fn walk_to_parent(_path: &Path) -> Result<Parent, Fail> {
+pub(crate) fn walk_to_parent(_path: &Path, _pin: bool) -> Result<Parent, Fail> {
     Err(Fail::Unsupported)
 }
 
@@ -33,7 +41,7 @@ pub(crate) fn open_dir(
     _parent: &Dir,
     _name: &OsStr,
     _expect: Option<&Entry>,
-    _delete: bool,
+    _mode: Open,
 ) -> Result<(Dir, Step), Fail> {
     Err(Fail::Unsupported)
 }

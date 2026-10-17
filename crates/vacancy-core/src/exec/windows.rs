@@ -41,7 +41,7 @@ use windows_sys::Win32::System::IO::{DeviceIoControl, IO_STATUS_BLOCK};
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
 use windows_sys::Win32::System::WindowsProgramming::DRIVE_REMOTE;
 
-use super::{Entry, Fail, Kind};
+use super::{Entry, Fail, Kind, Open};
 use crate::fsid::{Identity, Step};
 
 /// Reparse points that name somewhere else (symlinks, junctions, mount points) have this bit.
@@ -108,18 +108,31 @@ pub(crate) struct Parent {
     _above: Vec<Dir>,
 }
 
-/// Nothing to look up on Windows: an app that has a file open makes the exclusive open fail.
+/// Nothing to look up on Windows: an app that has a file open makes the exclusive open fail, right as it is
+/// deleted.
 pub(crate) struct Busy;
 
 impl Busy {
     pub(crate) fn now() -> Self {
         Busy
     }
+
+    pub(crate) fn refresh(&mut self, _every: std::time::Duration) -> bool {
+        false
+    }
+
+    pub(crate) fn holder(&self, _dev: u64, _ino: u128) -> Option<Option<String>> {
+        None
+    }
 }
 
 /// Walks to `path`'s parent from its volume root, each folder opened by name inside the one before, never through a
 /// link, and keeps them open.
-pub(crate) fn walk_to_parent(path: &Path) -> Result<Parent, Fail> {
+///
+/// With `pin`, every folder on the way is held without `FILE_SHARE_DELETE`: while the action runs nobody can rename
+/// or move any of them, so the folders being emptied stay where the Guard judged them. Without it (a look that is
+/// dropped at once), they are opened sharing everything, which our own pinned handles allow.
+pub(crate) fn walk_to_parent(path: &Path, pin: bool) -> Result<Parent, Fail> {
     let mut parts = path.components();
     let letter = match parts.next() {
         Some(Component::Prefix(p)) => match p.kind() {
@@ -171,8 +184,9 @@ pub(crate) fn walk_to_parent(path: &Path) -> Result<Parent, Fail> {
     }];
     let mut dir = Dir { handle: root };
     let mut above = Vec::new();
+    let mode = if pin { Open::Pin } else { Open::Look };
     for name in folders {
-        let (next, step) = open_dir(&dir, name, None, false)?;
+        let (next, step) = open_dir(&dir, name, None, mode)?;
         steps.push(step);
         above.push(mem::replace(&mut dir, next));
     }
@@ -191,30 +205,32 @@ pub(crate) fn entry(parent: &Dir, name: &OsStr) -> Result<Entry, Fail> {
         .ok_or(Fail::Gone)
 }
 
-/// Opens the folder `name` in `parent` without following it: for listing, and with `delete` for deleting it too
-/// (then without letting anyone else delete or rename it while it is open). It must not be a link, and if
-/// `expect` says so it must be the folder that listing entry described (same file id). Gives its step.
+/// Opens the folder `name` in `parent` without following it, for `mode` (see [`Open`]). It must not be a link, and
+/// if `expect` says so it must be the folder that listing entry described (same file id). Gives its step.
 pub(crate) fn open_dir(
     parent: &Dir,
     name: &OsStr,
     expect: Option<&Entry>,
-    delete: bool,
+    mode: Open,
 ) -> Result<(Dir, Step), Fail> {
     let wide = name_of(name)?;
-    let (access, share) = if delete {
-        (
+    let (access, share) = match mode {
+        Open::Delete => (
             DELETE
                 | FILE_LIST_DIRECTORY
                 | FILE_READ_ATTRIBUTES
                 | FILE_WRITE_ATTRIBUTES
                 | SYNCHRONIZE,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
-        )
-    } else {
-        (
+        ),
+        Open::Pin => (
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+        ),
+        Open::Look => (
             FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        )
+        ),
     };
     let handle =
         nt_open(&parent.handle, &wide, access, share, FILE_DIRECTORY_FILE).map_err(|status| {

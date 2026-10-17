@@ -157,8 +157,8 @@ pub(crate) fn files_in(path: &Path) -> Result<(Vec<Step>, Vec<Entry>), Fail> {
     let name = path
         .file_name()
         .ok_or_else(|| Fail::Failed("the path has no name".into()))?;
-    let parent = sys::walk_to_parent(path)?;
-    let (dir, step) = sys::open_dir(&parent.dir, name, None, false)?;
+    let parent = sys::walk_to_parent(path, false)?;
+    let (dir, step) = sys::open_dir(&parent.dir, name, None, Open::Look)?;
     let entries = sys::list(&dir)?;
     let mut chain = parent.steps.clone();
     chain.push(step);
@@ -359,6 +359,27 @@ impl Said {
         }
     }
 
+    fn moved() -> Self {
+        Said {
+            kind: SkipKind::Changed,
+            one: "was moved during the run, so it was left where it went".into(),
+            many: "were left: their folder was moved during the run".into(),
+        }
+    }
+
+    fn held_open(app: Option<String>) -> Self {
+        let app = app.unwrap_or_else(|| "an app".into());
+        Said {
+            kind: SkipKind::HeldOpen,
+            one: format!(
+                "was deleted while {app} had it open: its space comes back when {app} lets go of it"
+            ),
+            many: format!(
+                "were deleted while {app} had them open: their space comes back when {app} lets go"
+            ),
+        }
+    }
+
     fn cancelled() -> Self {
         Said {
             kind: SkipKind::Cancelled,
@@ -439,6 +460,39 @@ struct Run<'a, 'h> {
     last_progress: Instant,
 }
 
+/// How a folder is opened (Windows; POSIX has no sharing modes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Open {
+    /// To look at, sharing everything: a check, dropped at once.
+    Look,
+    /// Held while the action runs, without letting anyone delete, rename or move it.
+    Pin,
+    /// To delete, held the same way.
+    Delete,
+}
+
+/// One step on its way: its index, its Guard, what apps have open (macOS), and its tally.
+struct StepRun<'g> {
+    index: u32,
+    step: &'g PlanStep,
+    guard: Guard,
+    busy: sys::Busy,
+    tally: Tally,
+    /// Skip events sent live for the action running now (see [`LIVE_SKIPS`]).
+    live: usize,
+    /// Files deleted since the last look at what apps have open (macOS). One still open at the next look was
+    /// deleted while an app held it: its space comes back only when the app lets go, so it isn't counted as freed.
+    unlinked: Vec<Unlinked>,
+}
+
+/// A file deleted and counted as freed, until a look at what apps have open says otherwise.
+struct Unlinked {
+    dev: u64,
+    ino: u128,
+    bytes: u64,
+    path: PathBuf,
+}
+
 /// What the running step has done: in finished actions, and in the action running now.
 #[derive(Default)]
 struct Tally {
@@ -484,8 +538,12 @@ impl Tally {
         }
     }
 
-    fn fail(&mut self, fail: &Fail, path: &Path, bytes: u64, files: u64) {
-        self.leave(fail.said(), path, bytes, files);
+    /// What the running action left in place, in bytes and files, notes about deleted files apart.
+    fn left_behind(&self) -> (u64, u64) {
+        self.left
+            .iter()
+            .filter(|l| !l.said.kind.is_note())
+            .fold((0, 0), |(b, f), l| (b + l.bytes, f + l.files))
     }
 }
 
@@ -510,15 +568,43 @@ impl Whole {
     }
 }
 
+/// Live skip events an action sends; past that, its skips are only in the step's report, summed by reason.
+const LIVE_SKIPS: usize = 50;
+
+/// How old what apps have open may get before it is read again (macOS): reading it takes a few tens of
+/// milliseconds, so it is read at the start of each folder's batch, at most this often.
+const BUSY_EVERY: Duration = Duration::from_millis(250);
+
+/// Entries of one folder between looks at what apps have open (each look itself rate-limited by [`BUSY_EVERY`]).
+const BUSY_BATCH: usize = 256;
+
+/// Entries deleted from one folder between walks of its chain from the volume root. On macOS, every one: nothing
+/// stops a folder above from being renamed while its contents go, so the chain is walked again right before each
+/// unlink. On Windows the folders on the chain are held without `FILE_SHARE_DELETE`, so none can be renamed; the
+/// walk is done again now and then as well.
+const ANCESTRY_EVERY: usize = if cfg!(windows) { 256 } else { 1 };
+
+/// Why the delete of a folder target stopped part way.
+enum Stop {
+    Cancelled,
+    Moved,
+}
+
 impl Run<'_, '_> {
     fn step(&mut self, plan: &Plan, env: &Env, index: u32, step: &PlanStep) -> StepReport {
-        let mut tally = Tally::default();
+        let mut sr = StepRun {
+            index,
+            step,
+            // Built afresh for every step, from the places as they are now.
+            guard: Guard::new(env, plan.volume_root()),
+            busy: sys::Busy::now(),
+            tally: Tally::default(),
+            live: 0,
+            unlinked: Vec::new(),
+        };
         for (skip, _) in &step.refused {
-            self.skipped(index, &mut tally, skip.clone());
+            self.skipped(&mut sr, skip.clone());
         }
-        // Built afresh for every step, from the places as they are now.
-        let guard = Guard::new(env, plan.volume_root());
-        let busy = sys::Busy::now();
         for action in &step.actions {
             if self.cancel.is_cancelled() {
                 let skip = Skip {
@@ -528,13 +614,14 @@ impl Run<'_, '_> {
                     bytes: action.bytes,
                     items: action.files,
                 };
-                self.skipped(index, &mut tally, skip);
+                self.skipped(&mut sr, skip);
                 continue;
             }
-            tally.action = Counts::default();
-            tally.links = 0;
-            tally.left.clear();
-            if let Err(whole) = self.action(&guard, step, action, index, &busy, &mut tally) {
+            sr.tally.action = Counts::default();
+            sr.tally.links = 0;
+            sr.tally.left.clear();
+            sr.live = 0;
+            if let Err(whole) = self.action(&mut sr, action) {
                 let skip = Skip {
                     path: action.path.display().to_string(),
                     reason: whole.reason,
@@ -542,19 +629,19 @@ impl Run<'_, '_> {
                     bytes: action.bytes,
                     items: action.files,
                 };
-                self.skipped(index, &mut tally, skip);
+                self.skipped(&mut sr, skip);
                 continue;
             }
+            // A last look at what apps have open, for the files just deleted.
+            self.look_at_open_files(&mut sr, true);
+            let tally = &mut sr.tally;
             let done = tally.action;
             tally.step.freed += done.freed;
             tally.step.deleted += done.deleted;
             tally.action = Counts::default();
             if done.deleted > 0 || tally.links > 0 || tally.left.is_empty() {
                 let whole = !matches!(action.target, Target::Loose { .. })
-                    && tally
-                        .left
-                        .iter()
-                        .all(|l| l.said.kind == SkipKind::HardLinked);
+                    && tally.left.iter().all(|l| l.said.kind.is_note());
                 (self.on_event)(RunEvent::Deleted(Deleted {
                     step: index,
                     path: action.path.display().to_string(),
@@ -563,32 +650,62 @@ impl Run<'_, '_> {
                     whole,
                 }));
             }
+            // What was left went out as it happened; the report has it summed by reason.
             for left in std::mem::take(&mut tally.left) {
-                let skip = left_skip(action, &left);
-                self.skipped(index, &mut tally, skip);
+                tally.skips.push(left_skip(action, &left));
             }
-            self.progress(index, &tally, &action.path, true);
+            self.progress(&sr, &action.path, true);
         }
-        self.total_freed += tally.step.freed;
-        step_report(step, tally)
+        self.total_freed += sr.tally.step.freed;
+        step_report(step, sr.tally)
     }
 
-    fn skipped(&mut self, index: u32, tally: &mut Tally, skip: Skip) {
+    /// A skip of a whole place (or one the planner refused): sent, and kept for the report.
+    fn skipped(&mut self, sr: &mut StepRun<'_>, skip: Skip) {
         (self.on_event)(RunEvent::Skipped(Skipped {
-            step: index,
+            step: sr.index,
             skip: skip.clone(),
         }));
-        tally.skips.push(skip);
+        sr.tally.skips.push(skip);
     }
 
-    fn progress(&mut self, index: u32, tally: &Tally, at: &Path, now: bool) {
+    /// Something inside a place left behind, or a note about a file deleted: tallied for the report, and sent as it
+    /// happens (the first [`LIVE_SKIPS`] of an action).
+    fn leave(&mut self, sr: &mut StepRun<'_>, said: Said, at: &Path, bytes: u64, files: u64) {
+        if sr.live < LIVE_SKIPS {
+            sr.live += 1;
+            let reason = if files <= 1 {
+                format!("It {}", said.one)
+            } else {
+                format!("{} files {}", group_digits(files), said.many)
+            };
+            (self.on_event)(RunEvent::Skipped(Skipped {
+                step: sr.index,
+                skip: Skip {
+                    path: at.display().to_string(),
+                    reason,
+                    kind: said.kind,
+                    bytes,
+                    items: files,
+                },
+            }));
+        }
+        sr.tally.leave(said, at, bytes, files);
+    }
+
+    fn fail(&mut self, sr: &mut StepRun<'_>, fail: &Fail, at: &Path, bytes: u64, files: u64) {
+        self.leave(sr, fail.said(), at, bytes, files);
+    }
+
+    fn progress(&mut self, sr: &StepRun<'_>, at: &Path, now: bool) {
         if !now && self.last_progress.elapsed() < PROGRESS_EVERY {
             return;
         }
         self.last_progress = Instant::now();
+        let tally = &sr.tally;
         let freed = tally.step.freed + tally.action.freed;
         (self.on_event)(RunEvent::Progress(RunProgress {
-            step: index,
+            step: sr.index,
             freed_bytes: freed,
             deleted_items: tally.step.deleted + tally.action.deleted,
             total_freed_bytes: self.total_freed + freed,
@@ -596,22 +713,34 @@ impl Run<'_, '_> {
         }));
     }
 
+    /// Reads again what apps have open (macOS), when the last read is [`BUSY_EVERY`] old or with `force`, and
+    /// takes back from the freed count every file deleted since that an app still has open: its space comes back
+    /// only when the app lets go of it.
+    fn look_at_open_files(&mut self, sr: &mut StepRun<'_>, force: bool) {
+        let every = if force { Duration::ZERO } else { BUSY_EVERY };
+        if sr.unlinked.is_empty() && force {
+            return;
+        }
+        if !sr.busy.refresh(every) {
+            return;
+        }
+        for u in std::mem::take(&mut sr.unlinked) {
+            if let Some(app) = sr.busy.holder(u.dev, u.ino) {
+                sr.tally.action.freed -= u.bytes;
+                self.leave(sr, Said::held_open(app), &u.path, u.bytes, 1);
+            }
+        }
+    }
+
     /// Carries out one action: the fresh walk, the Guard, the fingerprint, then the delete. `Err` when it is
     /// skipped whole, before anything in it was deleted.
-    fn action(
-        &mut self,
-        guard: &Guard,
-        step: &PlanStep,
-        action: &Action,
-        index: u32,
-        busy: &sys::Busy,
-        tally: &mut Tally,
-    ) -> Result<(), Whole> {
+    fn action(&mut self, sr: &mut StepRun<'_>, action: &Action) -> Result<(), Whole> {
         let path = &action.path;
         let name = path
             .file_name()
             .ok_or_else(|| Whole::new(SkipKind::Failed, "Its path has no name"))?;
-        let parent = sys::walk_to_parent(path).map_err(|f| Whole::of("The way to it", f))?;
+        // Every folder on the way held: on Windows none of them can be renamed while the action runs.
+        let parent = sys::walk_to_parent(path, true).map_err(|f| Whole::of("The way to it", f))?;
         let (parent_dir, parent_steps) = (&parent.dir, &parent.steps);
         let volume = parent_steps.last().map_or(0, |s| s.id.volume());
         match &action.target {
@@ -619,7 +748,7 @@ impl Run<'_, '_> {
                 let entry = sys::entry(parent_dir, name).map_err(|f| Whole::of("It", f))?;
                 let mut chain = parent_steps.clone();
                 chain.push(entry.step(volume));
-                judge(guard, path, &chain, false)?;
+                judge(&sr.guard, path, &chain, false)?;
                 same_identity(&chain, action)?;
                 if entry.kind != Kind::File {
                     return Err(Whole::new(
@@ -639,24 +768,28 @@ impl Run<'_, '_> {
                 if let Some(hook) = self.hooks.before_delete {
                     hook(path);
                 }
-                self.delete_file(parent_dir, path, &entry, busy, false, tally);
+                self.look_at_open_files(sr, false);
+                if !in_place(parent_steps, path.parent().unwrap_or(path)) {
+                    return Err(Whole::new(SkipKind::Changed, MOVED));
+                }
+                self.delete_file(sr, parent_dir, path, &entry, false);
                 Ok(())
             }
             Target::Loose { files } => {
-                let (dir, target) =
-                    sys::open_dir(parent_dir, name, None, false).map_err(|f| Whole::of("It", f))?;
+                let (dir, target) = sys::open_dir(parent_dir, name, None, Open::Pin)
+                    .map_err(|f| Whole::of("It", f))?;
                 let mut chain = parent_steps.clone();
                 chain.push(target);
-                judge(guard, path, &chain, true)?;
+                judge(&sr.guard, path, &chain, true)?;
                 same_identity(&chain, action)?;
-                self.loose(&dir, path, files, index, busy, tally)
+                self.loose(sr, &dir, &chain, path, files)
             }
             Target::Dir { folders } => {
-                let (dir, target) =
-                    sys::open_dir(parent_dir, name, None, true).map_err(|f| Whole::of("It", f))?;
+                let (dir, target) = sys::open_dir(parent_dir, name, None, Open::Delete)
+                    .map_err(|f| Whole::of("It", f))?;
                 let mut chain = parent_steps.clone();
                 chain.push(target.clone());
-                judge(guard, path, &chain, false)?;
+                judge(&sr.guard, path, &chain, false)?;
                 same_identity(&chain, action)?;
                 if sys::changed(&dir).map_err(|f| Whole::of("It", f))? >= self.threshold {
                     return Err(Whole::new(SkipKind::Changed, "It changed since the scan"));
@@ -666,11 +799,11 @@ impl Run<'_, '_> {
                     root_step: &target,
                     path,
                 };
-                self.verify_tree(guard, step, &dir, &tree, action)?;
+                self.verify_tree(sr, &dir, &tree, action)?;
                 if let Some(hook) = self.hooks.before_delete {
                     hook(path);
                 }
-                self.delete_tree(parent_dir, dir, &tree, action, index, busy, tally);
+                self.delete_tree(sr, parent_dir, dir, chain, &tree, action);
                 Ok(())
             }
         }
@@ -682,8 +815,7 @@ impl Run<'_, '_> {
     /// module docs.
     fn verify_tree(
         &self,
-        guard: &Guard,
-        step: &PlanStep,
+        sr: &StepRun<'_>,
         root: &sys::Dir,
         tree: &Tree<'_>,
         action: &Action,
@@ -726,21 +858,21 @@ impl Run<'_, '_> {
                     let inside = |f: Fail| Whole::of(&format!("{} inside it", at.display()), f);
                     let parent = dir.as_ref().unwrap_or(root);
                     let (sub_dir, sub) =
-                        sys::open_dir(parent, &e.name, Some(&e), false).map_err(inside)?;
+                        sys::open_dir(parent, &e.name, Some(&e), Open::Look).map_err(inside)?;
                     if !same_volume(tree.root_step, &sub) {
                         return Err(Whole::new(
                             SkipKind::OtherVolume,
                             format!("Another volume is mounted inside it, at {}", at.display()),
                         ));
                     }
-                    if let Some(what) = guard.protects(sub.id) {
+                    if let Some(what) = sr.guard.protects(sub.id) {
                         return Err(Whole::new(
                             SkipKind::Protected,
                             format!("It holds {what}, which Vacancy never touches"),
                         ));
                     }
-                    if let Some((what, app)) = guard.protected_os_name(&e.name)
-                        && !(app && step.takes_built_apps)
+                    if let Some((what, app)) = sr.guard.protected_os_name(&e.name)
+                        && !(app && sr.step.takes_built_apps)
                     {
                         return Err(Whole::new(
                             SkipKind::Protected,
@@ -762,78 +894,94 @@ impl Run<'_, '_> {
     }
 
     /// Deletes a verified folder target, depth first, relative to the open folders. Each folder is listed again
-    /// and must still list exactly what the scan listed, or nothing in it goes. See the module docs.
-    #[allow(clippy::too_many_arguments)]
+    /// and must still list exactly what the scan listed, or nothing in it goes; and it must still be where the
+    /// Guard judged it: its chain from the volume root is walked again at the start of its batch and every
+    /// [`ANCESTRY_EVERY`] entries (right before each unlink on macOS). One that moved stops the target. See the
+    /// module docs.
     fn delete_tree(
         &mut self,
+        sr: &mut StepRun<'_>,
         parent: &sys::Dir,
         root: sys::Dir,
+        root_chain: Vec<Step>,
         tree: &Tree<'_>,
         action: &Action,
-        index: u32,
-        busy: &sys::Busy,
-        tally: &mut Tally,
     ) {
         let path = tree.path;
         let entries = match sys::list(&root) {
             Ok(entries) if tree.lists_as_scanned(tree.root_step, &entries) => entries,
-            Ok(_) => {
-                return tally.leave(Said::changed(), path, action.bytes, action.files);
-            }
-            Err(fail) => return tally.fail(&fail, path, action.bytes, action.files),
+            Ok(_) => return self.leave(sr, Said::changed(), path, action.bytes, action.files),
+            Err(fail) => return self.fail(sr, &fail, path, action.bytes, action.files),
         };
         let mut stack: Vec<Frame> = vec![Frame {
             dir: root,
-            step: tree.root_step.clone(),
+            chain: root_chain,
             path: path.to_path_buf(),
             entries,
             next: 0,
+            checked: None,
         }];
-        let mut stopped = false;
+        let mut stopped: Option<Stop> = None;
         while let Some(top) = stack.last_mut() {
-            let next = if stopped {
+            let next = if stopped.is_some() {
                 None
             } else {
                 top.entries.get(top.next).cloned()
             };
             let Some(e) = next else {
-                // Done with this folder: it goes if it is empty now. One still holding something left in place
-                // stays, explained by what it holds. After a cancel nothing more is removed.
+                // Done with this folder: it goes if it is empty now, and still in its place. One still holding
+                // something left in place stays, explained by what it holds. After a stop nothing more is removed.
                 let frame = stack.pop().expect("a frame was on the stack");
-                if !stopped {
+                if stopped.is_none() {
+                    if !in_place(&frame.chain, &frame.path) {
+                        stopped = Some(Stop::Moved);
+                        continue;
+                    }
+                    let step = frame.chain.last().expect("a chain has its folder").clone();
                     // The target's own folder is removed from its parent, which is not the target's to change.
                     let inside_target = !stack.is_empty();
                     let above = stack.last().map_or(parent, |f| &f.dir);
-                    match sys::remove_dir(above, frame.dir, &frame.step, inside_target) {
+                    match sys::remove_dir(above, frame.dir, &step, inside_target) {
                         Ok(()) | Err(Fail::Gone) => {}
                         // Nothing left in it was left on purpose: something new arrived while it was emptied.
-                        Err(Fail::NotEmpty) if stack.is_empty() && tally.left.is_empty() => tally
-                            .leave(
-                                Said {
-                                    kind: SkipKind::Changed,
-                                    one: "stays: something was added to it during the run".into(),
-                                    many: "stay: something was added to them during the run".into(),
-                                },
-                                &frame.path,
-                                0,
-                                0,
-                            ),
+                        Err(Fail::NotEmpty)
+                            if stack.is_empty() && sr.tally.left_behind().1 == 0 =>
+                        {
+                            let said = Said {
+                                kind: SkipKind::Changed,
+                                one: "stays: something was added to it during the run".into(),
+                                many: "stay: something was added to them during the run".into(),
+                            };
+                            self.leave(sr, said, &frame.path, 0, 0);
+                        }
                         Err(Fail::NotEmpty) => {}
-                        Err(fail) => tally.fail(&fail, &frame.path, 0, 0),
+                        Err(fail) => self.fail(sr, &fail, &frame.path, 0, 0),
                     }
                 }
                 continue;
             };
             if self.cancel.is_cancelled() {
                 // Stop after the file just deleted. What is left of the action is counted below.
-                stopped = true;
+                stopped = Some(Stop::Cancelled);
                 continue;
             }
+            // Still where the Guard judged it? At the batch's start, and every few entries after.
+            if top.checked.is_none_or(|at| top.next - at >= ANCESTRY_EVERY) {
+                if !in_place(&top.chain, &top.path) {
+                    stopped = Some(Stop::Moved);
+                    continue;
+                }
+                top.checked = Some(top.next);
+            }
+            if top.next.is_multiple_of(BUSY_BATCH) {
+                self.look_at_open_files(sr, false);
+            }
+            let top = stack.last_mut().expect("a frame is on the stack");
             top.next += 1;
             let at = top.path.join(&e.name);
             if e.changed >= self.threshold {
                 let file = u64::from(e.counts);
-                tally.leave(Said::changed(), &at, e.alloc, file);
+                self.leave(sr, Said::changed(), &at, e.alloc, file);
                 continue;
             }
             match e.kind {
@@ -841,21 +989,22 @@ impl Run<'_, '_> {
                     if let Some(hook) = self.hooks.before_file {
                         hook(&at);
                     }
-                    let dir = &stack.last().expect("a frame is on the stack").dir;
-                    self.delete_file(dir, &at, &e, busy, true, tally);
+                    let frame = stack.last().expect("a frame is on the stack");
+                    self.delete_file(sr, &frame.dir, &at, &e, true);
                 }
                 Kind::Link => match sys::delete_link(&top.dir, &e, self.threshold) {
-                    Ok(()) => tally.links += 1,
+                    Ok(()) => sr.tally.links += 1,
                     Err(Fail::Gone) => {}
-                    Err(fail) => tally.fail(&fail, &at, 0, 0),
+                    Err(fail) => self.fail(sr, &fail, &at, 0, 0),
                 },
                 Kind::Special(what) => {
-                    tally.leave(Said::special(what), &at, e.alloc, u64::from(e.counts));
+                    self.leave(sr, Said::special(what), &at, e.alloc, u64::from(e.counts));
                 }
                 Kind::Dir => {
                     let threshold = self.threshold;
-                    let opened =
-                        sys::open_dir(&top.dir, &e.name, Some(&e), true).and_then(|(dir, sub)| {
+                    let chain = top.chain.clone();
+                    let opened = sys::open_dir(&top.dir, &e.name, Some(&e), Open::Delete).and_then(
+                        |(dir, sub)| {
                             if !same_volume(tree.root_step, &sub) {
                                 return Err(Fail::OtherVolume);
                             }
@@ -867,33 +1016,44 @@ impl Run<'_, '_> {
                                 return Err(Fail::Changed);
                             }
                             Ok((dir, sub, entries))
-                        });
+                        },
+                    );
                     match opened {
-                        Ok((dir, step, entries)) => stack.push(Frame {
-                            dir,
-                            step,
-                            path: at.clone(),
-                            entries,
-                            next: 0,
-                        }),
+                        Ok((dir, sub, entries)) => {
+                            let mut chain = chain;
+                            chain.push(sub);
+                            // A new batch: what apps have open, read again unless just read.
+                            self.look_at_open_files(sr, false);
+                            stack.push(Frame {
+                                dir,
+                                chain,
+                                path: at.clone(),
+                                entries,
+                                next: 0,
+                                checked: None,
+                            });
+                        }
                         Err(Fail::Gone) => {}
-                        Err(fail) => tally.fail(&fail, &at, 0, 0),
+                        Err(fail) => self.fail(sr, &fail, &at, 0, 0),
                     }
                 }
             }
-            self.progress(index, tally, &at, false);
+            self.progress(sr, &at, false);
         }
-        if stopped {
+        if let Some(stop) = stopped {
             // What the scan measured of the action, less what went and what was left for other reasons.
-            let (left_bytes, left_files) = tally
-                .left
-                .iter()
-                .fold((0, 0), |(b, f), l| (b + l.bytes, f + l.files));
+            let (left_bytes, left_files) = sr.tally.left_behind();
             let files = action
                 .files
-                .saturating_sub(tally.action.deleted + left_files);
-            let bytes = action.bytes.saturating_sub(tally.action.freed + left_bytes);
-            tally.leave(Said::cancelled(), path, bytes, files);
+                .saturating_sub(sr.tally.action.deleted + left_files);
+            let bytes = action
+                .bytes
+                .saturating_sub(sr.tally.action.freed + left_bytes);
+            let said = match stop {
+                Stop::Cancelled => Said::cancelled(),
+                Stop::Moved => Said::moved(),
+            };
+            self.leave(sr, said, path, bytes, files);
         }
     }
 
@@ -901,39 +1061,45 @@ impl Run<'_, '_> {
     /// `inside_target`, `dir` is a folder being deleted, which may be made writable to let its files go (macOS).
     fn delete_file(
         &mut self,
+        sr: &mut StepRun<'_>,
         dir: &sys::Dir,
         at: &Path,
         e: &Entry,
-        busy: &sys::Busy,
         inside_target: bool,
-        tally: &mut Tally,
     ) {
-        match sys::delete_file(dir, e, self.threshold, busy, inside_target) {
+        match sys::delete_file(dir, e, self.threshold, &sr.busy, inside_target) {
             Ok(Some(freed)) => {
-                tally.action.freed += freed;
-                tally.action.deleted += 1;
+                sr.tally.action.freed += freed;
+                sr.tally.action.deleted += 1;
+                if cfg!(unix) && freed > 0 {
+                    sr.unlinked.push(Unlinked {
+                        dev: e.dev,
+                        ino: e.id,
+                        bytes: freed,
+                        path: at.to_path_buf(),
+                    });
+                }
             }
             Ok(None) => {
                 // Its name here is gone; its other names keep the file, and its space.
-                tally.action.deleted += 1;
-                tally.leave(Said::hard_linked(), at, e.alloc, 1);
+                sr.tally.action.deleted += 1;
+                self.leave(sr, Said::hard_linked(), at, e.alloc, 1);
             }
             Err(Fail::Gone) => {}
-            Err(fail) => tally.fail(&fail, at, e.alloc, 1),
+            Err(fail) => self.fail(sr, &fail, at, e.alloc, 1),
         }
     }
 
     /// Deletes a folder's loose files: only those the plan holds by name and identity (the ones the scan saw),
-    /// each unchanged since the scan. Files new or changed since are left alone, and so is the folder.
-    #[allow(clippy::too_many_arguments)]
+    /// each unchanged since the scan, while the folder is still where the Guard judged it. Files new or changed
+    /// since are left alone, and so is the folder.
     fn loose(
         &mut self,
+        sr: &mut StepRun<'_>,
         dir: &sys::Dir,
+        chain: &[Step],
         path: &Path,
         planned: &[LooseFile],
-        index: u32,
-        busy: &sys::Busy,
-        tally: &mut Tally,
     ) -> Result<(), Whole> {
         let entries = sys::list(dir).map_err(|f| Whole::of("Its files", f))?;
         let mut found: Vec<Entry> = Vec::new();
@@ -949,7 +1115,7 @@ impl Run<'_, '_> {
             if (p.logical, p.alloc) != (e.logical, e.alloc) {
                 // The file the scan saw, rewritten to another size since: not what was approved.
                 let at = path.join(&e.name);
-                tally.leave(Said::changed(), &at, e.alloc, 1);
+                self.leave(sr, Said::changed(), &at, e.alloc, 1);
                 continue;
             }
             found.push(e);
@@ -959,42 +1125,70 @@ impl Run<'_, '_> {
         }
         for (i, e) in found.iter().enumerate() {
             let at = path.join(&e.name);
+            let rest = |found: &[Entry]| (found.iter().map(|e| e.alloc).sum(), found.len() as u64);
             if self.cancel.is_cancelled() {
-                let rest = &found[i..];
-                let bytes = rest.iter().map(|e| e.alloc).sum();
-                tally.leave(Said::cancelled(), path, bytes, rest.len() as u64);
+                let (bytes, files) = rest(&found[i..]);
+                self.leave(sr, Said::cancelled(), path, bytes, files);
                 break;
             }
+            if i.is_multiple_of(ANCESTRY_EVERY) && !in_place(chain, path) {
+                let (bytes, files) = rest(&found[i..]);
+                self.leave(sr, Said::moved(), path, bytes, files);
+                break;
+            }
+            if i.is_multiple_of(BUSY_BATCH) {
+                self.look_at_open_files(sr, false);
+            }
             if e.changed >= self.threshold {
-                tally.leave(Said::changed(), &at, e.alloc, 1);
+                self.leave(sr, Said::changed(), &at, e.alloc, 1);
                 continue;
             }
             if let Kind::Special(what) = e.kind {
-                tally.leave(Said::special(what), &at, e.alloc, 1);
+                self.leave(sr, Said::special(what), &at, e.alloc, 1);
                 continue;
             }
             if let Some(hook) = self.hooks.before_file {
                 hook(&at);
             }
-            self.delete_file(dir, &at, e, busy, false, tally);
-            self.progress(index, tally, &at, false);
+            self.delete_file(sr, dir, &at, e, false);
+            self.progress(sr, &at, false);
         }
         // The files the scan saw that aren't there now: removed by someone else, or replaced.
         let missing = planned.len().saturating_sub(seen) as u64;
         if missing > 0 {
-            tally.leave(
-                Said {
-                    kind: SkipKind::Gone,
-                    one: "was removed or replaced since the scan".into(),
-                    many: "were removed or replaced since the scan".into(),
-                },
-                path,
-                0,
-                missing,
-            );
+            let said = Said {
+                kind: SkipKind::Gone,
+                one: "was removed or replaced since the scan".into(),
+                many: "were removed or replaced since the scan".into(),
+            };
+            self.leave(sr, said, path, 0, missing);
         }
         Ok(())
     }
+}
+
+/// Why a target stopped when a folder in it moved.
+const MOVED: &str = "It was moved during the run, so the rest of it was left where it went";
+
+/// Whether the folder at `path` is still the one at the end of `chain`, reached the way the chain was: its chain
+/// walked again from the volume root without following a link, every step the same identity (and on macOS the
+/// same mount). A folder renamed or moved since (into a cloud-sync folder, say), or one whose folders above were,
+/// isn't, and nothing more in it goes.
+fn in_place(chain: &[Step], path: &Path) -> bool {
+    let Some(name) = path.file_name() else {
+        return false;
+    };
+    let Ok(parent) = sys::walk_to_parent(path, false) else {
+        return false;
+    };
+    let Ok((_, step)) = sys::open_dir(&parent.dir, name, None, Open::Look) else {
+        return false;
+    };
+    let now = parent.steps.iter().chain(std::iter::once(&step));
+    parent.steps.len() + 1 == chain.len()
+        && now
+            .zip(chain)
+            .all(|(a, b)| a.id == b.id && a.mount == b.mount)
 }
 
 /// A folder target being checked and deleted: what the scan listed in each of its folders, its own step, and its
@@ -1007,7 +1201,7 @@ struct Tree<'a> {
 
 impl Tree<'_> {
     /// Whether the folder `step` lists exactly what the scan listed there: the digest of its entries' identities
-    /// is the scan's. A folder the scan didn't list is new, so no.
+    /// (and its files' sizes) is the scan's. A folder the scan didn't list is new, so no.
     fn lists_as_scanned(&self, step: &Step, entries: &[Entry]) -> bool {
         let digest = entries
             .iter()
@@ -1016,14 +1210,15 @@ impl Tree<'_> {
     }
 }
 
-/// A folder being deleted: open with the right to delete it, its step (identity, and name in the folder above),
-/// and its listing.
+/// A folder being deleted: open with the right to delete it, its chain from the volume root (itself last), its
+/// listing, how far through it, and where its chain was last walked again.
 struct Frame {
     dir: sys::Dir,
-    step: Step,
+    chain: Vec<Step>,
     path: PathBuf,
     entries: Vec<Entry>,
     next: usize,
+    checked: Option<usize>,
 }
 
 fn judge(guard: &Guard, path: &Path, chain: &[Step], loose: bool) -> Result<(), Whole> {
@@ -1172,7 +1367,7 @@ fn step_report(step: &PlanStep, tally: Tally) -> StepReport {
         );
         skipped.push(r);
     }
-    let outcome = if skipped.iter().all(|k| k.kind == SkipKind::HardLinked) {
+    let outcome = if skipped.iter().all(|k| k.kind.is_note()) {
         Outcome::Done
     } else if tally.step.deleted > 0 {
         Outcome::Partial
@@ -1254,7 +1449,7 @@ fn report(
         skipped_items: steps
             .iter()
             .flat_map(|s| &s.skipped)
-            .filter(|k| k.kind != SkipKind::HardLinked)
+            .filter(|k| !k.kind.is_note())
             .map(|k| k.items)
             .sum(),
         freed_by_category: by_category,
@@ -1277,7 +1472,7 @@ mod tests {
     //! `tests/run.rs`.
 
     use std::cell::Cell;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use super::*;
     use crate::fixture::{self, Profile};
@@ -1301,7 +1496,14 @@ mod tests {
             }
             .join("fixture");
             let profile = fixture::build(&root).unwrap();
-            let env = fixture::env(&root);
+            let mut env = fixture::env(&root);
+            // A cloud-sync folder in the home folder, which the Guard protects whole.
+            let cloud = profile.home.join("Dropbox");
+            std::fs::create_dir_all(&cloud).unwrap();
+            env.cloud.push(crate::categorize::CloudRoot {
+                provider: "Dropbox".into(),
+                path: cloud,
+            });
             let moment = Moment {
                 now: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -1335,6 +1537,10 @@ mod tests {
 
         fn documents(&self) -> Vec<String> {
             fixture::inventory(&self.profile.documents).unwrap()
+        }
+
+        fn cloud(&self) -> PathBuf {
+            self.profile.home.join("Dropbox")
         }
     }
 
@@ -1643,6 +1849,136 @@ mod tests {
             "{:#?}",
             report.steps
         );
+    }
+
+    /// Right before a file of a cache folder goes, the folder holding the cache is moved into a cloud-sync folder,
+    /// which the Guard protects. On Windows that rename is refused: every folder on the way is held without letting
+    /// anyone rename it. On macOS it succeeds, and the delete stops at once: at most the file it was deleting goes,
+    /// and the rest stays where it went.
+    #[test]
+    fn a_folder_moved_into_a_cloud_folder_mid_run_is_left_there() {
+        let fx = Fx::new();
+        let target = fx.profile.cache.clone();
+        let holder = target.parent().unwrap().to_path_buf();
+        let moved_to = fx.cloud().join(holder.file_name().unwrap());
+        let files = std::fs::read_dir(&target).unwrap().count();
+        let moved = Cell::new(None::<bool>);
+        let move_it = |_: &Path| {
+            if moved.get().is_none() {
+                moved.set(Some(std::fs::rename(&holder, &moved_to).is_ok()));
+            }
+        };
+        let report = fx.run(
+            cache(),
+            &Hooks {
+                before_file: Some(&move_it),
+                ..Hooks::default()
+            },
+            &CancelToken::new(),
+        );
+        let moved = moved.get().expect("the hook ran");
+        if cfg!(windows) {
+            assert!(
+                !moved,
+                "Windows refuses to rename a folder on a chain Vacancy holds"
+            );
+        }
+        if moved {
+            let there = moved_to.join(target.file_name().unwrap());
+            let left = std::fs::read_dir(&there).unwrap().count();
+            assert!(
+                left + 1 >= files,
+                "at most the file in flight went: {left} of {files} left"
+            );
+            assert!(
+                skips(&report)
+                    .iter()
+                    .any(|k| k.kind == SkipKind::Changed
+                        && k.reason.contains("moved during the run")),
+                "{:#?}",
+                report.steps
+            );
+        } else {
+            assert_eq!(
+                std::fs::read_dir(fx.cloud()).unwrap().count(),
+                0,
+                "nothing went into the cloud folder"
+            );
+        }
+    }
+
+    /// A file an app opens after the step began is seen at the start of its folder's batch (macOS reads again what
+    /// apps hold open), and skipped as in use.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_file_opened_after_the_step_began_is_skipped_as_in_use() {
+        let fx = Fx::new();
+        let victim = fx.profile.cache.join("f_000004");
+        let held = std::cell::RefCell::new(None);
+        let open_it = |_: &Path| {
+            if held.borrow().is_none() {
+                *held.borrow_mut() = Some(std::fs::File::open(&victim).unwrap());
+                std::thread::sleep(BUSY_EVERY + Duration::from_millis(100));
+            }
+        };
+        let report = fx.run(
+            cache(),
+            &Hooks {
+                before_delete: Some(&open_it),
+                ..Hooks::default()
+            },
+            &CancelToken::new(),
+        );
+        assert!(victim.exists(), "the open file stays");
+        assert!(
+            skips(&report)
+                .iter()
+                .any(|k| k.kind == SkipKind::InUse && Path::new(&k.path) == victim),
+            "{:#?}",
+            report.steps
+        );
+    }
+
+    /// A file an app opens in the moment before it is deleted (after the last read of what apps hold open) is
+    /// deleted, but its space isn't counted as freed: the app still holds it, so it comes back only when the app
+    /// lets go. (macOS; on Windows any open handle makes the delete's exclusive open fail.)
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_file_held_open_when_deleted_isnt_counted_as_freed() {
+        let fx = Fx::new();
+        let victim = fx.profile.cache.join("f_000005");
+        let bytes = std::fs::symlink_metadata(&victim).unwrap();
+        let bytes = {
+            use std::os::unix::fs::MetadataExt;
+            bytes.blocks() * 512
+        };
+        let held = std::cell::RefCell::new(None);
+        let open_it = |at: &Path| {
+            if at == victim {
+                *held.borrow_mut() = Some(std::fs::File::open(&victim).unwrap());
+            }
+        };
+        let report = fx.run(
+            cache(),
+            &Hooks {
+                before_file: Some(&open_it),
+                ..Hooks::default()
+            },
+            &CancelToken::new(),
+        );
+        assert!(held.borrow().is_some(), "the hook ran");
+        let note = skips(&report)
+            .into_iter()
+            .find(|k| k.kind == SkipKind::HeldOpen)
+            .unwrap_or_else(|| panic!("{:#?}", report.steps));
+        assert_eq!(note.bytes, bytes);
+        let step = &report.steps[0];
+        assert_eq!(
+            step.outcome,
+            Outcome::Done,
+            "a note, not a failure: {step:#?}"
+        );
+        assert!(step.freed_bytes + bytes <= step.planned_bytes, "{step:#?}");
     }
 
     #[test]

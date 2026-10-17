@@ -1159,3 +1159,24 @@ fn fixture_mode_refuses_a_mounted_volume_s_root() {
         Err(fixture::FixtureError::MountRoot(mnt.clone()))
     );
 }
+
+/// What a run leaves in place is sent as it happens: the open file's skip arrives before the event saying its
+/// folder's place was dealt with, not summed up after it.
+#[test]
+fn skips_are_sent_as_they_happen() {
+    let fx = Fx::new();
+    let plan = fx.plan(&[cache_step().to_owned()]);
+    let _held = hold_open(&fx.profile.held_open);
+    let (_, events) = fx.run(&plan, &CancelToken::new());
+    let at = |pred: &dyn Fn(&RunEvent) -> bool| events.iter().position(pred);
+    let skip = at(
+        &|e| matches!(e, RunEvent::Skipped(s) if Path::new(&s.skip.path) == fx.profile.held_open),
+    )
+    .unwrap_or_else(|| panic!("the open file's skip is sent: {events:#?}"));
+    let done = at(&|e| matches!(e, RunEvent::Deleted(d) if Path::new(&d.path) == fx.profile.cache))
+        .unwrap_or_else(|| panic!("its folder's place is reported: {events:#?}"));
+    assert!(
+        skip < done,
+        "the skip ({skip}) comes before the place is done ({done})"
+    );
+}

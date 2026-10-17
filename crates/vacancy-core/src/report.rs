@@ -53,6 +53,17 @@ pub enum SkipKind {
     /// Its name here was deleted, but the file has other names elsewhere (hard links), which keep its space in use.
     /// Not a failure: the step still counts as done.
     HardLinked,
+    /// It was deleted while an app had it open (macOS): its space comes back when the app lets go of it, so it
+    /// isn't counted as freed. Not a failure either.
+    HeldOpen,
+}
+
+impl SkipKind {
+    /// A note about something deleted rather than something left: it doesn't make a step partial, and isn't
+    /// counted among the files left in place.
+    pub fn is_note(self) -> bool {
+        matches!(self, SkipKind::HardLinked | SkipKind::HeldOpen)
+    }
 }
 
 /// Something the run left in place, and why.

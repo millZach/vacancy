@@ -3,4 +3,4 @@
 /**
  * Why something was left in place.
  */
-export type SkipKind = "inUse" | "changed" | "gone" | "link" | "protected" | "outside" | "otherVolume" | "special" | "refused" | "failed" | "cancelled" | "hardLinked";
+export type SkipKind = "inUse" | "changed" | "gone" | "link" | "protected" | "outside" | "otherVolume" | "special" | "refused" | "failed" | "cancelled" | "hardLinked" | "heldOpen";

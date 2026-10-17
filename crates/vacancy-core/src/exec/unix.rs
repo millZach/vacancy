@@ -17,7 +17,7 @@ use std::ffi::{CString, OsStr, OsString};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Component, Path};
 
-use super::{Entry, Fail, Kind};
+use super::{Entry, Fail, Kind, Open};
 use crate::fsid::{Identity, Step};
 
 struct Fd(libc::c_int);
@@ -46,16 +46,30 @@ pub(crate) struct Parent {
 /// Files some process has open, by device and inode, and which process.
 pub(crate) struct Busy {
     open: HashMap<(u64, u64), libc::c_int>,
+    read: std::time::Instant,
 }
 
 impl Busy {
     /// The files every process Vacancy may look at has open now.
     pub(crate) fn now() -> Self {
-        Self { open: open_files() }
+        Self {
+            open: open_files(),
+            read: std::time::Instant::now(),
+        }
     }
 
-    /// The app holding the file open, if one does.
-    fn holder(&self, dev: u64, ino: u64) -> Option<Option<String>> {
+    /// Reads again which files are open, if the last read is `every` old or older. Whether it did.
+    pub(crate) fn refresh(&mut self, every: std::time::Duration) -> bool {
+        if self.read.elapsed() < every {
+            return false;
+        }
+        *self = Self::now();
+        true
+    }
+
+    /// The app holding the file open (its name, when it can be read), if one does.
+    pub(crate) fn holder(&self, dev: u64, ino: u128) -> Option<Option<String>> {
+        let ino = u64::try_from(ino).ok()?;
         self.open.get(&(dev, ino)).map(|&pid| process_name(pid))
     }
 }
@@ -142,7 +156,10 @@ fn mount_of(fd: &Fd) -> Result<Option<OsString>, Fail> {
 
 /// Walks to `path`'s parent from `/`, each folder opened by name inside the one before, never through a link, and
 /// keeps them open.
-pub(crate) fn walk_to_parent(path: &Path) -> Result<Parent, Fail> {
+///
+/// `pin` is Windows' (holding folders so they can't be renamed); POSIX has no such hold, so the executor walks the
+/// chain again before each unlink instead.
+pub(crate) fn walk_to_parent(path: &Path, _pin: bool) -> Result<Parent, Fail> {
     let mut parts = path.components();
     if parts.next() != Some(Component::RootDir) {
         return Err(Fail::Failed("the path is not absolute".into()));
@@ -177,7 +194,7 @@ pub(crate) fn walk_to_parent(path: &Path) -> Result<Parent, Fail> {
     let mut dir = Dir { fd: root };
     let mut above = Vec::new();
     for name in folders {
-        let (next, step) = open_dir(&dir, name, None, false)?;
+        let (next, step) = open_dir(&dir, name, None, Open::Look)?;
         steps.push(step);
         above.push(std::mem::replace(&mut dir, next));
     }
@@ -228,7 +245,7 @@ pub(crate) fn open_dir(
     parent: &Dir,
     name: &OsStr,
     expect: Option<&Entry>,
-    _delete: bool,
+    _mode: Open,
 ) -> Result<(Dir, Step), Fail> {
     let c = c_name(name)?;
     let st = fstatat(parent, &c)?;
@@ -363,7 +380,7 @@ pub(crate) fn delete_file(
         return Err(Fail::Locked);
     }
     let (dev, ino) = dev_ino(&st);
-    if let Some(app) = busy.holder(dev, ino) {
+    if let Some(app) = busy.holder(dev, u128::from(ino)) {
         return Err(Fail::InUse(app));
     }
     unlink(dir, &c, 0, inside_target)?;
