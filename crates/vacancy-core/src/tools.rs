@@ -276,13 +276,19 @@ fn run(mut command: Command, limits: Limits, cancel: &CancelToken) -> Output {
     let mut truncated = false;
     let status = loop {
         // Each pass drains at most 16 KiB per pipe so a continuous writer cannot starve cancel/deadline checks.
-        if let Err(e) = drain(&mut stdout, &mut out, cap, &mut truncated)
-            .and_then(|_| drain(&mut stderr, &mut err, cap, &mut truncated))
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Output::stopped(Status::Refused(format!("Cannot read tool output: {e}")));
-        }
+        let read = drain(&mut stdout, &mut out, cap, &mut truncated).and_then(|out_read| {
+            drain(&mut stderr, &mut err, cap, &mut truncated).map(|err_read| (out_read, err_read))
+        });
+        let (out_read, err_read) = match read {
+            Ok(read) => read,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Output::stopped(Status::Refused(format!("Cannot read tool output: {e}")));
+            }
+        };
+        // Captured buffers stop growing at the cap; discarded bytes are still useful drain progress.
+        let progressed = out_read.bytes > 0 || err_read.bytes > 0;
         let stop = if cancel.is_cancelled() {
             Some(Status::Cancelled)
         } else if start.elapsed() >= limits.timeout {
@@ -301,10 +307,12 @@ fn run(mut command: Command, limits: Limits, cancel: &CancelToken) -> Output {
                 // Remaining output is bounded; mark it incomplete rather than inventing a full transcript.
                 let mut eof = (false, false);
                 for _ in 0..64 {
-                    let before = (out.len(), err.len());
-                    eof.0 = drain(&mut stdout, &mut out, cap, &mut truncated).unwrap_or(false);
-                    eof.1 = drain(&mut stderr, &mut err, cap, &mut truncated).unwrap_or(false);
-                    if eof == (true, true) || before == (out.len(), err.len()) {
+                    let out_read =
+                        drain(&mut stdout, &mut out, cap, &mut truncated).unwrap_or_default();
+                    let err_read =
+                        drain(&mut stderr, &mut err, cap, &mut truncated).unwrap_or_default();
+                    eof = (out_read.eof, err_read.eof);
+                    if eof == (true, true) || (out_read.bytes == 0 && err_read.bytes == 0) {
                         break;
                     }
                 }
@@ -315,7 +323,8 @@ fn run(mut command: Command, limits: Limits, cancel: &CancelToken) -> Output {
                     Status::Failed(exit.code())
                 };
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) if !progressed => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {}
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -352,26 +361,38 @@ fn bounded_text(bytes: Vec<u8>, cap: usize, truncated: &mut bool) -> String {
     text
 }
 
+#[derive(Default)]
+struct Drained {
+    bytes: usize,
+    eof: bool,
+}
+
 fn drain<R: Read + pipe::Pipe>(
     pipe: &mut R,
     data: &mut Vec<u8>,
     cap: usize,
     truncated: &mut bool,
-) -> io::Result<bool> {
+) -> io::Result<Drained> {
     let mut buffer = [0; 16 * 1024];
     let Some(available) = pipe::available(pipe)? else {
-        return Ok(true);
+        return Ok(Drained {
+            bytes: 0,
+            eof: true,
+        });
     };
     let available = available.min(buffer.len());
     if available == 0 {
-        return Ok(false);
+        return Ok(Drained::default());
     }
     match pipe.read(&mut buffer[..available]) {
         Ok(n) => {
             let keep = n.min(cap.saturating_sub(data.len()));
             data.extend_from_slice(&buffer[..keep]);
             *truncated |= keep < n;
-            Ok(n == 0)
+            Ok(Drained {
+                bytes: n,
+                eof: n == 0,
+            })
         }
         Err(e)
             if matches!(
@@ -379,7 +400,10 @@ fn drain<R: Read + pipe::Pipe>(
                 io::ErrorKind::WouldBlock | io::ErrorKind::BrokenPipe
             ) =>
         {
-            Ok(e.kind() == io::ErrorKind::BrokenPipe)
+            Ok(Drained {
+                bytes: 0,
+                eof: e.kind() == io::ErrorKind::BrokenPipe,
+            })
         }
         Err(e) => Err(e),
     }
@@ -587,8 +611,13 @@ mod tests {
     #[ignore = "subprocess fixture entered only by bounded_runner"]
     fn query_helper() {
         match std::env::var("VACANCY_TOOL_HELPER").as_deref() {
-            Ok("flood") => {
-                for _ in 0..200 {
+            Ok(mode @ ("flood" | "large-flood" | "stream")) => {
+                let chunks = match mode {
+                    "large-flood" => 2000,
+                    "stream" => usize::MAX,
+                    _ => 200,
+                };
+                for _ in 0..chunks {
                     println!("{}", "x".repeat(8192));
                     eprintln!("{}", "y".repeat(8192));
                 }
@@ -663,6 +692,55 @@ mod tests {
             start.elapsed() < Duration::from_secs(3),
             "inherited pipes never wait for descendant EOF"
         );
+    }
+    #[test]
+    fn finite_flood_beyond_capture_limit_finishes_without_idle_throttling() {
+        let limits = Limits {
+            timeout: Duration::from_secs(5),
+            output_bytes: 1024,
+        };
+        let start = Instant::now();
+        let output = run(helper("large-flood"), limits, &CancelToken::new());
+        assert_eq!(
+            output.status,
+            Status::Success,
+            "finite two-pipe flood timed out after {:?}",
+            start.elapsed()
+        );
+        assert!(output.truncated);
+        assert!(output.stdout.len() <= 1024 && output.stderr.len() <= 1024);
+    }
+    #[test]
+    fn continuous_output_keeps_timeout_and_cancel_responsive() {
+        let limits = Limits {
+            timeout: Duration::from_millis(200),
+            output_bytes: 1024,
+        };
+        let start = Instant::now();
+        let output = run(helper("stream"), limits, &CancelToken::new());
+        assert_eq!(output.status, Status::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(3));
+        assert!(output.stdout.len() <= 1024 && output.stderr.len() <= 1024);
+
+        let cancel = CancelToken::new();
+        let other = cancel.clone();
+        let cancelling = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            other.cancel();
+        });
+        let start = Instant::now();
+        let output = run(
+            helper("stream"),
+            Limits {
+                timeout: Duration::from_secs(5),
+                ..limits
+            },
+            &cancel,
+        );
+        cancelling.join().unwrap();
+        assert_eq!(output.status, Status::Cancelled);
+        assert!(start.elapsed() < Duration::from_secs(3));
+        assert!(output.stdout.len() <= 1024 && output.stderr.len() <= 1024);
     }
     #[test]
     fn cancel_is_first_class_and_fixture_queries_never_fall_back() {
