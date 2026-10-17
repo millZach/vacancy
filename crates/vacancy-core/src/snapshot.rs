@@ -94,6 +94,11 @@ impl Markers {
     pub const GRADLE: Self = Self(1 << 5);
     /// A `*.xcodeproj` or `*.xcworkspace` folder: an Xcode project.
     pub const XCODE_PROJECT: Self = Self(1 << 6);
+    /// A Node lockfile (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock`...): dependencies were
+    /// installed here by a package manager, so this is a project, not an app shipping its own `node_modules`.
+    pub const NODE_LOCK: Self = Self(1 << 7);
+    /// `CACHEDIR.TAG` or `.rustc_info.json`: the folder is Cargo's build output.
+    pub const CARGO_TARGET: Self = Self(1 << 8);
 
     /// Whether every marker in `other` is present.
     pub fn contains(self, other: Self) -> bool {
@@ -116,6 +121,13 @@ impl Markers {
             "build.gradle" | "build.gradle.kts" | "settings.gradle" | "settings.gradle.kts" => {
                 Self::GRADLE
             }
+            "package-lock.json"
+            | "npm-shrinkwrap.json"
+            | "yarn.lock"
+            | "pnpm-lock.yaml"
+            | "bun.lock"
+            | "bun.lockb" => Self::NODE_LOCK,
+            "cachedir.tag" | ".rustc_info.json" => Self::CARGO_TARGET,
             _ => Self::default(),
         }
     }

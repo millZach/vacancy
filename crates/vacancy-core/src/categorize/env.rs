@@ -148,10 +148,17 @@ mod detect {
 
     use super::{CloudRoot, Env, KnownFolders};
 
+    /// An environment variable naming an absolute path, with 8.3 short names expanded: `%TEMP%` is often spelled
+    /// `C:\Users\RUNNER~1\...`, while the scan sees the long names.
     fn var(name: &str) -> Option<PathBuf> {
         std::env::var_os(name)
-            .filter(|v| !v.is_empty())
             .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .map(|p| long(&p))
+    }
+
+    fn long(path: &Path) -> PathBuf {
+        crate::pathkey::long_form(path).into_owned()
     }
 
     fn known(id: &GUID) -> Option<PathBuf> {
@@ -173,7 +180,7 @@ mod detect {
         let path = OsString::from_wide(unsafe { std::slice::from_raw_parts(out, len) });
         // SAFETY: allocated by the shell, freed once.
         unsafe { CoTaskMemFree(out.cast()) };
-        Some(PathBuf::from(path))
+        Some(long(Path::new(&path)))
     }
 
     /// A known folder from the shell, else an environment variable, else the standard layout. The shell is the

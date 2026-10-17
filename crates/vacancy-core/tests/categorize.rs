@@ -17,6 +17,7 @@ fn item_names(snap: &Snapshot, cats: &Categories, id: CategoryId) -> Vec<String>
             ItemRef::Dir(d) => snap.name(d).to_string_lossy().into_owned(),
             ItemRef::File(f) => snap.file(f).name.to_string_lossy().into_owned(),
             ItemRef::FilesIn(d) => format!("files in {}", snap.name(d).to_string_lossy()),
+            ItemRef::Proposal(p) => format!("proposal {p}"),
         })
         .collect()
 }
@@ -273,8 +274,8 @@ fn sorts_a_mac_into_categories() {
     );
     assert_eq!(
         bytes[&Dev],
-        512 * KIB + MIB + 256 * KIB,
-        "Homebrew, DerivedData, node_modules"
+        512 * KIB + MIB + 256 * KIB + 256 * KIB,
+        "Homebrew, DerivedData, node_modules, VS Code's state"
     );
     assert_eq!(bytes[&Cloud], 512 * KIB, "iCloud Drive");
 
@@ -288,7 +289,10 @@ fn sorts_a_mac_into_categories() {
         apps.contains(&"Xcode.app".to_owned()) && apps.contains(&"Logic".to_owned()),
         "{apps:?}"
     );
-    assert!(item_names(&snap, &cats, Other).contains(&"Code".to_owned()));
+    assert!(
+        item_names(&snap, &cats, Dev).contains(&"Code".to_owned()),
+        "an editor's state is Developer, not Other"
+    );
 }
 
 #[test]

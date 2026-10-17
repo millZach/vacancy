@@ -7,8 +7,8 @@ mod support;
 use support::{Fixture, KIB, MIB};
 use vacancy_core::permissions::{FullDiskAccess, probe};
 use vacancy_core::{
-    CancelToken, CategoryId, DriveKind, Env, ItemKind, MapError, Overview, ScanOptions, VolumeInfo,
-    browse, categorize, overview, scan, scan_update,
+    CancelToken, CategoryId, DriveKind, Env, ItemKind, MapError, Moment, Overview, Proposals,
+    ScanOptions, VolumeInfo, browse, categorize, overview, scan, scan_update,
 };
 
 fn volume(used: u64, free: u64) -> VolumeInfo {
@@ -35,7 +35,12 @@ fn windows_overview(
     let snap = fx.scan();
     let cats = categorize(&snap, &Env::windows(fx.root(), "alex"));
     let scanned = snap.tree(snap.roots()[0].dir).bytes;
-    let map = overview(&snap, &cats, volume(used(scanned), 10 * MIB));
+    let map = overview(
+        &snap,
+        &cats,
+        &Proposals::default(),
+        volume(used(scanned), 10 * MIB),
+    );
     (map, snap, cats)
 }
 
@@ -146,7 +151,7 @@ fn folds_the_smallest_items_into_one_tile() {
     let snap = fx.scan();
     let cats = categorize(&snap, &Env::windows(fx.root(), "alex"));
     let scanned = snap.tree(snap.roots()[0].dir).bytes;
-    let map = overview(&snap, &cats, volume(scanned, MIB));
+    let map = overview(&snap, &cats, &Proposals::default(), volume(scanned, MIB));
     let apps = map
         .categories
         .iter()
@@ -173,7 +178,12 @@ fn explains_the_hidden_space_in_macos_terms() {
     let snap = fx.scan();
     let cats = categorize(&snap, &Env::macos(fx.root(), "alex"));
     let scanned = snap.tree(snap.roots()[0].dir).bytes;
-    let map = overview(&snap, &cats, volume(scanned + 3 * MIB, MIB));
+    let map = overview(
+        &snap,
+        &cats,
+        &Proposals::default(),
+        volume(scanned + 3 * MIB, MIB),
+    );
     let system = map
         .categories
         .iter()
@@ -280,6 +290,7 @@ fn scans_a_folder_for_the_map_in_one_call() {
     let scanned = vacancy_core::scan_for_map(
         fx.root(),
         &env,
+        &Moment::default(),
         &mut |u| updates.push(u),
         &CancelToken::new(),
     )
@@ -310,7 +321,7 @@ fn scans_a_folder_for_the_map_in_one_call() {
     let cancel = CancelToken::new();
     cancel.cancel();
     assert!(matches!(
-        vacancy_core::scan_for_map(fx.root(), &env, &mut |_| {}, &cancel),
+        vacancy_core::scan_for_map(fx.root(), &env, &Moment::default(), &mut |_| {}, &cancel),
         Err(vacancy_core::ScanError::Cancelled)
     ));
 }

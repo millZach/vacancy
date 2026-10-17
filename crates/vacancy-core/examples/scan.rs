@@ -88,6 +88,7 @@ fn main() {
                 ItemRef::Dir(d) => snapshot.path(d).display().to_string(),
                 ItemRef::File(f) => snapshot.file_path(f).display().to_string(),
                 ItemRef::FilesIn(d) => format!("files in {}", snapshot.path(d).display()),
+                ItemRef::Proposal(p) => format!("proposal {p}"),
             };
             println!("    {:>9.2} GB  {name}", item.bytes as f64 / 1e9);
         }

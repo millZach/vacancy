@@ -12,11 +12,12 @@
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
 
 use serde::Serialize;
 use ts_rs::TS;
 
+use crate::pathkey::{PathKey, name_key};
 use crate::snapshot::{DirFlags, DirId, FileId, Markers, RootKind, Snapshot, UnixTime};
 
 mod catalog;
@@ -83,6 +84,9 @@ pub enum ItemRef {
     /// The files directly in a folder that are not kept individually (and, for a folder whose subfolders are
     /// items of their own, all of its files).
     FilesIn(DirId),
+    /// Everything one cleanup proposal would remove, gathered into one tile: its index in the
+    /// [`Proposals`](crate::Proposals) the categories were [carved](Categories::carve) with.
+    Proposal(usize),
 }
 
 /// An item and its numbers.
@@ -125,6 +129,25 @@ pub struct Categories {
     node: Vec<Node>,
     residual: Vec<Sums>,
     file_rules: HashMap<FileId, CategoryId>,
+    /// What proposals took out of their items, once carved.
+    carve: Option<Carve>,
+}
+
+/// What each proposal takes, by place. A value is the proposal's index plus one.
+#[derive(Debug, Default)]
+struct Carve {
+    /// Per folder: the proposal that takes it whole, also set on every folder below it.
+    dir: Vec<u32>,
+    /// Kept files a proposal takes.
+    files: HashMap<FileId, u32>,
+    /// Folders whose loose files a proposal takes.
+    loose: HashMap<DirId, u32>,
+}
+
+impl Carve {
+    fn dir(&self, dir: DirId) -> bool {
+        self.dir[dir.index()] != 0
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -186,7 +209,7 @@ impl Categories {
         let mut out = Vec::new();
         for child in snapshot.children(dir) {
             let node = self.node[child.index()];
-            if node.item_root {
+            if node.item_root || self.taken_dir(child) {
                 continue; // shown elsewhere on the map
             }
             let sums = self.residual[child.index()];
@@ -205,7 +228,7 @@ impl Categories {
             let f = snapshot.file(file);
             rest_bytes = rest_bytes.saturating_sub(f.bytes);
             rest_files = rest_files.saturating_sub(1);
-            if self.file_rules.contains_key(&file) {
+            if self.file_rules.contains_key(&file) || self.taken_file(file) {
                 continue;
             }
             out.push(Item {
@@ -214,6 +237,9 @@ impl Categories {
                 files: 1,
                 last_used: f.last_used,
             });
+        }
+        if self.taken_loose(dir) {
+            (rest_bytes, rest_files) = (0, 0);
         }
         if rest_bytes > 0 || rest_files > 0 {
             out.push(Item {
@@ -241,21 +267,24 @@ impl Categories {
                 return None;
             }
             let sums = self.residual[child.index()];
-            if !self.node[child.index()].item_root && (sums.bytes > 0 || sums.files > 0) {
+            if !self.node[child.index()].item_root
+                && !self.taken_dir(child)
+                && (sums.bytes > 0 || sums.files > 0)
+            {
                 return Some(true);
             }
         }
         Some(
             snapshot
                 .files(dir)
-                .any(|f| !self.file_rules.contains_key(&f)),
+                .any(|f| !self.file_rules.contains_key(&f) && !self.taken_file(f)),
         )
     }
 
     /// A folder's numbers as an item (what its map tile shows), or `None` if it is not part of one (a container).
     pub fn item_of(&self, dir: DirId) -> Option<Item> {
         let node = self.node[dir.index()];
-        if node.container {
+        if node.container || self.taken_dir(dir) {
             return None;
         }
         let sums = self.residual[dir.index()];
@@ -265,6 +294,82 @@ impl Categories {
             files: sums.files,
             last_used: sums.last_used,
         })
+    }
+}
+
+impl Categories {
+    /// Moves what each proposal would remove out of the items it was in and into one item per proposal, in the
+    /// proposal's category: `claims[i]` is proposal `i`'s category and targets, which must not overlap. Every byte
+    /// stays in exactly one item, and folders' drill-downs leave out what a proposal took. `None` if `stop` says
+    /// so.
+    pub(crate) fn carve(
+        mut self,
+        snapshot: &Snapshot,
+        claims: &[(CategoryId, &[ItemRef])],
+        stop: &dyn Fn() -> bool,
+    ) -> Option<Self> {
+        let mut carve = Carve {
+            dir: vec![0; snapshot.dir_count()],
+            ..Carve::default()
+        };
+        for (p, (_, targets)) in claims.iter().enumerate() {
+            let mark = u32::try_from(p + 1).ok()?;
+            for &t in *targets {
+                match t {
+                    ItemRef::Dir(d) => carve.dir[d.index()] = mark,
+                    ItemRef::File(f) => {
+                        carve.files.insert(f, mark);
+                    }
+                    ItemRef::FilesIn(d) => {
+                        carve.loose.insert(d, mark);
+                    }
+                    ItemRef::Proposal(_) => {}
+                }
+            }
+        }
+        // Parents come before children: a folder inside a taken one is taken by the same proposal.
+        for dir in snapshot.dirs() {
+            if dir.index() % CHECK_EVERY == 0 && stop() {
+                return None;
+            }
+            if carve.dir[dir.index()] == 0
+                && let Some(parent) = snapshot.parent(dir)
+            {
+                carve.dir[dir.index()] = carve.dir[parent.index()];
+            }
+        }
+        let built = build_items(
+            snapshot,
+            &self.node,
+            &self.file_rules,
+            Some((&carve, claims)),
+            stop,
+        )?;
+        let names: Vec<(String, String)> = self
+            .list
+            .iter()
+            .map(|c| (c.name.clone(), c.blurb.clone()))
+            .collect();
+        self.list = finish_list(built.items, |id, _| names[id.index()].clone());
+        self.residual = built.residual;
+        self.carve = Some(carve);
+        Some(self)
+    }
+
+    fn taken_dir(&self, dir: DirId) -> bool {
+        self.carve.as_ref().is_some_and(|c| c.dir(dir))
+    }
+
+    fn taken_file(&self, file: FileId) -> bool {
+        self.carve
+            .as_ref()
+            .is_some_and(|c| c.files.contains_key(&file))
+    }
+
+    fn taken_loose(&self, dir: DirId) -> bool {
+        self.carve
+            .as_ref()
+            .is_some_and(|c| c.loose.contains_key(&dir))
     }
 }
 
@@ -347,6 +452,8 @@ pub(crate) fn categorize_until(
         };
         let mut ctx = Ctx {
             trie: pctx.trie.and_then(|t| trie.child(t, name)),
+            packages: false,
+            libs: pctx.libs || is_library_folder(name),
             ..pctx
         };
         let flags = snapshot.flags(dir);
@@ -410,9 +517,40 @@ pub(crate) fn categorize_until(
         }
     }
 
-    // Bottom-up: what each folder adds to its item, and the items themselves.
+    let built = build_items(snapshot, &node, &file_rules, None, stop)?;
+    let list = finish_list(built.items, |id, files| {
+        catalog::describe(id, env.platform, &cloud_names, files)
+    });
+
+    Some(Categories {
+        platform: env.platform,
+        list,
+        node,
+        residual: built.residual,
+        file_rules,
+        carve: None,
+    })
+}
+
+/// What the bottom-up pass makes: what each folder adds to its item, and each category's items.
+struct Built {
+    residual: Vec<Sums>,
+    items: Vec<Vec<Item>>,
+}
+
+/// Bottom-up: what each folder adds to its item, and the items themselves. With a carve, what a proposal takes goes
+/// to the proposal's item (in its category) instead of the item it was in.
+fn build_items(
+    snapshot: &Snapshot,
+    node: &[Node],
+    file_rules: &HashMap<FileId, CategoryId>,
+    carve: Option<(&Carve, &[(CategoryId, &[ItemRef])])>,
+    stop: &dyn Fn() -> bool,
+) -> Option<Built> {
+    let n = snapshot.dir_count();
     let mut residual = vec![Sums::default(); n];
     let mut items: Vec<Vec<Item>> = vec![Vec::new(); CategoryId::ALL.len()];
+    let mut taken = vec![Sums::default(); carve.map_or(0, |(_, claims)| claims.len())];
     for dir in snapshot.dirs().rev() {
         let i = dir.index();
         if i % CHECK_EVERY == 0 && stop() {
@@ -425,9 +563,21 @@ pub(crate) fn categorize_until(
             files: own.files,
             last_used: own.last_used,
         };
+        if let Some((c, _)) = carve
+            && c.dir[i] != 0
+        {
+            // Taken whole, with everything below it (which added its own files the same way).
+            taken[c.dir[i] as usize - 1].add(own_sums);
+            continue;
+        }
         for file in snapshot.files(dir) {
+            let f = snapshot.file(file);
+            let sums = Sums {
+                bytes: f.bytes,
+                files: 1,
+                last_used: f.last_used,
+            };
             if let Some(&category) = file_rules.get(&file) {
-                let f = snapshot.file(file);
                 own_sums.bytes = own_sums.bytes.saturating_sub(f.bytes);
                 own_sums.files = own_sums.files.saturating_sub(1);
                 items[category.index()].push(Item {
@@ -436,7 +586,29 @@ pub(crate) fn categorize_until(
                     files: 1,
                     last_used: f.last_used,
                 });
+            } else if let Some((c, _)) = carve
+                && let Some(&p) = c.files.get(&file)
+            {
+                own_sums.bytes = own_sums.bytes.saturating_sub(f.bytes);
+                own_sums.files = own_sums.files.saturating_sub(1);
+                taken[p as usize - 1].add(sums);
             }
+        }
+        if let Some((c, _)) = carve
+            && let Some(&p) = c.loose.get(&dir)
+        {
+            let (mut bytes, mut files) = (own.bytes, own.files);
+            for f in snapshot.files(dir) {
+                bytes = bytes.saturating_sub(snapshot.file(f).bytes);
+                files = files.saturating_sub(1);
+            }
+            own_sums.bytes = own_sums.bytes.saturating_sub(bytes);
+            own_sums.files = own_sums.files.saturating_sub(files);
+            taken[p as usize - 1].add(Sums {
+                bytes,
+                files,
+                last_used: own.last_used,
+            });
         }
         if me.container {
             if own_sums.bytes > 0 || own_sums.files > 0 {
@@ -465,15 +637,34 @@ pub(crate) fn categorize_until(
             residual[parent.index()].add(sums);
         }
     }
+    if let Some((_, claims)) = carve {
+        for (p, sums) in taken.into_iter().enumerate() {
+            if sums.bytes > 0 || sums.files > 0 {
+                items[claims[p].0.index()].push(Item {
+                    at: ItemRef::Proposal(p),
+                    bytes: sums.bytes,
+                    files: sums.files,
+                    last_used: sums.last_used,
+                });
+            }
+        }
+    }
+    Some(Built { residual, items })
+}
 
-    let list = CategoryId::ALL
+/// The categories from their items, biggest item first, named by `describe` (from the category and its files).
+fn finish_list(
+    items: Vec<Vec<Item>>,
+    describe: impl Fn(CategoryId, u64) -> (String, String),
+) -> Vec<Category> {
+    CategoryId::ALL
         .iter()
         .zip(items)
         .map(|(&id, mut items)| {
             items.sort_by_key(|item| std::cmp::Reverse(item.bytes));
             let bytes = items.iter().map(|i| i.bytes).sum();
             let files = items.iter().map(|i| i.files).sum();
-            let (name, blurb) = catalog::describe(id, env.platform, &cloud_names, files);
+            let (name, blurb) = describe(id, files);
             Category {
                 id,
                 name,
@@ -484,15 +675,7 @@ pub(crate) fn categorize_until(
                 items,
             }
         })
-        .collect();
-
-    Some(Categories {
-        platform: env.platform,
-        list,
-        node,
-        residual,
-        file_rules,
-    })
+        .collect()
 }
 
 /// What a folder passes down to its subfolders while categorizing.
@@ -504,6 +687,11 @@ struct Ctx {
     sealed: bool,
     /// Inside app data (AppData\Local, ~/Library/Application Support): cache-named folders are caches.
     app_data: bool,
+    /// This is Windows' Store packages folder: subfolders named after a Linux distribution hold WSL disks.
+    packages: bool,
+    /// Inside a folder of code libraries (`node_modules`, `site-packages`): a folder named `cache` there is a
+    /// library, not a cache.
+    libs: bool,
 }
 
 fn apply(node: &mut Node, ctx: &mut Ctx, rule: &catalog::Rule) {
@@ -513,6 +701,7 @@ fn apply(node: &mut Node, ctx: &mut Ctx, rule: &catalog::Rule) {
     node.container = rule.container;
     ctx.app_data |= rule.app_data;
     ctx.sealed |= rule.seal;
+    ctx.packages = rule.packages;
 }
 
 /// Rules that go by a folder's name rather than its place. A Photos library is protected anywhere outside an
@@ -542,6 +731,21 @@ fn name_rule(
     {
         return (!inherited.protected()).then_some(CategoryId::Apps);
     }
+    // Caches inside app data are caches, whichever app or tool keeps them.
+    if ctx.app_data
+        && !ctx.libs
+        && matches!(
+            inherited,
+            CategoryId::Other | CategoryId::Dev | CategoryId::Apps
+        )
+        && catalog::is_cache_name(name)
+    {
+        return Some(CategoryId::Caches);
+    }
+    // A Linux distribution installed from the Store keeps its WSL disk in its package folder.
+    if ctx.packages && catalog::is_linux_package(name) {
+        return Some(CategoryId::Dev);
+    }
     if !matches!(
         inherited,
         CategoryId::Other | CategoryId::Media | CategoryId::Downloads
@@ -559,10 +763,13 @@ fn name_rule(
     if dev {
         return Some(CategoryId::Dev);
     }
-    if ctx.app_data && inherited == CategoryId::Other && catalog::is_cache_name(name) {
-        return Some(CategoryId::Caches);
-    }
     None
+}
+
+/// Folders that hold code libraries, where names like `cache` are packages rather than caches.
+pub(crate) fn is_library_folder(name: &OsStr) -> bool {
+    let is = |other: &str| name.eq_ignore_ascii_case(other);
+    is("node_modules") || is("site-packages") || is("dist-packages")
 }
 
 fn ends_with_ignore_case(name: &str, suffix: &str) -> bool {
@@ -588,8 +795,12 @@ impl Trie {
             nodes: vec![TrieNode::default()],
         };
         for (i, rule) in rules.iter().enumerate() {
+            // A place with no key (relative, or with `..`) can't be matched; it names nothing on the volume.
+            let Some(key) = PathKey::of(&rule.at) else {
+                continue;
+            };
             let mut at = 0;
-            for key in keys(&rule.at) {
+            for key in key.keys().iter().cloned() {
                 at = match trie.nodes[at].children.get(&key) {
                     Some(&next) => next,
                     None => {
@@ -615,8 +826,8 @@ struct TrieWithRules<'r> {
 impl TrieWithRules<'_> {
     fn find(&self, path: &Path) -> Option<usize> {
         let mut at = 0;
-        for key in keys(path) {
-            at = *self.trie.nodes[at].children.get(&key)?;
+        for key in PathKey::of(path)?.keys() {
+            at = *self.trie.nodes[at].children.get(key)?;
         }
         Some(at)
     }
@@ -626,9 +837,7 @@ impl TrieWithRules<'_> {
         if node.children.is_empty() {
             return None;
         }
-        node.children
-            .get(&name.to_string_lossy().to_lowercase())
-            .copied()
+        node.children.get(&name_key(name)).copied()
     }
 
     fn has_children(&self, at: usize) -> bool {
@@ -637,28 +846,5 @@ impl TrieWithRules<'_> {
 
     fn rule(&self, at: usize) -> Option<&catalog::Rule> {
         self.trie.nodes[at].rule.map(|i| &self.rules[i])
-    }
-}
-
-/// A path's components as trie keys: the drive or root, then each name, lowercased.
-fn keys(path: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    for part in plain(path).components() {
-        match part {
-            Component::Prefix(p) => out.push(p.as_os_str().to_string_lossy().to_lowercase()),
-            Component::RootDir => out.push(String::from("/")),
-            Component::Normal(name) => out.push(name.to_string_lossy().to_lowercase()),
-            Component::CurDir | Component::ParentDir => {}
-        }
-    }
-    out
-}
-
-/// Strips a Windows `\\?\` prefix, so `\\?\C:\Users` and `C:\Users` are the same place.
-fn plain(path: &Path) -> PathBuf {
-    let s = path.as_os_str().to_string_lossy();
-    match s.strip_prefix(r"\\?\") {
-        Some(rest) if !rest.starts_with("UNC") => PathBuf::from(rest),
-        _ => path.to_path_buf(),
     }
 }

@@ -22,6 +22,8 @@ pub(super) struct Rule {
     pub(super) seal: bool,
     /// For cloud roots, the provider's name.
     pub(super) label: String,
+    /// Below it, Store app folders named after a Linux distribution hold a WSL disk (Developer).
+    pub(super) packages: bool,
 }
 
 struct Rules(Vec<Rule>);
@@ -35,6 +37,7 @@ impl Rules {
             app_data: false,
             seal: false,
             label: String::new(),
+            packages: false,
         });
         self.0.last_mut().expect("just pushed")
     }
@@ -48,6 +51,7 @@ impl Rules {
             app_data: false,
             seal: false,
             label: String::new(),
+            packages: false,
         });
         self.0.last_mut().expect("just pushed")
     }
@@ -147,44 +151,84 @@ fn windows(env: &Env, r: &mut Rules) {
         CategoryId::Caches,
     );
     r.add(env.program_data.join("Docker"), CategoryId::Dev);
-    r.container(&env.program_data).app_data();
+    r.add(env.program_data.join("DockerDesktop"), CategoryId::Dev);
+    // Windows' own shared data: Defender, the search index, error reporting's settings.
+    r.add(env.program_data.join("Microsoft"), CategoryId::System);
+    // The rest belongs to installed programs: installer caches, licences, shared libraries.
+    r.add(&env.program_data, CategoryId::Apps)
+        .container()
+        .app_data();
 
     // The home folder: developer tools first, then app data, which is mostly Other.
-    for dev in [
-        ".cargo",
-        ".rustup",
-        ".npm",
-        ".nuget",
-        ".gradle",
-        ".m2",
-        ".docker",
-        ".android",
-        ".pnpm-store",
-        ".vscode",
-        "go",
-    ] {
+    for dev in DEV_HOME {
+        r.add(home.join(dev), CategoryId::Dev);
+    }
+    for dev in [".nuget", "source", "VirtualBox VMs"] {
         r.add(home.join(dev), CategoryId::Dev);
     }
     r.add(home.join(".cache"), CategoryId::Caches);
+    // Package managers' download caches, named here because their folder names look like app caches.
+    for dev in [r"pip\cache", r"Yarn\Cache", r"uv\cache", r"pypoetry\Cache"] {
+        r.add(sub(local, dev), CategoryId::Dev);
+    }
     for dev in [
         "Docker",
+        "wsl", // WSL's Linux disks
         r"Android\Sdk",
         "npm-cache",
         "pnpm",
         "pnpm-cache",
         "Yarn",
         "pip",
+        "uv",
+        "pypoetry",
         "NuGet",
         "go-build",
+        "node-gyp",
         "ms-playwright",
+        "JetBrains",
+        r"Microsoft\VisualStudio",
+        r"Microsoft\vscode-cpptools",
     ] {
         r.add(sub(local, dev), CategoryId::Dev);
     }
-    r.add(roaming.join("npm"), CategoryId::Dev);
-    r.add(roaming.join("npm-cache"), CategoryId::Dev);
+    for dev in [
+        "npm",
+        "npm-cache",
+        "Code",
+        "Code - Insiders",
+        "Cursor",
+        "Windsurf",
+        "JetBrains",
+    ] {
+        r.add(roaming.join(dev), CategoryId::Dev);
+    }
+    // Apps that install into, or keep their data in, app data.
+    for app in [
+        "AnthropicClaude",
+        "Discord",
+        "slack",
+        "GitHubDesktop",
+        "Postman",
+    ] {
+        r.add(local.join(app), CategoryId::Apps);
+    }
+    for app in [
+        "Claude",
+        "discord",
+        "Slack",
+        "Spotify",
+        r"Microsoft\Teams",
+        "Zoom",
+        "obs-studio",
+    ] {
+        r.add(sub(roaming, app), CategoryId::Apps);
+    }
+    r.add(sub(local, r"Spotify\Data"), CategoryId::Caches); // Spotify's streaming cache
     r.add(local.join("Programs"), CategoryId::Apps).container();
     r.add(sub(local, r"Microsoft\WindowsApps"), CategoryId::Apps);
     r.add(local.join("CrashDumps"), CategoryId::Caches);
+    r.add(sub(local, r"Microsoft\Windows\WER"), CategoryId::Caches);
     r.add(
         sub(local, r"Microsoft\Windows\INetCache"),
         CategoryId::Caches,
@@ -196,7 +240,7 @@ fn windows(env: &Env, r: &mut Rules) {
     r.add(local.join("D3DSCache"), CategoryId::Caches);
     r.add(sub(local, r"NVIDIA\DXCache"), CategoryId::Caches);
     r.add(sub(local, r"NVIDIA\GLCache"), CategoryId::Caches);
-    r.container(local.join("Packages")).app_data();
+    r.container(local.join("Packages")).app_data().packages = true;
     r.container(local).app_data();
     r.container(roaming).app_data();
     r.container(home.join("AppData").join("LocalLow"))
@@ -214,28 +258,36 @@ fn macos(env: &Env, r: &mut Rules) {
     let home = &env.home;
     let lib = home.join("Library");
 
+    // Package managers' download caches sit among app caches but belong to developer tools.
+    for dev in ["Homebrew", "pip", "Yarn", "go-build", "pnpm", "JetBrains"] {
+        r.add(lib.join("Caches").join(dev), CategoryId::Dev);
+    }
     r.add(lib.join("Caches"), CategoryId::Caches);
     r.add(lib.join("Logs"), CategoryId::Caches);
     r.add(home.join(".Trash"), CategoryId::Caches);
+    r.add(
+        sub(
+            &lib,
+            "Containers/com.apple.mail/Data/Library/Mail Downloads",
+        ),
+        CategoryId::Caches,
+    );
     r.add(lib.join("Developer"), CategoryId::Dev);
     r.add(sub(&lib, "Containers/com.docker.docker"), CategoryId::Dev);
     // File Provider sync roots (Dropbox, OneDrive, Google Drive) live here, one folder each.
     r.add(lib.join("CloudStorage"), CategoryId::Cloud)
         .container();
-    for dev in [
-        ".cargo",
-        ".rustup",
-        ".npm",
-        ".gradle",
-        ".m2",
-        ".docker",
-        ".pyenv",
-        ".nvm",
-        ".pnpm-store",
-        ".vscode",
-        "go",
-    ] {
+    for dev in DEV_HOME {
         r.add(home.join(dev), CategoryId::Dev);
+    }
+    for dev in [".pyenv", ".nvm", ".rbenv", "VirtualBox VMs"] {
+        r.add(home.join(dev), CategoryId::Dev);
+    }
+    for dev in ["Code", "Code - Insiders", "Cursor", "Windsurf", "JetBrains"] {
+        r.add(lib.join("Application Support").join(dev), CategoryId::Dev);
+    }
+    for app in ["Claude", "Slack", "discord", "Spotify"] {
+        r.add(lib.join("Application Support").join(app), CategoryId::Apps);
     }
     r.add(home.join(".cache"), CategoryId::Caches);
     r.add(home.join("Applications"), CategoryId::Apps)
@@ -278,6 +330,38 @@ fn macos(env: &Env, r: &mut Rules) {
     r.container(root);
 }
 
+/// Developer tools' folders in the home folder, on both platforms: toolchains, package stores, editors' and AI
+/// coding agents' state, local models.
+const DEV_HOME: [&str; 27] = [
+    ".cargo",
+    ".rustup",
+    ".npm",
+    ".gradle",
+    ".m2",
+    ".docker",
+    ".android",
+    ".pnpm-store",
+    ".yarn",
+    ".bun",
+    ".deno",
+    ".dotnet",
+    ".conda",
+    "anaconda3",
+    "miniconda3",
+    ".local",
+    ".vscode",
+    ".vscode-insiders",
+    ".cursor",
+    ".windsurf",
+    ".continue",
+    ".codex",
+    ".claude",
+    ".gemini",
+    ".ollama",
+    ".lmstudio",
+    "go",
+];
+
 /// Folder names apps use for caches they rebuild on their own: browsers, Electron apps, GPU shader caches.
 pub(super) fn is_cache_name(name: &str) -> bool {
     const NAMES: [&str; 16] = [
@@ -299,6 +383,22 @@ pub(super) fn is_cache_name(name: &str) -> bool {
         "inetcache",
     ];
     NAMES.iter().any(|n| n.eq_ignore_ascii_case(name))
+}
+
+/// Store package folders of Linux distributions, which hold a WSL disk: `CanonicalGroupLimited.Ubuntu_...`,
+/// `TheDebianProject.DebianGNULinux_...` and the like.
+pub(super) fn is_linux_package(name: &str) -> bool {
+    const PUBLISHERS: [&str; 7] = [
+        "canonicalgrouplimited.",
+        "thedebianproject.",
+        "46932suse.",
+        "kalilinux.",
+        "whitewaterfoundryltd.",
+        "almalinux.",
+        "oracleamericainc.",
+    ];
+    let lower = name.to_ascii_lowercase();
+    PUBLISHERS.iter().any(|p| lower.starts_with(p))
 }
 
 /// A category's name and blurb on a platform. `cloud` names the sync services found; `files` is the category's
