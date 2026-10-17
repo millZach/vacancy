@@ -154,9 +154,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.drive-card-about {
-  display: contents;
-}
 .drive-card-nums {
   font-size: var(--text-sm);
   color: var(--color-text-3);

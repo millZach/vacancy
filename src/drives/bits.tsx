@@ -40,10 +40,10 @@ export function UsageBar({ volume, className }: { volume: VolumeInfo; className?
 }
 
 /** "Not scanned yet", "Scanning now" or "Scanned 4 min ago", with a dot that lights once the drive has a scan. */
-export function DriveStatus({ scan, now }: { scan: DriveScan; now: number }) {
+export function DriveStatus({ scan, now, id }: { scan: DriveScan; now: number; id?: string }) {
   const lit = scan.phase === 'done' ? ' is-scanned' : scan.phase === 'scanning' ? ' is-scanning' : '';
   return (
-    <span className={`drive-status${lit}`}>
+    <span className={`drive-status${lit}`} id={id}>
       <i aria-hidden />
       {scan.phase === 'done'
         ? `Scanned ${timeAgo(scan.at, now)}`

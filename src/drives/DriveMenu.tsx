@@ -99,7 +99,7 @@ export function DriveMenu({ drives }: { drives: ReadyDrives }) {
               role="menuitemradio"
               aria-checked={d.current}
               aria-label={d.volume.name}
-              aria-describedby={`${ids}-${i}`}
+              aria-describedby={`${ids}-${i}-nums ${ids}-${i}-status`}
               tabIndex={-1}
               className={d.current ? 'drive-row is-on' : 'drive-row'}
               onClick={() => {
@@ -108,17 +108,17 @@ export function DriveMenu({ drives }: { drives: ReadyDrives }) {
               }}
             >
               <DriveIcon kind={d.volume.kind} size={18} className="drive-row-icon" />
-              <span className="drive-row-main" id={`${ids}-${i}`}>
+              <span className="drive-row-main">
                 <span className="drive-row-name">
                   <b>{d.volume.name}</b>
                   <DriveTags volume={d.volume} system={false} />
                 </span>
                 <UsageBar volume={d.volume} />
-                <span className="drive-row-nums">
+                <span className="drive-row-nums" id={`${ids}-${i}-nums`}>
                   {formatBytes(d.volume.usedBytes, 0)} of {formatBytes(d.volume.totalBytes, 0)} used,{' '}
                   <b>{formatBytes(d.volume.freeBytes, 0)} free</b>
                 </span>
-                <DriveStatus scan={d.scan} now={now} />
+                <DriveStatus scan={d.scan} now={now} id={`${ids}-${i}-status`} />
               </span>
               <span className="drive-row-go" aria-hidden>
                 {d.current ? <Check size={15} strokeWidth={2.4} /> : d.scan.phase === 'done' ? 'Open map' : 'Scan'}
