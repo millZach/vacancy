@@ -31,33 +31,56 @@ pub(crate) fn chain(path: &Path) -> Option<Vec<Step>> {
     Walker::default().chain(path)
 }
 
-/// Walks chains, keeping the last few folders it opened, so that a path whose parent it has open is reached with
-/// one more open: still by name inside the real parent, never through a link. For many paths in a few folders
-/// (the contents of a cache folder), in one short run.
+/// Walks chains, keeping the last few folders it opened, so that a path whose parent it has open is reached
+/// cheaply: still by name inside the real parent, never through a link. For many paths in a few folders (the
+/// contents of a cache folder), in one short run.
+///
+/// A kept folder is revalidated before every reuse: its path is opened again, the last name without following a
+/// link, and must lead to the same folder (same identity) at the same real path as when it was kept (the file
+/// system's own answer for where the open folder is: `GetFinalPathNameByHandleW`, `F_GETPATH`). A folder renamed
+/// and replaced by a link, or a link put in for any folder above it, changes one or the other, and the path is
+/// walked afresh. Where the file system can't say where an open folder is, nothing is kept.
+///
+/// What this buys is speed, never a decision that outlives the moment: the executor runs the Guard afresh,
+/// uncached, right before each delete (ADR 0002).
 #[derive(Default)]
 pub(crate) struct Walker {
-    /// Open folders with their paths and chains, the most recently used last.
-    open: Vec<(PathBuf, sys::Dir, Vec<Step>)>,
+    /// Folders kept open, the most recently used last.
+    open: Vec<Kept>,
+}
+
+/// A folder a [`Walker`] keeps open.
+struct Kept {
+    /// The path it was reached by.
+    path: PathBuf,
+    /// Where the file system said it was when it was kept.
+    real: OsString,
+    /// Held open: on Windows it also keeps the folders above it from being renamed.
+    _pin: sys::Dir,
+    chain: Vec<Step>,
 }
 
 /// How many folders a [`Walker`] keeps open.
 const KEEP_OPEN: usize = 16;
 
 impl Walker {
-    /// [`chain`], reusing the parent folder if it is still open.
+    /// [`chain`], reusing the parent folder if it is kept open and still where the path leads.
     pub(crate) fn chain(&mut self, path: &Path) -> Option<Vec<Step>> {
         if let (Some(parent), Some(Component::Normal(name))) =
             (path.parent(), path.components().next_back())
-            && let Some(at) = self.open.iter().position(|(p, ..)| p == parent)
+            && let Some(at) = self.open.iter().position(|k| k.path == parent)
         {
-            let entry = self.open.remove(at);
-            let found = sys::step(&entry.1, name, false).map(|(step, _)| {
-                let mut chain = entry.2.clone();
-                chain.push(step);
-                chain
-            });
-            self.open.push(entry);
-            return found;
+            let kept = self.open.remove(at);
+            if let Some(dir) = kept.revalidated() {
+                let found = sys::step(&dir, name, false).map(|(step, _)| {
+                    let mut chain = kept.chain.clone();
+                    chain.push(step);
+                    chain
+                });
+                self.open.push(Kept { _pin: dir, ..kept });
+                return found;
+            }
+            // Renamed, replaced or behind a link now: walked afresh below, and kept again if it still can be.
         }
         let (mut dir, root, rest) = sys::root(path)?;
         let mut chain = vec![root];
@@ -82,7 +105,14 @@ impl Walker {
                     self.open.remove(0);
                 }
                 let (step, _) = sys::step(&dir, name, false)?;
-                self.open.push((at, dir, chain.clone()));
+                if let Some(real) = sys::real_path(&dir) {
+                    self.open.push(Kept {
+                        path: at,
+                        real,
+                        _pin: dir,
+                        chain: chain.clone(),
+                    });
+                }
                 chain.push(step);
                 return Some(chain);
             }
@@ -92,6 +122,17 @@ impl Walker {
             dir = next?;
         }
         Some(chain)
+    }
+}
+
+impl Kept {
+    /// The folder opened again by its path, if the path still leads to it, at the same real path, the last name
+    /// not through a link.
+    fn revalidated(&self) -> Option<sys::Dir> {
+        let (dir, id) = sys::reopen(&self.path)?;
+        let same = Some(id) == self.chain.last().map(|s| s.id)
+            && sys::real_path(&dir).as_ref() == Some(&self.real);
+        same.then_some(dir)
     }
 }
 
@@ -175,6 +216,64 @@ mod sys {
             id: id_of(&next)?,
         };
         Some((step, open.then_some(next)))
+    }
+
+    /// The folder at `path`, opened by its whole path (`\\?\` form, so no name is rewritten), the last name not
+    /// through a link, with its identity.
+    pub(super) fn reopen(path: &Path) -> Option<(Dir, Identity)> {
+        let mut parts = path.components();
+        let Some(Component::Prefix(prefix)) = parts.next() else {
+            return None;
+        };
+        let mut full = std::ffi::OsString::from(root_of(prefix.kind())?);
+        let mut first = true;
+        for part in parts {
+            match part {
+                Component::RootDir => continue,
+                Component::Normal(name) => {
+                    if !first {
+                        full.push(r"\");
+                    }
+                    full.push(name);
+                    first = false;
+                }
+                _ => return None,
+            }
+        }
+        let dir = open_root(full.to_str()?)?;
+        if is_link(&dir)? {
+            return None;
+        }
+        let id = id_of(&dir)?;
+        Some((dir, id))
+    }
+
+    /// Where the file system says an open folder is now (`GetFinalPathNameByHandleW`, NT form).
+    pub(super) fn real_path(dir: &Dir) -> Option<std::ffi::OsString> {
+        use std::os::windows::ffi::OsStringExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW, VOLUME_NAME_NT,
+        };
+        let mut buf = vec![0u16; 512];
+        loop {
+            let cap = u32::try_from(buf.len()).ok()?;
+            // SAFETY: `buf` holds `cap` writable units and the handle is open.
+            let n = unsafe {
+                GetFinalPathNameByHandleW(
+                    dir.0,
+                    buf.as_mut_ptr(),
+                    cap,
+                    FILE_NAME_NORMALIZED | VOLUME_NAME_NT,
+                )
+            } as usize;
+            if n == 0 {
+                return None;
+            }
+            if n < buf.len() {
+                return Some(std::ffi::OsString::from_wide(&buf[..n]));
+            }
+            buf.resize(n + 1, 0);
+        }
     }
 
     /// The root of the volume a path starts with, as a `\\?\` path.
@@ -393,6 +492,47 @@ mod sys {
         Some((step, Some(next)))
     }
 
+    /// The folder at `path`, opened by its whole path, the last name not through a link, with its identity.
+    pub(super) fn reopen(path: &Path) -> Option<(Dir, Identity)> {
+        let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+        // SAFETY: `c_path` is NUL-terminated.
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return None;
+        }
+        let dir = Fd(fd);
+        let id = id(&fstat(&dir)?);
+        Some((dir, id))
+    }
+
+    /// Where the file system says an open folder is now (`F_GETPATH`). Only macOS can say; elsewhere `None`, and a
+    /// walker keeps nothing open.
+    pub(super) fn real_path(dir: &Dir) -> Option<std::ffi::OsString> {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let mut buf = vec![0u8; libc::PATH_MAX as usize + 1];
+            // SAFETY: `buf` holds PATH_MAX + 1 writable bytes, as F_GETPATH needs, and `dir` is open.
+            let got = unsafe { libc::fcntl(dir.0, libc::F_GETPATH, buf.as_mut_ptr()) };
+            if got == -1 {
+                return None;
+            }
+            let len = buf.iter().position(|&b| b == 0)?;
+            buf.truncate(len);
+            Some(std::ffi::OsString::from_vec(buf))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = dir;
+            None
+        }
+    }
+
     fn fstat(fd: &Fd) -> Option<libc::stat> {
         // SAFETY: an all-zero stat is a valid value of a plain C struct.
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -416,6 +556,14 @@ mod sys {
     }
 
     pub(super) fn step(_dir: &Dir, _name: &OsStr, _open: bool) -> Option<(Step, Option<Dir>)> {
+        None
+    }
+
+    pub(super) fn reopen(_path: &Path) -> Option<(Dir, super::Identity)> {
+        None
+    }
+
+    pub(super) fn real_path(_dir: &Dir) -> Option<std::ffi::OsString> {
         None
     }
 }
@@ -487,6 +635,76 @@ mod tests {
                 .success()
         );
         assert!(walker.chain(&dir.join("c")).is_none(), "now a link");
+    }
+
+    /// Puts a link at `link` to the folder `to`.
+    fn link_dir(link: &Path, to: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(to, link).unwrap();
+        #[cfg(windows)]
+        assert!(
+            std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(to)
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "mklink /J"
+        );
+    }
+
+    /// A folder a walker keeps open is never reused once its path no longer leads to it: renamed and replaced by a
+    /// link, or with a link put in for a folder above it, the path is refused; replaced by another folder, the
+    /// answer is the new folder's.
+    #[test]
+    fn a_walker_revalidates_a_folder_it_keeps_open() {
+        let (_fx, root) = real_tempdir();
+        let x = root.join("x");
+        let cache = x.join("cache");
+        for name in ["a", "b", "c", "d"] {
+            std::fs::create_dir_all(cache.join(name)).unwrap();
+        }
+        let mut walker = Walker::default();
+        assert!(walker.chain(&cache.join("a")).is_some());
+
+        // The folder renamed, and a link to it where it was.
+        let moved = x.join("cache-old");
+        std::fs::rename(&cache, &moved).unwrap();
+        link_dir(&cache, &moved);
+        assert!(
+            walker.chain(&cache.join("b")).is_none(),
+            "through a link now"
+        );
+
+        // Back in place, and the folder above it renamed and linked instead.
+        std::fs::remove_dir(&cache).unwrap();
+        std::fs::rename(&moved, &cache).unwrap();
+        assert!(walker.chain(&cache.join("a")).is_some());
+        let x_moved = root.join("x-old");
+        match std::fs::rename(&x, &x_moved) {
+            Ok(()) => {
+                link_dir(&x, &x_moved);
+                assert!(walker.chain(&cache.join("c")).is_none(), "a link above it");
+                std::fs::remove_dir(&x).unwrap();
+                std::fs::rename(&x_moved, &x).unwrap();
+                assert!(walker.chain(&cache.join("a")).is_some());
+            }
+            // Windows refuses to rename a folder while a folder inside it is open: the walker's own handle pins it.
+            Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied => {}
+            Err(e) => panic!("rename: {e}"),
+        }
+
+        // Another folder where it was: the answer is the new folder's.
+        std::fs::rename(&cache, &moved).unwrap();
+        std::fs::create_dir_all(cache.join("d")).unwrap();
+        let walked = walker.chain(&cache.join("d")).unwrap();
+        assert_eq!(
+            walked[walked.len() - 2].id,
+            chain(&cache).unwrap().last().unwrap().id,
+            "the new folder"
+        );
     }
 
     #[test]
