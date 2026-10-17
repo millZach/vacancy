@@ -52,7 +52,10 @@ try {
   const scan = page.locator('button.cta', { hasText: /^\s*Scan / });
   await scan.waitFor({ timeout: 30_000 });
   const names = await page.locator('.drive-card-name').allTextContents();
-  assert.deepEqual(names.map(n => n.trim()), [`Fixture (${basename(root)})`], 'App must offer only the named fixture');
+  const fixtureName = `Fixture (${basename(root)})`;
+  assert.equal((await scan.innerText()).replace(/\s+/g, ' ').trim(), `Scan ${fixtureName}`, 'Visible scan target must be the named fixture');
+  // The one-drive fixture layout has no cards. If cards are shown, they must still offer exactly this fixture.
+  if (names.length) assert.deepEqual(names.map(n => n.trim()), [fixtureName], 'App must offer only the named fixture');
   // A read-only check of the public bridge adds the exact mount path to the visible fixture-name check.
   const volumes = await page.evaluate(() => window.__TAURI_INTERNALS__.invoke('list_volumes'));
   assert.equal(volumes.length, 1);
