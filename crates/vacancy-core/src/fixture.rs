@@ -51,6 +51,10 @@ pub enum FixtureError {
     Linked(PathBuf),
     #[error("{0} is a drive's root")]
     DriveRoot(PathBuf),
+    #[error("{0} is the root of a mounted volume")]
+    MountRoot(PathBuf),
+    #[error("your home folder can't be found, so it can't be kept out")]
+    HomeUnknown,
     #[error("{0} is in, or holds, your home folder")]
     RealHome(PathBuf),
     #[error("{0} is not empty")]
@@ -73,17 +77,70 @@ pub fn check_root(root: &Path, home: &Path) -> Result<PathBuf, FixtureError> {
     if chain.len() < 2 {
         return Err(FixtureError::DriveRoot(root.to_path_buf()));
     }
-    let root_id = chain.last().map(|s| s.id);
-    // The real home as it really is: through whatever links lead to it, so no spelling of it slips by.
-    if let Some(home_chain) = fsid::resolve(home).or_else(|| fsid::chain(home)) {
-        let home_id = home_chain.last().map(|s| s.id);
-        let inside_home = chain.iter().any(|s| Some(s.id) == home_id);
-        let holds_home = home_chain.iter().any(|s| Some(s.id) == root_id);
-        if inside_home || holds_home {
-            return Err(FixtureError::RealHome(root.to_path_buf()));
-        }
+    // The root of a volume mounted in a folder (a disk image at /Volumes/Test, a drive in a folder): its device
+    // or volume isn't its parent's, or the OS says a volume is mounted right there.
+    let (parent, last) = (&chain[chain.len() - 2], &chain[chain.len() - 1]);
+    if last.id.volume() != parent.id.volume() || is_mount_point(root) {
+        return Err(FixtureError::MountRoot(root.to_path_buf()));
+    }
+    let root_id = last.id;
+    // The real home as it really is: through whatever links lead to it, so no spelling of it slips by. A home
+    // that can't be found can't be kept out, so then nothing is a fixture root.
+    let home_chain = fsid::resolve(home)
+        .or_else(|| fsid::chain(home))
+        .ok_or(FixtureError::HomeUnknown)?;
+    let home_id = home_chain.last().map(|s| s.id);
+    let inside_home = chain.iter().any(|s| Some(s.id) == home_id);
+    let holds_home = home_chain.iter().any(|s| s.id == root_id);
+    if inside_home || holds_home {
+        return Err(FixtureError::RealHome(root.to_path_buf()));
     }
     Ok(root.to_path_buf())
+}
+
+/// Whether a volume is mounted at `path` itself, as the OS says: on macOS the mount `statfs` names is `path`; on
+/// Windows the volume path that holds it is `path` (a volume mounted in a folder, or a drive's root).
+fn is_mount_point(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+            return true;
+        };
+        // SAFETY: an all-zero statfs is a valid value of a plain C struct.
+        let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+        // SAFETY: `c` is NUL-terminated and `fs` is writable.
+        if unsafe { libc::statfs(c.as_ptr(), &mut fs) } != 0 {
+            return true;
+        }
+        let mount: Vec<u8> = fs
+            .f_mntonname
+            .iter()
+            .take_while(|&&b| b != 0)
+            .map(|&b| b as u8)
+            .collect();
+        mount == path.as_os_str().as_bytes()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        use windows_sys::Win32::Storage::FileSystem::GetVolumePathNameW;
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        let mut out = vec![0u16; 32_768];
+        // SAFETY: `wide` is NUL-terminated; `out` holds as many writable units as passed.
+        if unsafe { GetVolumePathNameW(wide.as_ptr(), out.as_mut_ptr(), out.len() as u32) } == 0 {
+            return true;
+        }
+        let len = out.iter().position(|&c| c == 0).unwrap_or(out.len());
+        let volume = std::ffi::OsString::from_wide(&out[..len]);
+        let trim = |p: &std::ffi::OsStr| p.to_string_lossy().trim_end_matches('\\').to_lowercase();
+        trim(&volume) == trim(path.as_os_str())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = path;
+        false
+    }
 }
 
 /// The places on the fixture root `root`, laid out the way this computer's OS lays out a drive, for the user

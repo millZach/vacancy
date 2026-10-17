@@ -1078,3 +1078,84 @@ fn a_file_rewritten_to_another_size_with_old_times_is_never_deleted() {
         "{changed:#?}"
     );
 }
+
+/// Fixture mode is never on when the real home folder can't be established: nothing could then be kept out of it.
+#[test]
+fn fixture_mode_needs_the_real_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = support::real_path(dir.path());
+    let ok = base.join("fixtures").join("one");
+    std::fs::create_dir_all(&ok).unwrap();
+    assert_eq!(
+        fixture::check_root(&ok, &base.join("no-such-home")),
+        Err(fixture::FixtureError::HomeUnknown)
+    );
+    assert_eq!(
+        fixture::check_root(&ok, Path::new("")),
+        Err(fixture::FixtureError::HomeUnknown)
+    );
+}
+
+/// A volume mounted in a folder is no fixture root, though nothing on the way to it is a link: its root would put
+/// the fixture's own, narrower places over a whole volume. (macOS: a disk image mounted on an empty folder.)
+#[cfg(target_os = "macos")]
+#[test]
+fn fixture_mode_refuses_a_mounted_volume_s_root() {
+    use std::process::Command;
+    struct Detach(PathBuf);
+    impl Drop for Detach {
+        fn drop(&mut self) {
+            let _ = Command::new("hdiutil")
+                .args(["detach", "-quiet", "-force"])
+                .arg(&self.0)
+                .status();
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let base = support::real_path(dir.path());
+    let home = base.join("home").join("me");
+    let mnt = base.join("mnt");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&mnt).unwrap();
+    assert!(
+        fixture::check_root(&mnt, &home).is_ok(),
+        "the control: an empty folder"
+    );
+    let images = tempfile::tempdir().unwrap();
+    let image = images.path().join("vacancy-fixture-root.dmg");
+    let ran = |cmd: &mut Command| match cmd.output() {
+        Ok(out) if out.status.success() => true,
+        out => {
+            assert!(!support::in_ci(), "hdiutil must work in CI: {out:?}");
+            eprintln!("skipped: hdiutil: {out:?}");
+            false
+        }
+    };
+    if !ran(Command::new("hdiutil")
+        .args([
+            "create",
+            "-quiet",
+            "-size",
+            "4m",
+            "-fs",
+            "HFS+",
+            "-volname",
+            "VacancyRoot",
+        ])
+        .arg(&image))
+    {
+        return;
+    }
+    if !ran(Command::new("hdiutil")
+        .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
+        .arg(&mnt)
+        .arg(&image))
+    {
+        return;
+    }
+    let _detach = Detach(mnt.clone());
+    assert_eq!(
+        fixture::check_root(&mnt, &home),
+        Err(fixture::FixtureError::MountRoot(mnt.clone()))
+    );
+}
