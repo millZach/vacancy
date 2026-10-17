@@ -104,7 +104,13 @@ function ProposalRow({ proposal: p, agent, on, hot, onToggle, onHot }: RowProps)
   const more = useId();
   const cls = ['tray-row', on && 'is-on', hot && 'is-hot'].filter(Boolean).join(' ');
   return (
-    <div className={cls} onMouseEnter={() => onHot(tileOf(p.id))} onMouseLeave={() => onHot(null)}>
+    <div
+      className={cls}
+      onMouseEnter={() => onHot(tileOf(p.id))}
+      onMouseLeave={() => onHot(null)}
+      onFocus={() => onHot(tileOf(p.id))}
+      onBlur={() => onHot(null)}
+    >
       <Checkbox on={on} onChange={onToggle} label={`Include ${p.title}`} />
       <div className="tray-row-main">
         <button

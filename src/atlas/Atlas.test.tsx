@@ -393,7 +393,7 @@ describe('proposals and the plan', () => {
     expect(within(installers).getByText('Built-in rule')).toBeInTheDocument();
 
     expect(freed()).toBe('75.3 GB');
-    expect(tray()).toHaveTextContent('712,567 items in 8 places, deleted permanently');
+    expect(tray()).toHaveTextContent('712,567 items in 399 places, deleted permanently');
     const free = within(tray()).getByRole('button', { name: /^Free 75\.3\sGB$/ });
     expect(free).toBeDisabled();
     expect(free).toHaveAccessibleDescription('Vacancy can’t run plans yet. This version only proposes.');
@@ -409,7 +409,12 @@ describe('proposals and the plan', () => {
     await userEvent.click(within(header()).getByRole('button', { name: 'Build a plan' }));
 
     expect(proposalTile(container, 'w-node')).toHaveClass('is-reclaim', 'is-selected');
+    expect(proposalTile(container, 'w-node')).toHaveAttribute('aria-pressed', 'true');
+    expect(proposalTile(container, 'w-node')).toHaveAccessibleName(
+      /^node_modules in 61 idle projects, 21\.0\sGB, reclaimable, in the plan$/,
+    );
     await userEvent.click(row('node_modules in 61 idle projects'));
+    expect(proposalTile(container, 'w-node')).toHaveAttribute('aria-pressed', 'false');
     expect(row('node_modules in 61 idle projects')).toHaveAttribute('aria-checked', 'false');
     expect(freed()).toBe('54.3 GB');
     expect(proposalTile(container, 'w-node')).toHaveClass('is-available');
@@ -436,6 +441,11 @@ describe('proposals and the plan', () => {
     fireEvent.mouseEnter(temp);
     expect(proposalTile(container, 'w-temp')).toHaveClass('is-hot');
     fireEvent.mouseLeave(temp);
+    expect(proposalTile(container, 'w-temp')).not.toHaveClass('is-hot');
+    // From the keyboard too.
+    act(() => row('Temp folders').focus());
+    expect(proposalTile(container, 'w-temp')).toHaveClass('is-hot');
+    act(() => row('Temp folders').blur());
     expect(proposalTile(container, 'w-temp')).not.toHaveClass('is-hot');
     fireEvent.pointerMove(proposalTile(container, 'w-browser'), { clientX: 50, clientY: 50 });
     expect(row('Browser caches').closest('.tray-row')).toHaveClass('is-hot');

@@ -6,7 +6,7 @@ export interface PlanTotals {
   bytes: number;
   /** Files it removes. */
   items: number;
-  /** Proposals in it. */
+  /** Places they take things from: folders, files and folders' loose files. */
   places: number;
 }
 
@@ -16,7 +16,7 @@ export function planTotals(proposals: readonly Proposal[], plan: readonly string
   return {
     bytes: chosen.reduce((sum, p) => sum + p.bytes, 0),
     items: chosen.reduce((sum, p) => sum + p.itemCount, 0),
-    places: chosen.length,
+    places: chosen.reduce((sum, p) => sum + p.placeCount, 0),
   };
 }
 

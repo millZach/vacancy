@@ -203,9 +203,12 @@ describe('the header’s drive menu', () => {
     await userEvent.click(node());
     expect(node()).toHaveAttribute('aria-checked', 'false');
 
-    // D: has its own proposals and its own plan, starting from the defaults.
+    // D: has its own proposals and its own plan, starting from the defaults. The tray closes on the way.
     await choose('Data (D:)');
+    expect(screen.queryByRole('complementary', { name: 'Plan' })).toBeNull();
     await scanToMap('Data (D:)');
+    expect(screen.queryByRole('complementary', { name: 'Plan' })).toBeNull();
+    await userEvent.click(within(header()).getByRole('button', { name: 'Build a plan' }));
     expect(node()).toHaveAttribute('aria-checked', 'true');
     expect(within(header()).getByText(/reclaimable/)).toHaveTextContent(/^122\.3\sGB reclaimable$/);
 
@@ -217,6 +220,7 @@ describe('the header’s drive menu', () => {
       /Scanned just now, 122\sGB to reclaim$/,
     );
     await userEvent.click(screen.getByRole('menuitemradio', { name: 'Local Disk (C:)' }));
+    await userEvent.click(within(header()).getByRole('button', { name: 'Build a plan' }));
     expect(node()).toHaveAttribute('aria-checked', 'false');
     expect(within(header()).getByText(/reclaimable/)).toHaveTextContent(/^75\.3\sGB reclaimable$/);
 

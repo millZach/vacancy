@@ -39,10 +39,14 @@ export interface MapViewProps {
   planning?: boolean;
 }
 
-/** A tile's extra look. */
+/** A tile's extra look, and what assistive tech hears about it. */
 export interface TileLook {
   cls?: string;
   badge?: ReactNode;
+  /** Said after the tile's name and size ("reclaimable, in the plan"). */
+  state?: string;
+  /** For tiles that go in or out of something on click: whether they are in. */
+  pressed?: boolean;
 }
 
 const LOCKED = 'Protected. Vacancy never changes anything here.';
@@ -144,7 +148,10 @@ export function MapView(p: MapViewProps) {
             className={cls}
             role={canClick ? 'button' : undefined}
             tabIndex={canClick ? 0 : -1}
-            aria-label={canClick ? `${l.name}, ${formatBytes(l.bytes)}` : undefined}
+            aria-label={
+              canClick ? [l.name, formatBytes(l.bytes), look.state].filter(Boolean).join(', ') : undefined
+            }
+            aria-pressed={canClick ? look.pressed : undefined}
             onClick={canClick ? () => p.onLeaf?.(l) : undefined}
             onKeyDown={canClick ? (e) => press(e, () => p.onLeaf?.(l)) : undefined}
             onFocus={canClick ? () => p.onHot(l.id) : undefined}

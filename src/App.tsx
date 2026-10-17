@@ -14,8 +14,15 @@ export function App() {
   const bridge = useBridge();
   const drives = useDrives();
   const ready = drives.status === 'ready' ? drives : null;
-  // The plan tray beside the map. Each drive keeps its own plan; the tray shows the plan of the drive on screen.
+  // The plan tray beside the map. Each drive keeps its own plan; the tray shows the plan of the drive on screen,
+  // and closes when another drive comes on screen.
   const [planOpen, setPlanOpen] = useState(false);
+  const onScreen = ready?.current.volume.mountPoint ?? null;
+  const [seenDrive, setSeenDrive] = useState(onScreen);
+  if (seenDrive !== onScreen) {
+    setSeenDrive(onScreen);
+    setPlanOpen(false);
+  }
   const scan = ready?.current.scan;
   const onMap = ready?.screen === 'map' && scan?.phase === 'done';
   const proposals = onMap && scan.phase === 'done' ? scan.proposals : [];

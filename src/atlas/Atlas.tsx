@@ -155,11 +155,11 @@ export function Atlas({ drives, agent, planOpen, onPlanOpen }: Props) {
     leaf.proposal !== null || (levels.length === 0 ? leaf.kind !== 'free' : leaf.browsable);
   const look = (leaf: Leaf): TileLook => {
     if (leaf.proposal === null) return {};
-    if (!planning) return { cls: 'is-reclaim' };
+    if (!planning) return { cls: 'is-reclaim', state: 'reclaimable' };
     const on = inPlan(leaf);
     return on
-      ? { cls: 'is-reclaim is-selected', badge: <Pin on /> }
-      : { cls: 'is-available', badge: <Pin on={false} /> };
+      ? { cls: 'is-reclaim is-selected', badge: <Pin on />, state: 'reclaimable, in the plan', pressed: true }
+      : { cls: 'is-available', badge: <Pin on={false} />, state: 'reclaimable, not in the plan', pressed: false };
   };
   const leafStatus = (leaf: Leaf): ReactNode => {
     const p = leaf.proposal === null ? undefined : byId.get(leaf.proposal);
@@ -306,6 +306,7 @@ export function Atlas({ drives, agent, planOpen, onPlanOpen }: Props) {
       </main>
       {planning && (
         <PlanTray
+          key={overview.volume.mountPoint}
           proposals={proposals}
           plan={plan}
           agent={agent}
