@@ -1,7 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Vacancy",
-  "version": "0.1.0",
   "identifier": "com.millzach.vacancy",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -30,15 +29,19 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "Zach Miller",
+    "homepage": "https://github.com/millZach/vacancy",
     "category": "Utility",
     "shortDescription": "See where your disk space went and get it back.",
+    "longDescription": "Vacancy shows where your disk space goes, proposes how to get it back, runs the plan you approve, and ends with a visual report of what it did.",
     "copyright": "© 2026 Zach Miller",
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
     "windows": {
-      "nsis": { "installMode": "currentUser" }
+      "nsis": { "installMode": "currentUser", "installerIcon": "icons/icon.ico" }
     },
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
     }
   }
 }
