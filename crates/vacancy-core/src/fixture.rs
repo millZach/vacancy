@@ -402,6 +402,7 @@ pub fn build_with(root: &Path, bulk: usize) -> io::Result<Profile> {
     // pnpm's links, the link into Documents, and the hard link into the store.
     let node_modules = sub(&home, "code/old-app/node_modules");
     link_dir(
+        root,
         &node_modules.join("left-pad"),
         &sub(
             &home,
@@ -409,12 +410,13 @@ pub fn build_with(root: &Path, bulk: usize) -> io::Result<Profile> {
         ),
     )?;
     link_dir(
+        root,
         &node_modules.join("lodash"),
         &sub(&home, &format!("{pnpm}/lodash@4.17.21/node_modules/lodash")),
     )?;
     let documents = home.join("Documents");
     let link_to_documents = sub(&home, &format!("{npm}/content-v2/linked-docs"));
-    link_dir(&link_to_documents, &documents)?;
+    link_dir(root, &link_to_documents, &documents)?;
     let store_file = sub(&home, &format!("{store}/store-file.js"));
     let store_link = sub(
         &home,
@@ -548,81 +550,194 @@ fn open_for_times(path: &Path) -> io::Result<fs::File> {
 }
 
 /// A folder link at `link` to `to`: a junction on Windows (no privilege needed), a symlink elsewhere.
-fn link_dir(link: &Path, to: &Path) -> io::Result<()> {
+fn link_dir(root: &Path, link: &Path, to: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
-        use std::os::windows::ffi::OsStrExt;
-        use std::os::windows::fs::OpenOptionsExt;
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
-            FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES,
-        };
-        use windows_sys::Win32::System::IO::DeviceIoControl;
-        use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
-
-        // The generator owns both locations. Canonicalization supplies native separators and a verbatim
-        // Windows target; no cmd filename parsing, quoting, metacharacters, or inherited shell settings.
-        let target: Vec<u16> = fs::canonicalize(to)?.as_os_str().encode_wide().collect();
-        let prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
-        if !target.starts_with(&prefix) {
-            return Err(io::Error::other(
-                "fixture target has no native verbatim prefix",
-            ));
-        }
-        let substitute: Vec<u16> = r"\??\"
-            .encode_utf16()
-            .chain(target[4..].iter().copied())
-            .collect();
-        let data_len = 8 + (substitute.len() + target.len() + 2) * 2;
-        if data_len + 8 > 16 * 1024 {
-            return Err(io::Error::other(
-                "fixture junction target exceeds reparse buffer limit",
-            ));
-        }
-        let mut data = Vec::new();
-        data.extend_from_slice(&0xa000_0003u32.to_le_bytes());
-        data.extend_from_slice(&(data_len as u16).to_le_bytes());
-        data.extend_from_slice(&0u16.to_le_bytes());
-        for n in [
-            0,
-            substitute.len() * 2,
-            (substitute.len() + 1) * 2,
-            target.len() * 2,
-        ] {
-            data.extend_from_slice(&(n as u16).to_le_bytes());
-        }
-        for n in substitute.into_iter().chain([0]).chain(target).chain([0]) {
-            data.extend_from_slice(&n.to_le_bytes());
-        }
-        fs::create_dir(link)?; // must be a fresh, empty, generator-owned location
-        let file = fs::OpenOptions::new()
-            .access_mode(FILE_WRITE_ATTRIBUTES)
-            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(link)?;
-        let mut returned = 0;
-        // SAFETY: owned directory handle, initialized bounded mount-point buffer, writable byte count.
-        if unsafe {
-            DeviceIoControl(
-                file.as_raw_handle(),
-                FSCTL_SET_REPARSE_POINT,
-                data.as_ptr().cast(),
-                data.len() as u32,
-                std::ptr::null_mut(),
-                0,
-                &mut returned,
-                std::ptr::null_mut(),
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+        link_dir_with(root, link, to, || {})
     }
     #[cfg(not(windows))]
     {
+        let _ = root;
         std::os::unix::fs::symlink(to, link)
+    }
+}
+
+#[cfg(windows)]
+fn junction_data(to: &Path) -> io::Result<Vec<u8>> {
+    use std::os::windows::ffi::OsStrExt;
+    // The generator owns both locations. Canonicalization supplies native separators and a verbatim
+    // Windows target; no cmd filename parsing, quoting, metacharacters, or inherited shell settings.
+    let target: Vec<u16> = fs::canonicalize(to)?.as_os_str().encode_wide().collect();
+    let prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
+    if !target.starts_with(&prefix) {
+        return Err(io::Error::other(
+            "fixture target has no native verbatim prefix",
+        ));
+    }
+    let substitute: Vec<u16> = r"\??\"
+        .encode_utf16()
+        .chain(target[4..].iter().copied())
+        .collect();
+    let data_len = 8 + (substitute.len() + target.len() + 2) * 2;
+    if data_len + 8 > 16 * 1024 {
+        return Err(io::Error::other(
+            "fixture junction target exceeds reparse buffer limit",
+        ));
+    }
+    let mut data = Vec::new();
+    data.extend_from_slice(&0xa000_0003u32.to_le_bytes());
+    data.extend_from_slice(&(data_len as u16).to_le_bytes());
+    data.extend_from_slice(&0u16.to_le_bytes());
+    for n in [
+        0,
+        substitute.len() * 2,
+        (substitute.len() + 1) * 2,
+        target.len() * 2,
+    ] {
+        data.extend_from_slice(&(n as u16).to_le_bytes());
+    }
+    for n in substitute.into_iter().chain([0]).chain(target).chain([0]) {
+        data.extend_from_slice(&n.to_le_bytes());
+    }
+    Ok(data)
+}
+
+#[cfg(windows)]
+fn set_junction(file: &fs::File, data: &[u8]) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+    use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
+    let mut returned = 0;
+    // SAFETY: owned directory handle, initialized bounded mount-point buffer, writable byte count.
+    if unsafe {
+        DeviceIoControl(
+            file.as_raw_handle(),
+            FSCTL_SET_REPARSE_POINT,
+            data.as_ptr().cast(),
+            data.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn link_dir_with(
+    root: &Path,
+    link: &Path,
+    to: &Path,
+    after_parent: impl FnOnce(),
+) -> io::Result<()> {
+    if !is_profile(root) {
+        return Err(io::Error::other("generated fixture marker required"));
+    }
+    let data = junction_data(to)?;
+    fsid::with_fresh_directory(root, link, after_parent, |file| set_junction(file, &data))
+}
+
+#[cfg(all(test, windows))]
+mod junction_tests {
+    use super::*;
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_WRITE_ATTRIBUTES,
+    };
+
+    fn retag_owned_test_directory(path: &Path, to: &Path) {
+        let file = fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .share_mode(7)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .unwrap();
+        set_junction(&file, &junction_data(to).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn atomic_junction_creation_never_retags_an_outside_or_existing_directory() {
+        let base = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join("tool-fixtures");
+        fs::create_dir_all(&base).unwrap();
+        let temp = tempfile::tempdir_in(base).unwrap();
+        let root = temp.path().join("profile");
+        let outside = temp.path().join("outside-profile");
+        for profile in [&root, &outside] {
+            fs::create_dir(profile).unwrap();
+            check_root(profile, &std::env::home_dir().unwrap()).unwrap();
+            fs::write(profile.join(MARKER), b"fresh fixture proof profile").unwrap();
+        }
+        let target = root.join("target");
+        fs::create_dir(&target).unwrap();
+        let outside_leaf = outside.join("leaf");
+        fs::create_dir(&outside_leaf).unwrap();
+        fs::write(outside.join("sentinel.bin"), b"outside fixture sentinel").unwrap();
+        let before = inventory(&outside).unwrap();
+
+        // Valid attack control for the create-then-absolute-open pattern: replace the ancestor after creating
+        // a fresh leaf. An absolute lookup now names the preexisting outside ordinary directory. This makes
+        // no claim about mklink's internal implementation, and never retags the outside leaf itself.
+        let control = root.join("control");
+        fs::create_dir(&control).unwrap();
+        fs::create_dir(control.join("leaf")).unwrap();
+        fs::rename(control.join("leaf"), root.join("moved-control-leaf")).unwrap();
+        retag_owned_test_directory(&control, &outside);
+        assert_eq!(
+            fs::canonicalize(control.join("leaf")).unwrap(),
+            fs::canonicalize(&outside_leaf).unwrap()
+        );
+        fs::remove_dir(&control).unwrap();
+
+        let parent = root.join("attack");
+        fs::create_dir(&parent).unwrap();
+        let mut attacked = false;
+        let result = link_dir_with(&root, &parent.join("leaf"), &target, || {
+            retag_owned_test_directory(&parent, &outside);
+            attacked = true;
+            assert_eq!(
+                fs::canonicalize(parent.join("leaf")).unwrap(),
+                fs::canonicalize(&outside_leaf).unwrap(),
+                "the retained parent was successfully retagged"
+            );
+        });
+        assert!(attacked);
+        assert!(result.is_err(), "a redirected parent must fail closed");
+        assert_eq!(
+            fs::symlink_metadata(&outside_leaf)
+                .unwrap()
+                .file_attributes()
+                & FILE_ATTRIBUTE_REPARSE_POINT,
+            0
+        );
+        assert_eq!(inventory(&outside).unwrap(), before);
+        fs::remove_dir(&parent).unwrap();
+
+        let existing = root.join("existing");
+        fs::create_dir(&existing).unwrap();
+        assert!(
+            link_dir(&root, &existing, &target).is_err(),
+            "FILE_CREATE must refuse an existing ordinary leaf"
+        );
+        assert_eq!(
+            fs::symlink_metadata(&existing).unwrap().file_attributes()
+                & FILE_ATTRIBUTE_REPARSE_POINT,
+            0
+        );
+        let fresh = root.join("fresh");
+        link_dir(&root, &fresh, &target).unwrap();
+        assert_ne!(
+            fs::symlink_metadata(&fresh).unwrap().file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT,
+            0
+        );
+        fs::remove_dir(fresh).unwrap();
     }
 }
 
