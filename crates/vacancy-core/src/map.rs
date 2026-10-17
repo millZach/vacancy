@@ -267,6 +267,9 @@ pub fn scan_for_map(
     // Building the map takes a moment on a big drive; a cancel during it stops it and means no map.
     let (categories, overview) =
         build_map(&snapshot, env, volume, &|| cancel.is_cancelled()).ok_or(ScanError::Cancelled)?;
+    if cancel.is_cancelled() {
+        return Err(ScanError::Cancelled);
+    }
     Ok(ScannedVolume {
         snapshot,
         categories,
@@ -294,6 +297,10 @@ pub(crate) fn build_map(
         used_bytes: scanned,
     });
     let overview = overview_until(snapshot, &categories, info, stop)?;
+    // A cancel that came during the last step still means no map.
+    if stop() {
+        return None;
+    }
     Some((categories, overview))
 }
 
@@ -399,7 +406,8 @@ pub fn browse(
     )
     .unwrap_or_default();
     Ok(MapFolder {
-        item: map_item(snapshot, categories, &item),
+        item: map_item(snapshot, categories, &item, &|| false)
+            .ok_or_else(|| MapError::NoSuchFolder(id.to_owned()))?,
         category: categories.category_of(dir),
         children,
     })
@@ -429,9 +437,6 @@ pub fn scan_update(progress: &ScanProgress<'_>, preview: Option<&Categories>) ->
     }
 }
 
-/// Items mapped between checks for a stop request (each may look into its folder).
-const CHECK_EVERY_ITEMS: usize = 64;
-
 /// Keeps the biggest `keep` items (sorted biggest first) and folds the rest into one tile, unless only one would
 /// be folded. Only the kept items are mapped; the folded ones are just summed. `None` if `stop` says so.
 fn fold(
@@ -449,11 +454,11 @@ fn fold(
         keep
     };
     let mut out = Vec::with_capacity(cut + 1);
-    for (n, item) in shown[..cut].iter().enumerate() {
-        if n % CHECK_EVERY_ITEMS == 0 && stop() {
+    for item in &shown[..cut] {
+        if stop() {
             return None;
         }
-        out.push(map_item(snapshot, categories, item));
+        out.push(map_item(snapshot, categories, item, stop)?);
     }
     let rest = &shown[cut..];
     if !rest.is_empty() {
@@ -473,9 +478,15 @@ fn fold(
     Some(out)
 }
 
-fn map_item(snapshot: &Snapshot, categories: &Categories, item: &Item) -> MapItem {
+/// One item as a map tile, or `None` if `stop` says so while looking into its folder.
+fn map_item(
+    snapshot: &Snapshot,
+    categories: &Categories,
+    item: &Item,
+    stop: &dyn Fn() -> bool,
+) -> Option<MapItem> {
     let last_used = millis(item.last_used);
-    match item.at {
+    Some(match item.at {
         ItemRef::Dir(dir) => {
             let root = snapshot.parent(dir).is_none();
             let name = if root && snapshot.root_of(dir).kind == RootKind::SealedSystem {
@@ -483,10 +494,7 @@ fn map_item(snapshot: &Snapshot, categories: &Categories, item: &Item) -> MapIte
             } else {
                 snapshot.name(dir).to_string_lossy().into_owned()
             };
-            let browsable = categories
-                .contents(snapshot, dir)
-                .iter()
-                .any(|c| matches!(c.at, ItemRef::Dir(_) | ItemRef::File(_)));
+            let browsable = categories.has_parts(snapshot, dir, stop)?;
             MapItem {
                 id: format!("d{}", dir.index()),
                 name,
@@ -527,7 +535,7 @@ fn map_item(snapshot: &Snapshot, categories: &Categories, item: &Item) -> MapIte
                 note: None,
             }
         }
-    }
+    })
 }
 
 fn hidden_item(bytes: u64, unreadable: u64, samples: &[String], mac: bool) -> MapItem {
@@ -595,7 +603,7 @@ mod tests {
                 .join(format!("d{:02}", i % 40))
                 .join(format!("e{i}"));
             fs::create_dir_all(&dir).unwrap();
-            if i % 10 == 0 {
+            if i % 10 == 0 || i < 40 {
                 fs::write(dir.join("f.bin"), [1u8; 4096]).unwrap();
             }
         }
@@ -609,46 +617,84 @@ mod tests {
         (fx, snapshot)
     }
 
-    /// A cancel that arrives while the map is being built stops it at the next check, inside categorizing or
-    /// the overview, not only once each step has run to the end.
+    /// Counts stop checks, and says stop from check number `at` on (never, if `at` is 0).
+    fn stopper(checks: &Cell<u32>, at: u32) -> impl Fn() -> bool + '_ {
+        move || {
+            checks.set(checks.get() + 1);
+            at != 0 && checks.get() >= at
+        }
+    }
+
+    /// A cancel that arrives while categorizing stops it at the next check, not once the whole step has run.
     #[test]
-    fn building_the_map_stops_part_way_when_cancelled() {
+    fn categorizing_stops_part_way_when_cancelled() {
         let (fx, snapshot) = tree(3000);
         let env = Env::windows(fx.path(), "alex");
-        let checks = Cell::new(0u32);
-        let count = || {
-            checks.set(checks.get() + 1);
-            false
-        };
-        let (categories, overview) =
-            build_map(&snapshot, &env, fx.path(), &count).expect("the map");
+        let checks = Cell::new(0);
+        categorize_until(&snapshot, &env, &stopper(&checks, 0)).expect("categories");
         let all = checks.get();
-        assert!(
-            all >= 9,
-            "checked inside categorizing and the overview, not only between them: {all}"
-        );
-        assert!(!overview.categories.is_empty());
-        assert_eq!(
-            categories.list().iter().map(|c| c.bytes).sum::<u64>(),
-            snapshot.stats().bytes
-        );
-
-        // The cancel lands at different points: right away, inside categorizing, inside the overview.
-        for cancel_at in [1, 2, all / 2, all - 1] {
+        assert!(all >= 6, "checked all along each pass: {all}");
+        for at in [1, all / 2, all] {
             checks.set(0);
-            let stop = || {
-                checks.set(checks.get() + 1);
-                checks.get() >= cancel_at
-            };
-            assert!(
-                build_map(&snapshot, &env, fx.path(), &stop).is_none(),
-                "cancelled at check {cancel_at}"
-            );
-            assert_eq!(
-                checks.get(),
-                cancel_at,
-                "nothing more was built after the cancel"
-            );
+            assert!(categorize_until(&snapshot, &env, &stopper(&checks, at)).is_none());
+            assert_eq!(checks.get(), at, "nothing more was done after the cancel");
         }
+    }
+
+    /// The same for building the overview, on its own: it checks before every tile it maps and while looking into
+    /// a tile's folder, so a cancel there stops it at once.
+    #[test]
+    fn the_overview_stops_part_way_when_cancelled() {
+        let (fx, snapshot) = tree(3000);
+        let categories = crate::categorize(&snapshot, &Env::windows(fx.path(), "alex"));
+        let volume = || VolumeInfo {
+            name: "Test".into(),
+            mount_point: fx.path().display().to_string(),
+            total_bytes: 1 << 40,
+            used_bytes: snapshot.stats().bytes,
+        };
+        let checks = Cell::new(0);
+        let map = overview_until(&snapshot, &categories, volume(), &stopper(&checks, 0))
+            .expect("the overview");
+        let tiles = map.categories.iter().map(|c| c.items.len()).sum::<usize>() as u32;
+        let all = checks.get();
+        assert!(tiles >= 40, "the fixture maps many tiles: {tiles}");
+        assert!(
+            all > tiles,
+            "a check before every tile, and inside its folder: {all} for {tiles} tiles"
+        );
+        for at in [1, all / 2, all] {
+            checks.set(0);
+            assert!(
+                overview_until(&snapshot, &categories, volume(), &stopper(&checks, at)).is_none()
+            );
+            assert_eq!(checks.get(), at, "nothing more was mapped after the cancel");
+        }
+    }
+
+    /// A cancel that comes after the last step has started still means no map: the final check catches it.
+    #[test]
+    fn a_cancel_during_the_last_step_still_means_no_map() {
+        let (fx, snapshot) = tree(200);
+        let env = Env::windows(fx.path(), "alex");
+        let checks = Cell::new(0);
+        let categories =
+            categorize_until(&snapshot, &env, &stopper(&checks, 0)).expect("categories");
+        let in_categorize = checks.get();
+        checks.set(0);
+        let info = volume_info(fx.path()).expect("volume");
+        overview_until(&snapshot, &categories, info, &stopper(&checks, 0)).expect("the overview");
+        let in_overview = checks.get();
+
+        // One check before categorizing, the steps' own, and one after the last step.
+        let all = 1 + in_categorize + in_overview + 1;
+        checks.set(0);
+        build_map(&snapshot, &env, fx.path(), &stopper(&checks, 0)).expect("the map");
+        assert_eq!(checks.get(), all, "a final check after the overview");
+        checks.set(0);
+        assert!(
+            build_map(&snapshot, &env, fx.path(), &stopper(&checks, all)).is_none(),
+            "a cancel after the overview's last check still means no map"
+        );
     }
 }

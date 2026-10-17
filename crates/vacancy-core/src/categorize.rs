@@ -227,6 +227,31 @@ impl Categories {
         out
     }
 
+    /// Whether opening a folder's tile would show anything but its loose files: a subfolder or a kept file that
+    /// is part of its item. Stops early on the first one; `None` if `stop` says so (asked every [`CHECK_EVERY`]
+    /// subfolders, so a very wide folder doesn't hold up a cancel).
+    pub(crate) fn has_parts(
+        &self,
+        snapshot: &Snapshot,
+        dir: DirId,
+        stop: &dyn Fn() -> bool,
+    ) -> Option<bool> {
+        for (n, child) in snapshot.children(dir).enumerate() {
+            if n % CHECK_EVERY == 0 && stop() {
+                return None;
+            }
+            let sums = self.residual[child.index()];
+            if !self.node[child.index()].item_root && (sums.bytes > 0 || sums.files > 0) {
+                return Some(true);
+            }
+        }
+        Some(
+            snapshot
+                .files(dir)
+                .any(|f| !self.file_rules.contains_key(&f)),
+        )
+    }
+
     /// A folder's numbers as an item (what its map tile shows), or `None` if it is not part of one (a container).
     pub fn item_of(&self, dir: DirId) -> Option<Item> {
         let node = self.node[dir.index()];
