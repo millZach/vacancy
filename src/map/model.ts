@@ -103,20 +103,7 @@ function freeRegion(bytes: number): Region {
     blurb: 'Unused space on this disk.',
     free: true,
     pending: false,
-    leaves: [
-      {
-        id: 'free:space',
-        regionId: FREE_ID,
-        kind: 'free',
-        name: 'Free space',
-        path: '',
-        bytes,
-        lastUsed: null,
-        browsable: false,
-        note: null,
-        shade: 0,
-      },
-    ],
+    leaves: [soleLeaf('free:space', FREE_ID, 'free', 'Free space', bytes)],
   };
 }
 
@@ -133,22 +120,32 @@ function finish(regions: Region[], volume: VolumeInfo): AtlasModel {
   };
 }
 
+/** A category's region, holding `leaves`. */
+function categoryRegion(c: CategoryTotal, blurb: string, leaves: Leaf[]): Region {
+  return {
+    id: c.id,
+    category: c.id,
+    categoryName: c.name,
+    name: c.name,
+    bytes: c.bytes,
+    protected: c.protected,
+    blurb,
+    free: false,
+    pending: false,
+    leaves,
+  };
+}
+
+/** A region's only tile: free space, or (while scanning) a category's bytes so far or the space not reached. */
+function soleLeaf(id: string, regionId: string, kind: 'free' | 'scanned', name: string, bytes: number): Leaf {
+  return { id, regionId, kind, name, path: '', bytes, lastUsed: null, browsable: false, note: null, shade: 0 };
+}
+
 /** The overview: one region per category, biggest first, then free space. */
 export function overviewModel(overview: Overview): AtlasModel {
   const regions: Region[] = overview.categories
     .filter((c) => c.bytes > 0)
-    .map((c) => ({
-      id: c.id,
-      category: c.id,
-      categoryName: c.name,
-      name: c.name,
-      bytes: c.bytes,
-      protected: c.protected,
-      blurb: c.blurb,
-      free: false,
-      pending: false,
-      leaves: shaded(c.items.map((i) => leaf(i, c.id))),
-    }))
+    .map((c) => categoryRegion(c, c.blurb, shaded(c.items.map((i) => leaf(i, c.id)))))
     .sort((a, b) => b.bytes - a.bytes);
   regions.push(freeRegion(overview.freeBytes));
   return finish(regions, overview.volume);
@@ -161,31 +158,7 @@ export function overviewModel(overview: Overview): AtlasModel {
 export function scanModel(volume: VolumeInfo, preview: CategoryTotal[], scannedBytes: number): AtlasModel {
   const regions: Region[] = preview
     .filter((c) => c.bytes > 0)
-    .map((c) => ({
-      id: c.id,
-      category: c.id,
-      categoryName: c.name,
-      name: c.name,
-      bytes: c.bytes,
-      protected: c.protected,
-      blurb: '',
-      free: false,
-      pending: false,
-      leaves: [
-        {
-          id: `scan:${c.id}`,
-          regionId: c.id,
-          kind: 'scanned' as const,
-          name: c.name,
-          path: '',
-          bytes: c.bytes,
-          lastUsed: null,
-          browsable: false,
-          note: null,
-          shade: 0,
-        },
-      ],
-    }))
+    .map((c) => categoryRegion(c, '', [soleLeaf(`scan:${c.id}`, c.id, 'scanned', c.name, c.bytes)]))
     .sort((a, b) => b.bytes - a.bytes);
   const left = Math.max(0, volume.usedBytes - scannedBytes);
   if (left > 0) {
@@ -199,20 +172,7 @@ export function scanModel(volume: VolumeInfo, preview: CategoryTotal[], scannedB
       blurb: '',
       free: false,
       pending: true,
-      leaves: [
-        {
-          id: 'pending:space',
-          regionId: PENDING_ID,
-          kind: 'scanned',
-          name: 'Not scanned yet',
-          path: '',
-          bytes: left,
-          lastUsed: null,
-          browsable: false,
-          note: null,
-          shade: 0,
-        },
-      ],
+      leaves: [soleLeaf('pending:space', PENDING_ID, 'scanned', 'Not scanned yet', left)],
     });
   }
   regions.push(freeRegion(Math.max(0, volume.totalBytes - volume.usedBytes)));
