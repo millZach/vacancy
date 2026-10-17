@@ -585,6 +585,24 @@ mod tests {
         }
     }
 
+    /// A cloud root recorded with a precomposed `é` (as Dropbox's `info.json` writes it) protects the folder a
+    /// macOS listing spells with `e` and a combining accent.
+    #[test]
+    fn one_name_in_either_unicode_form() {
+        let mut env = Env::macos(&root(), "alex");
+        env.cloud.push(CloudRoot {
+            provider: "Dropbox".into(),
+            path: at("Users/alex/Caf\u{e9} Sync"),
+        });
+        let g = Guard::new(&env, &root());
+        assert!(protected(
+            g.check(&at("Users/alex/Cafe\u{301} Sync/node_modules"))
+        ));
+        assert!(protected(
+            g.check(&at("Users/alex/Caf\u{e9} Sync/node_modules"))
+        ));
+    }
+
     /// On a case-sensitive volume `/Users/ALEX` is another folder than `/Users/alex`: only the exact spelling is
     /// allowed. Deny entries still match every spelling.
     #[test]

@@ -9,6 +9,8 @@
 //!   ever blocks more. The *exact* form keeps case and is what allowed roots and known places are compared with on
 //!   a case-sensitive volume ([`Case::Sensitive`]), so `/Users/ALEX/project` is not inside an allowed `/Users/alex`
 //!   there. NTFS and default APFS volumes are [`Case::Insensitive`] and use the folded form throughout.
+//! - **Unicode.** Names are compared in NFC, so a precomposed `é` and `e` followed by a combining accent are one
+//!   name, as they are to APFS and HFS+.
 //! - **Prefixes.** `\\?\C:\x`, `\\.\C:\x` and `C:\x` are the same place, and so are `\\?\UNC\srv\share` and
 //!   `\\srv\share`.
 //! - **Separators.** Trailing separators and `.` names are dropped.
@@ -21,6 +23,8 @@
 use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::path::{Component, Path};
+
+use unicode_normalization::UnicodeNormalization;
 
 /// How a volume compares names.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -151,12 +155,15 @@ pub(crate) fn name_key(name: &OsStr) -> String {
     name_key_in(name, Case::Insensitive)
 }
 
-/// A file or folder name as a key for a volume that compares names this way.
+/// A file or folder name as a key for a volume that compares names this way. Both forms are in Unicode NFC: an `é`
+/// written as one code point (as `info.json` files and most APIs write it) and as `e` plus a combining accent (as
+/// some macOS listings return it) are one name. APFS and HFS+ treat them so; on NTFS they could be two names, but
+/// there only the folded form is used, and for deny entries a shared key only ever blocks more.
 pub(crate) fn name_key_in(name: &OsStr, case: Case) -> String {
-    let text = name.to_string_lossy();
+    let text: String = name.to_string_lossy().nfc().collect();
     let key = match case {
         Case::Insensitive => text.to_lowercase(),
-        Case::Sensitive => text.into_owned(),
+        Case::Sensitive => text,
     };
     if cfg!(windows) {
         key.trim_end_matches(['.', ' ']).to_owned()

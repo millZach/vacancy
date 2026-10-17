@@ -653,6 +653,28 @@ mod guard {
         }
     }
 
+    /// The cloud root's settings spell `é` as one code point; the folder on disk spells it as `e` plus a combining
+    /// accent, as macOS listings can. It is still the cloud root.
+    #[test]
+    fn a_cloud_root_in_the_other_unicode_form() {
+        let fx = Fixture::new();
+        let on_disk = "Users/alex/Cafe\u{301} Sync";
+        bait(&fx, on_disk);
+        for mut env in [win(&fx), mac(&fx)] {
+            env.cloud.push(CloudRoot {
+                provider: "Dropbox".into(),
+                path: fx.path("Users/alex/Caf\u{e9} Sync"),
+            });
+            let (snap, proposals) = run(&fx, &env, &moment(&[]));
+            assert_eq!(
+                inside(&fx, &snap, &proposals, on_disk),
+                Vec::<String>::new(),
+                "{:?}",
+                env.platform
+            );
+        }
+    }
+
     #[test]
     fn os_folders() {
         let fx = Fixture::new();
