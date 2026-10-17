@@ -17,8 +17,8 @@ mod text;
 mod volume;
 
 pub use categorize::{
-    Case, Categories, Category, CategoryId, CloudRoot, Env, Item, ItemRef, KnownFolders, Platform,
-    categorize,
+    Categories, Category, CategoryId, CloudRoot, Env, Item, ItemRef, KnownFolders, NameRule,
+    Platform, categorize,
 };
 pub use guard::{Denied, Guard};
 pub use machine::machine_name;

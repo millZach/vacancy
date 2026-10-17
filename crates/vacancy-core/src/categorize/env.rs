@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::pathkey::Case;
+use crate::pathkey::NameRule;
 
 /// Which platform's rules apply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -67,8 +67,8 @@ pub struct Env {
     /// Windows only: `%APPDATA%` (Roaming).
     pub app_data: PathBuf,
     /// How the volume compares names. Allowed roots and known places are matched this way; deny entries always
-    /// ignore case.
-    pub case: Case,
+    /// ignore case and Unicode form.
+    pub names: NameRule,
 }
 
 impl Env {
@@ -94,7 +94,7 @@ impl Env {
             program_files: vec![root.join("Program Files"), root.join("Program Files (x86)")],
             program_data: root.join("ProgramData"),
             app_data: home.join("AppData").join("Roaming"),
-            case: Case::Insensitive,
+            names: NameRule::FoldCase,
             local_app_data: local,
             home,
         }
@@ -126,7 +126,7 @@ impl Env {
             program_data: root.join("Library"),
             local_app_data: library.join("Application Support"),
             app_data: library.join("Application Support"),
-            case: Case::Insensitive,
+            names: NameRule::FoldCaseAndForm,
             home,
         }
     }
@@ -192,9 +192,44 @@ pub(crate) fn dropbox_paths(info: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// How a Mac volume compares names, from its file system (`statfs`'s type name) and whether it tells case apart
+/// (`pathconf`'s `_PC_CASE_SENSITIVE`; `None` when it can't say). APFS and HFS+ treat both Unicode forms of a name
+/// as one name; other file systems (exFAT, FAT, SMB shares) may not, so they fold case at most. Whatever can't say
+/// is compared more exactly, which allows less.
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) fn mac_name_rule(fs_type: Option<&str>, case_sensitive: Option<bool>) -> NameRule {
+    let apple = matches!(fs_type, Some("apfs" | "hfs"));
+    match (apple, case_sensitive) {
+        (true, Some(false)) => NameRule::FoldCaseAndForm,
+        (true, _) => NameRule::FoldForm,
+        (false, Some(false)) => NameRule::FoldCase,
+        (false, _) => NameRule::Exact,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_apple_volumes_fold_the_unicode_form() {
+        assert_eq!(
+            mac_name_rule(Some("apfs"), Some(false)),
+            NameRule::FoldCaseAndForm
+        );
+        assert_eq!(mac_name_rule(Some("hfs"), Some(true)), NameRule::FoldForm);
+        assert_eq!(mac_name_rule(Some("apfs"), None), NameRule::FoldForm);
+        assert_eq!(
+            mac_name_rule(Some("exfat"), Some(false)),
+            NameRule::FoldCase
+        );
+        assert_eq!(
+            mac_name_rule(Some("smbfs"), Some(false)),
+            NameRule::FoldCase
+        );
+        assert_eq!(mac_name_rule(Some("msdos"), None), NameRule::Exact);
+        assert_eq!(mac_name_rule(None, None), NameRule::Exact);
+    }
 
     #[test]
     fn names_sync_folders_by_service() {
@@ -607,7 +642,7 @@ mod detect {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let mut env = Env::macos(root, &user);
-        env.case = case_of(root);
+        env.names = names_of(root);
         env.known = super::KnownFolders {
             downloads: home.join("Downloads"),
             documents: home.join("Documents"),
@@ -652,25 +687,40 @@ mod detect {
         env
     }
 
-    /// Whether the volume at `root` tells names apart by case. If it can't say, it is taken to: allowed roots then
-    /// match only exact spellings, which allows less.
-    fn case_of(root: &Path) -> super::Case {
+    /// How the volume at `root` compares names (see [`super::mac_name_rule`]).
+    fn names_of(root: &Path) -> super::NameRule {
         use std::os::unix::ffi::OsStrExt;
         let Ok(path) = std::ffi::CString::new(root.as_os_str().as_bytes()) else {
-            return super::Case::Sensitive;
+            return super::NameRule::Exact;
         };
         #[cfg(target_os = "macos")]
-        // SAFETY: `path` is NUL-terminated; pathconf only reads it.
-        let answer = unsafe { libc::pathconf(path.as_ptr(), libc::_PC_CASE_SENSITIVE) };
-        #[cfg(not(target_os = "macos"))]
-        let answer = {
-            let _ = path;
-            1
+        let (fs_type, case_sensitive) = {
+            // SAFETY: `path` is NUL-terminated; pathconf only reads it.
+            let answer = unsafe { libc::pathconf(path.as_ptr(), libc::_PC_CASE_SENSITIVE) };
+            let case_sensitive = match answer {
+                0 => Some(false),
+                1 => Some(true),
+                _ => None,
+            };
+            // SAFETY: an all-zero statfs is a valid value of a plain C struct.
+            let mut stat: libc::statfs = unsafe { std::mem::zeroed() };
+            // SAFETY: `path` is NUL-terminated and `stat` is a statfs to fill in.
+            let fs_type = (unsafe { libc::statfs(path.as_ptr(), &mut stat) } == 0).then(|| {
+                let name: Vec<u8> = stat
+                    .f_fstypename
+                    .iter()
+                    .take_while(|&&c| c != 0)
+                    .map(|&c| c as u8)
+                    .collect();
+                String::from_utf8_lossy(&name).into_owned()
+            });
+            (fs_type, case_sensitive)
         };
-        if answer == 0 {
-            super::Case::Insensitive
-        } else {
-            super::Case::Sensitive
-        }
+        #[cfg(not(target_os = "macos"))]
+        let (fs_type, case_sensitive): (Option<String>, Option<bool>) = {
+            let _ = path;
+            (None, None)
+        };
+        super::mac_name_rule(fs_type.as_deref(), case_sensitive)
     }
 }

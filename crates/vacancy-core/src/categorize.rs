@@ -23,7 +23,7 @@ use crate::snapshot::{DirFlags, DirId, FileId, Markers, RootKind, Snapshot, Unix
 mod catalog;
 mod env;
 
-pub use crate::pathkey::Case;
+pub use crate::pathkey::NameRule;
 pub use env::{CloudRoot, Env, KnownFolders, Platform};
 
 /// The categories, in the order the map lists them when sizes tie.
@@ -393,7 +393,7 @@ pub(crate) fn categorize_until(
     stop: &dyn Fn() -> bool,
 ) -> Option<Categories> {
     let rules = catalog::rules(env);
-    let trie = Trie::build(&rules, env.case);
+    let trie = Trie::build(&rules, env.names);
     let n = snapshot.dir_count();
     let mut node = vec![
         Node {
@@ -802,7 +802,7 @@ fn ends_with_ignore_case(name: &str, suffix: &str) -> bool {
         && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
-/// Known locations, keyed by path components compared without case.
+/// Known locations, keyed by path components compared as the volume compares names.
 struct Trie {
     nodes: Vec<TrieNode>,
 }
@@ -814,7 +814,7 @@ struct TrieNode {
 }
 
 impl Trie {
-    fn build(rules: &[catalog::Rule], case: Case) -> TrieWithRules<'_> {
+    fn build(rules: &[catalog::Rule], names: NameRule) -> TrieWithRules<'_> {
         let mut trie = Trie {
             nodes: vec![TrieNode::default()],
         };
@@ -824,7 +824,7 @@ impl Trie {
                 continue;
             };
             let mut at = 0;
-            for key in key.keys_in(case).iter().cloned() {
+            for key in key.keys_in(names).iter().cloned() {
                 at = match trie.nodes[at].children.get(&key) {
                     Some(&next) => next,
                     None => {
@@ -838,21 +838,21 @@ impl Trie {
             // The first rule for a place wins; catalogs list the specific before the general.
             trie.nodes[at].rule.get_or_insert(i);
         }
-        TrieWithRules { trie, rules, case }
+        TrieWithRules { trie, rules, names }
     }
 }
 
 struct TrieWithRules<'r> {
     trie: Trie,
     rules: &'r [catalog::Rule],
-    /// How the volume compares names: known places match exact spellings on a case-sensitive one.
-    case: Case,
+    /// How the volume compares names: known places match only the spellings the volume treats as theirs.
+    names: NameRule,
 }
 
 impl TrieWithRules<'_> {
     fn find(&self, path: &Path) -> Option<usize> {
         let mut at = 0;
-        for key in PathKey::of(path)?.keys_in(self.case) {
+        for key in PathKey::of(path)?.keys_in(self.names).iter() {
             at = *self.trie.nodes[at].children.get(key)?;
         }
         Some(at)
@@ -863,7 +863,7 @@ impl TrieWithRules<'_> {
         if node.children.is_empty() {
             return None;
         }
-        node.children.get(&name_key_in(name, self.case)).copied()
+        node.children.get(&name_key_in(name, self.names)).copied()
     }
 
     fn has_children(&self, at: usize) -> bool {

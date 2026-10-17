@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use support::{Fixture, KIB, MIB, age};
 use vacancy_core::{
-    Case, CategoryId, CloudRoot, DriveKind, Env, ItemKind, ItemRef, Moment, Proposal,
+    CategoryId, CloudRoot, DriveKind, Env, ItemKind, ItemRef, Moment, NameRule, Proposal,
     ProposalAction, ProposalSource, Proposals, Risk, Snapshot, VolumeInfo, categorize, overview,
     propose,
 };
@@ -1068,7 +1068,7 @@ mod guard {
         let fx = Fixture::new();
         bait(&fx, "Users/Alex/code");
         let mut env = mac(&fx);
-        env.case = Case::Sensitive;
+        env.names = NameRule::FoldForm;
         let (snap, proposals) = run(&fx, &env, &moment(&[]));
         assert_eq!(all_targets(&fx, &snap, &proposals), Vec::<String>::new());
         // The same tree on a case-insensitive volume is the home folder.
@@ -1076,6 +1076,23 @@ mod guard {
         assert_eq!(
             all_targets(&fx, &snap, &proposals),
             vec!["Users/Alex/code/proj/node_modules".to_owned()]
+        );
+    }
+
+    /// NTFS keeps `Jos\u{e9}` (precomposed) and `Jose\u{301}` (with a combining accent) apart: they are two folders,
+    /// so the second is not the home folder spelled the first way. APFS treats both as one name.
+    #[test]
+    fn only_apple_volumes_treat_both_unicode_forms_as_one_name() {
+        let fx = Fixture::new();
+        bait(&fx, "Users/Jose\u{301}/code");
+        let env = Env::windows(fx.root(), "Jos\u{e9}");
+        let (snap, proposals) = run(&fx, &env, &moment(&[]));
+        assert_eq!(all_targets(&fx, &snap, &proposals), Vec::<String>::new());
+        let env = Env::macos(fx.root(), "Jos\u{e9}");
+        let (snap, proposals) = run(&fx, &env, &moment(&[]));
+        assert_eq!(
+            all_targets(&fx, &snap, &proposals),
+            vec!["Users/Jose\u{301}/code/proj/node_modules".to_owned()]
         );
     }
 
