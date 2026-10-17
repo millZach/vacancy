@@ -1,5 +1,5 @@
 import { Check, ChevronDown, CircleHelp, ShieldCheck, Sparkles, X } from 'lucide-react';
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import type { AdvisorAvailability } from '../bindings/AdvisorAvailability';
 import type { AdvisorProvider } from '../bindings/AdvisorProvider';
@@ -49,7 +49,8 @@ export function AdvisorDialog({ state, onClose, onRetry }: { state: AdvisorState
   const preview = state.phase === 'ready' && state.status.discovery === 'fixture';
   const unsupported = state.phase === 'ready' && state.status.providers.some((p) => p.availability.state === 'unsupported');
 
-  useEffect(() => {
+  // Release focus/inert during unmount, before a deferred confirmation takes its safe initial focus.
+  useLayoutEffect(() => {
     const before = document.activeElement;
     const host = document.querySelector('.shell');
     const wasInert = host?.hasAttribute('inert') ?? false;

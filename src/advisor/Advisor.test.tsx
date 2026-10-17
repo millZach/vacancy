@@ -2,8 +2,9 @@ import { act, render, renderHook, screen, waitFor, within } from '@testing-libra
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../App';
-import { BridgeProvider, createMockBridge, fixtures, type AdvisorStatus, type Bridge } from '../bridge';
+import { BridgeProvider, createMockBridge, fixtures, type AdvisorStatus, type Bridge, type PlanSummary } from '../bridge';
 import { DrivesProvider } from '../drives/DrivesProvider';
+import { plan } from '../test/run';
 import { useAdvisorStatus } from './useAdvisorStatus';
 
 const renderApp = (bridge: Bridge) => render(<BridgeProvider bridge={bridge}><DrivesProvider><App /></DrivesProvider></BridgeProvider>);
@@ -23,6 +24,60 @@ beforeEach(() => {
 });
 
 describe('read-only advisor options', () => {
+  it.each(['windows', 'macos'] as const)('keeps a delayed %s confirmation out of the advisor keyboard path', async (platform) => {
+    const fixture = fixtures[platform];
+    const bridge = createMockBridge(fixture, { scanMs: 0 });
+    let complete!: (made: PlanSummary) => void;
+    vi.spyOn(bridge, 'buildPlan').mockImplementation(() => new Promise<PlanSummary>((resolve) => { complete = resolve; }));
+    const run = vi.spyOn(bridge, 'runPlan');
+    renderApp(bridge);
+    await userEvent.click(await screen.findByRole('button', { name: `Scan ${fixture.volumes[0]!.name}` }));
+    await screen.findByLabelText('Map key');
+    await userEvent.click(screen.getByRole('button', { name: 'Build a plan' }));
+    await userEvent.click(within(screen.getByRole('complementary', { name: 'Plan' })).getByRole('button', { name: /^Free / }));
+    const dialog = await openHeader();
+    const close = within(dialog).getByRole('button', { name: 'Close AI options' });
+    expect(close).toHaveFocus();
+    await act(async () => { complete({ ...plan, mountPoint: fixture.volumes[0]!.mountPoint }); await Promise.resolve(); });
+    expect(close).toHaveFocus();
+    expect(screen.queryByRole('alertdialog', { hidden: true })).toBeNull();
+    await userEvent.tab();
+    expect(within(dialog).getByRole('button', { name: 'Why does AI stay off?' })).toHaveFocus();
+    await userEvent.keyboard('{Enter}');
+    expect(within(dialog).getByRole('button', { name: 'Why does AI stay off?' })).toHaveAttribute('aria-expanded', 'true');
+    expect(run).not.toHaveBeenCalled();
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    const confirmation = screen.getByRole('alertdialog');
+    expect(within(confirmation).getByRole('button', { name: 'Go back' })).toHaveFocus();
+    await userEvent.keyboard('{Enter}');
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it.each(['windows', 'macos'] as const)('keeps a delayed %s plan error behind the advisor without a confirmation', async (platform) => {
+    const fixture = fixtures[platform];
+    const bridge = createMockBridge(fixture, { scanMs: 0 });
+    let fail!: (error: Error) => void;
+    vi.spyOn(bridge, 'buildPlan').mockImplementation(() => new Promise<PlanSummary>((_resolve, reject) => { fail = reject; }));
+    const run = vi.spyOn(bridge, 'runPlan');
+    renderApp(bridge);
+    await userEvent.click(await screen.findByRole('button', { name: `Scan ${fixture.volumes[0]!.name}` }));
+    await screen.findByLabelText('Map key');
+    await userEvent.click(screen.getByRole('button', { name: 'Build a plan' }));
+    await userEvent.click(within(screen.getByRole('complementary', { name: 'Plan' })).getByRole('button', { name: /^Free / }));
+    const dialog = await openHeader();
+    await act(async () => { fail(new Error('Plan check failed.')); await Promise.resolve(); });
+    expect(within(dialog).getByRole('button', { name: 'Close AI options' })).toHaveFocus();
+    expect(screen.queryByRole('alertdialog', { hidden: true })).toBeNull();
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Rules only' })).toHaveFocus();
+    expect(within(screen.getByRole('complementary', { name: 'Plan' })).getByRole('alert')).toHaveTextContent('Plan check failed.');
+    expect(screen.queryByRole('alertdialog', { hidden: true })).toBeNull();
+    expect(run).not.toHaveBeenCalled();
+  });
+
   it('uses actual synthetic rows, preserves privacy details, and returns focus to the scan-note trigger', async () => {
     const bridge = createMockBridge(fixtures.windows);
     const scan = vi.spyOn(bridge, 'scan');

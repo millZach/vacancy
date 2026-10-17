@@ -119,6 +119,45 @@ try {
     await shot('map-open');
     await resume.click();
     assert(await page.getByRole('button', { name: 'Rules only' }).evaluate((el) => el === document.activeElement));
+    // A plan check may finish after the read-only advisor opens. Only its visible modal may own focus.
+    await page.goto(`${url}&delay=1800`);
+    await page.getByRole('button', { name: /^Scan / }).click();
+    await page.locator('.atlas.is-map').waitFor();
+    await page.getByRole('button', { name: 'Build a plan' }).click();
+    const free = page.getByRole('complementary', { name: 'Plan' }).getByRole('button', { name: /^Free / });
+    await free.click();
+    await page.locator('.tray-later').waitFor();
+    await page.getByRole('button', { name: 'Rules only' }).click();
+    await dialog.waitFor();
+    await page.locator('.tray-later').waitFor({ state: 'detached' });
+    assert.equal(await page.locator('[role="alertdialog"]').count(), 0, 'Pending confirmation is not mounted behind advisor');
+    assert(await close.evaluate((el) => el === document.activeElement), 'Plan result cannot steal advisor focus');
+    await shot('plan-ready-advisor');
+    await page.keyboard.press('Tab');
+    assert(await why.evaluate((el) => el === document.activeElement));
+    await page.keyboard.press('Enter');
+    assert.equal(await why.getAttribute('aria-expanded'), 'true');
+    assert.equal(await page.getByRole('complementary', { name: 'Run' }).count(), 0, 'Advisor keys never start a run');
+    await page.keyboard.press('Escape');
+    const confirmation = page.getByRole('alertdialog');
+    await confirmation.waitFor();
+    const back = confirmation.getByRole('button', { name: 'Go back' });
+    assert(await back.evaluate((el) => el === document.activeElement), 'Deferred confirmation focuses the safe answer after advisor cleanup');
+    await confirmation.evaluate(async (el) => {
+      await Promise.all(el.parentElement.getAnimations({ subtree: true }).map((animation) => animation.finished));
+    });
+    assert.equal(await confirmation.evaluate((el) => getComputedStyle(el).opacity), '1', 'Confirmation entrance is complete before capture');
+    assert(await back.evaluate((el) => el === document.activeElement), 'Safe focus remains after the entrance');
+    await shot('plan-ready-confirm');
+    await page.keyboard.press('Enter');
+    assert.equal(await confirmation.count(), 0);
+    assert.equal(await page.getByRole('complementary', { name: 'Run' }).count(), 0, 'Safe answer leaves the plan unrun');
+    await free.click();
+    await confirmation.waitFor();
+    assert(await back.evaluate((el) => el === document.activeElement), 'Ordinary confirmation retains safe focus');
+    await page.keyboard.press('Escape');
+    assert.equal(await confirmation.count(), 0);
+    assert.equal(await page.getByRole('complementary', { name: 'Plan' }).count(), 1);
     await page.goto(`${url}&advisor=notChecked`);
     await page.getByRole('button', { name: 'AI options' }).click();
     await dialog.getByText('Not checked in fixture mode').first().waitFor();
@@ -147,7 +186,7 @@ try {
     await shot('short-expanded');
     assert.deepEqual(errors, [], 'No page/console errors');
     assert.deepEqual(external, [], 'No external requests');
-    results.push({ fixture, width, height, checks: 'synthetic rows, disabled switches, privacy disclosure, centered placement, loading/error/unchecked, retry, keyboard trap/Escape/refocus, fixed short-window dismissal, rule scan/map, header fit, no external requests' });
+    results.push({ fixture, width, height, checks: 'synthetic rows, disabled switches, privacy disclosure, centered placement, loading/error/unchecked, retry, keyboard trap/Escape/refocus, deferred-plan modal race/keyboard containment/safe focus/no run, ordinary confirm/Escape, fixed short-window dismissal, rule scan/map, header fit, no external requests' });
     await context.close();
   }
   await browser.close();

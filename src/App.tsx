@@ -61,6 +61,7 @@ export function App() {
             drives={ready}
             agent={null}
             advisorNote={<AdvisorNote state={advisor.state} onOpen={() => setAdvisorOpen(true)} />}
+            advisorOpen={advisorOpen}
             planOpen={planOpen}
             onPlanOpen={setPlanOpen}
           />
