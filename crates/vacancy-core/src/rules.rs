@@ -23,7 +23,7 @@ use ts_rs::TS;
 
 use crate::categorize::{CHECK_EVERY, Categories, CategoryId, Env, ItemRef, is_library_folder};
 use crate::guard::Guard;
-use crate::pathkey::{PathKey, name_key};
+use crate::pathkey::{Case, PathKey, name_key, name_key_in};
 use crate::snapshot::{DirFlags, DirId, FileId, Markers, Snapshot, UnixTime};
 use crate::text::group_digits;
 
@@ -236,6 +236,7 @@ pub(crate) fn propose_until(
     personal.extend(PathKey::of(&k.downloads).map(|k| (k, true)));
     let mut engine = Engine {
         snap: snapshot,
+        case: env.case,
         guarded,
         personal,
         claims: Claims::new(snapshot.dir_count()),
@@ -447,6 +448,8 @@ impl Claims {
 
 struct Engine<'a> {
     snap: &'a Snapshot,
+    /// How the volume compares names: places are found by their exact spelling on a case-sensitive one.
+    case: Case,
     guarded: Guarded<'a>,
     /// Places no rule sweeps whole, nor anything holding them (see [`Engine::holds_personal`]), each marked if it
     /// is the Downloads folder.
@@ -759,17 +762,18 @@ impl Engine<'_> {
     /// The folder at `path`, compared as keys (any case, any spelling), if the scan has it.
     fn locate(&self, path: &Path) -> Option<DirId> {
         let key = PathKey::of(path)?;
+        let case = self.case;
         self.snap.roots().iter().find_map(|root| {
             let root_key = PathKey::of(&root.shown)?;
-            if !key.starts_with(&root_key) {
+            if !key.starts_with_in(&root_key, case) {
                 return None;
             }
             let mut at = root.dir;
-            for name in &key.keys()[root_key.keys().len()..] {
+            for name in &key.keys_in(case)[root_key.keys().len()..] {
                 at = self
                     .snap
                     .children(at)
-                    .find(|&c| name_key(self.snap.name(c)) == *name)?;
+                    .find(|&c| name_key_in(self.snap.name(c), case) == *name)?;
             }
             Some(at)
         })
@@ -786,15 +790,15 @@ impl Engine<'_> {
             let Some(root_key) = PathKey::of(&root.shown) else {
                 continue;
             };
-            if !key.starts_with(&root_key) {
+            if !key.starts_with_in(&root_key, self.case) {
                 continue;
             }
             let mut level: Vec<(DirId, Option<DirId>)> = vec![(root.dir, None)];
-            for k in &key.keys()[root_key.keys().len()..] {
+            for k in &key.keys_in(self.case)[root_key.keys().len()..] {
                 let mut next = Vec::new();
                 for (d, owners) in level {
                     for c in self.snap.children(d) {
-                        if glob(k, &name_key(self.snap.name(c))) {
+                        if glob(k, &name_key_in(self.snap.name(c), self.case)) {
                             let owners = owners.or(k.starts_with('*').then_some(d));
                             next.push((c, owners));
                         }

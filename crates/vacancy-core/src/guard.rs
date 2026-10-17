@@ -24,7 +24,7 @@
 
 use std::path::Path;
 
-use crate::categorize::{Env, Platform};
+use crate::categorize::{Case, Env, Platform};
 use crate::pathkey::{PathKey, name_key};
 
 /// Why the Guard refused a place.
@@ -62,6 +62,8 @@ struct Entry {
 #[derive(Clone, Debug)]
 pub struct Guard {
     platform: Platform,
+    /// How the volume compares names, for the allowed roots. Deny entries always ignore case.
+    case: Case,
     allowed: Vec<PathKey>,
     /// On the Windows drive that holds the home folder, the drive's root and the folder of user accounts: what is
     /// inside the folders people make at the root (`C:\Dev`) is allowed too, but never other users' homes.
@@ -133,6 +135,7 @@ impl Guard {
         }
         Self {
             platform: env.platform,
+            case: env.case,
             allowed: g.allowed,
             drive_folders,
             entries: g.entries,
@@ -163,13 +166,13 @@ impl Guard {
         let in_drive_folder = self.drive_folders.as_ref().is_some_and(|(root, users)| {
             let n = root.keys().len();
             key.keys().len() >= n + 2
-                && key.starts_with(root)
+                && key.starts_with_in(root, self.case)
                 && users.as_ref().is_none_or(|u| !key.starts_with(u))
                 && !TOOLS_AT_ROOT.contains(&key.keys()[n].as_str())
                 && !key.keys()[n].starts_with("python")
                 && !key.keys()[n].starts_with("ruby")
         });
-        if !in_drive_folder && !self.allowed.iter().any(|a| key.is_inside(a)) {
+        if !in_drive_folder && !self.allowed.iter().any(|a| key.is_inside_in(a, self.case)) {
             return Err(Denied::OutsideAllowedRoots);
         }
         Ok(())
@@ -580,6 +583,27 @@ mod tests {
         ] {
             assert_eq!(g.check(&at(rel)), Ok(()), "{rel}");
         }
+    }
+
+    /// On a case-sensitive volume `/Users/ALEX` is another folder than `/Users/alex`: only the exact spelling is
+    /// allowed. Deny entries still match every spelling.
+    #[test]
+    fn a_case_sensitive_volume_allows_only_the_exact_spelling() {
+        let mut env = Env::macos(&root(), "alex");
+        env.case = Case::Sensitive;
+        let g = Guard::new(&env, &root());
+        assert_eq!(g.check(&at("Users/alex/code/app/node_modules")), Ok(()));
+        assert_eq!(
+            g.check(&at("Users/ALEX/code/app/node_modules")),
+            Err(Denied::OutsideAllowedRoots)
+        );
+        assert!(
+            protected(g.check(&at("Users/alex/library/MOBILE DOCUMENTS/x"))),
+            "deny entries ignore case"
+        );
+        // A case-insensitive volume treats both spellings as one place.
+        let g = Guard::new(&Env::macos(&root(), "alex"), &root());
+        assert_eq!(g.check(&at("Users/ALEX/code/app/node_modules")), Ok(()));
     }
 
     #[test]

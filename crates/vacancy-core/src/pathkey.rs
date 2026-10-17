@@ -4,8 +4,11 @@
 //!
 //! A key folds away the ways one place can be spelled:
 //!
-//! - **Case.** Names are lowercased. NTFS and default APFS volumes compare names without case. On a case-sensitive
-//!   volume two different folders can share a key, so a deny entry covers both, which only ever blocks more.
+//! - **Case, where the volume ignores it.** Every key has two forms. The *folded* form lowercases names and is what
+//!   deny entries are compared with: on a case-sensitive volume a deny entry then covers every spelling, which only
+//!   ever blocks more. The *exact* form keeps case and is what allowed roots and known places are compared with on
+//!   a case-sensitive volume ([`Case::Sensitive`]), so `/Users/ALEX/project` is not inside an allowed `/Users/alex`
+//!   there. NTFS and default APFS volumes are [`Case::Insensitive`] and use the folded form throughout.
 //! - **Prefixes.** `\\?\C:\x`, `\\.\C:\x` and `C:\x` are the same place, and so are `\\?\UNC\srv\share` and
 //!   `\\srv\share`.
 //! - **Separators.** Trailing separators and `.` names are dropped.
@@ -19,10 +22,32 @@ use std::borrow::Cow;
 use std::ffi::OsStr;
 use std::path::{Component, Path};
 
+/// How a volume compares names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Case {
+    /// `A` and `a` name the same thing: NTFS, default APFS, HFS+.
+    #[default]
+    Insensitive,
+    /// They name different things: case-sensitive APFS.
+    Sensitive,
+}
+
 /// A path as a list of keys: where it starts (`c:`, `\\srv\share` or nothing on Unix), `/` for the root, then each
-/// name, folded. See the module docs.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct PathKey(Vec<String>);
+/// name, in its exact and its folded form. See the module docs. Two keys are equal when their folded forms are:
+/// they may name the same place.
+#[derive(Clone, Debug)]
+pub(crate) struct PathKey {
+    exact: Vec<String>,
+    folded: Vec<String>,
+}
+
+impl PartialEq for PathKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.folded == other.folded
+    }
+}
+
+impl Eq for PathKey {}
 
 /// The key that stands for the root folder after a drive or share.
 const ROOT: &str = "/";
@@ -31,13 +56,20 @@ impl PathKey {
     /// The key for `path`, or `None` when the path doesn't pin down one place (see the module docs).
     pub(crate) fn of(path: &Path) -> Option<Self> {
         let path = long_form(path);
-        let mut keys = Vec::new();
+        let mut exact = Vec::new();
+        let mut folded = Vec::new();
         let mut rooted = false;
         for part in path.components() {
             match part {
-                Component::Prefix(prefix) => keys.push(prefix_key(prefix.kind())?),
+                Component::Prefix(prefix) => {
+                    // Drive letters and server names never depend on case.
+                    let key = prefix_key(prefix.kind())?;
+                    exact.push(key.clone());
+                    folded.push(key);
+                }
                 Component::RootDir => {
-                    keys.push(ROOT.to_owned());
+                    exact.push(ROOT.to_owned());
+                    folded.push(ROOT.to_owned());
                     rooted = true;
                 }
                 Component::CurDir => {}
@@ -46,38 +78,60 @@ impl PathKey {
                     if !rooted {
                         return None; // relative, or relative to a drive's current folder (`C:x`)
                     }
-                    keys.push(name_key_checked(name)?);
+                    exact.push(name_key_checked(name, Case::Sensitive)?);
+                    folded.push(name_key_checked(name, Case::Insensitive)?);
                 }
             }
         }
-        rooted.then_some(Self(keys))
+        rooted.then_some(Self { exact, folded })
     }
 
-    /// Whether this is `base` or a place inside it.
-    pub(crate) fn starts_with(&self, base: &PathKey) -> bool {
-        self.0.len() >= base.0.len() && self.0[..base.0.len()] == base.0[..]
+    /// The keys as a volume that compares names this way sees them, root first.
+    pub(crate) fn keys_in(&self, case: Case) -> &[String] {
+        match case {
+            Case::Insensitive => &self.folded,
+            Case::Sensitive => &self.exact,
+        }
     }
 
-    /// Whether this is a place strictly inside `base`.
-    pub(crate) fn is_inside(&self, base: &PathKey) -> bool {
-        self.0.len() > base.0.len() && self.starts_with(base)
-    }
-
-    /// The keys, root first.
+    /// The folded keys, root first.
     pub(crate) fn keys(&self) -> &[String] {
-        &self.0
+        &self.folded
     }
 
-    /// The key of a place directly inside this one, whose name has the key `name`.
+    /// Whether this is `base` or a place inside it, comparing names as a volume with `case` does.
+    pub(crate) fn starts_with_in(&self, base: &PathKey, case: Case) -> bool {
+        let (me, base) = (self.keys_in(case), base.keys_in(case));
+        me.len() >= base.len() && me[..base.len()] == base[..]
+    }
+
+    /// Whether this is a place strictly inside `base`, comparing names as a volume with `case` does.
+    pub(crate) fn is_inside_in(&self, base: &PathKey, case: Case) -> bool {
+        self.folded.len() > base.folded.len() && self.starts_with_in(base, case)
+    }
+
+    /// Whether this is, or may be, `base` or a place inside it: folded names, the comparison deny entries use.
+    pub(crate) fn starts_with(&self, base: &PathKey) -> bool {
+        self.starts_with_in(base, Case::Insensitive)
+    }
+
+    /// Whether this is, or may be, a place strictly inside `base` (folded names).
+    pub(crate) fn is_inside(&self, base: &PathKey) -> bool {
+        self.is_inside_in(base, Case::Insensitive)
+    }
+
+    /// The key of a place directly inside this one, whose name has the key `name` in both forms.
     pub(crate) fn child(&self, name: &str) -> Self {
-        let mut keys = self.0.clone();
-        keys.push(name.to_owned());
-        Self(keys)
+        let mut exact = self.exact.clone();
+        let mut folded = self.folded.clone();
+        exact.push(name.to_owned());
+        folded.push(name.to_owned());
+        Self { exact, folded }
     }
 
-    /// The names after the root, last first.
+    /// The folded names after the root, last first.
     pub(crate) fn names_from_last(&self) -> impl Iterator<Item = &str> {
-        self.0
+        self.folded
             .iter()
             .rev()
             .take_while(|k| k.as_str() != ROOT)
@@ -91,20 +145,30 @@ impl PathKey {
     }
 }
 
-/// A file or folder name as a key: lowercased, and on Windows without the trailing dots and spaces Win32 ignores.
+/// A file or folder name as a folded key: lowercased, and on Windows without the trailing dots and spaces Win32
+/// ignores.
 pub(crate) fn name_key(name: &OsStr) -> String {
-    let lower = name.to_string_lossy().to_lowercase();
+    name_key_in(name, Case::Insensitive)
+}
+
+/// A file or folder name as a key for a volume that compares names this way.
+pub(crate) fn name_key_in(name: &OsStr, case: Case) -> String {
+    let text = name.to_string_lossy();
+    let key = match case {
+        Case::Insensitive => text.to_lowercase(),
+        Case::Sensitive => text.into_owned(),
+    };
     if cfg!(windows) {
-        lower.trim_end_matches(['.', ' ']).to_owned()
+        key.trim_end_matches(['.', ' ']).to_owned()
     } else {
-        lower
+        key
     }
 }
 
 /// [`name_key`], or `None` for a name no place has: empty once folded, or on Windows one with a stream (`:`) or a
 /// separator in it.
-fn name_key_checked(name: &OsStr) -> Option<String> {
-    let key = name_key(name);
+fn name_key_checked(name: &OsStr, case: Case) -> Option<String> {
+    let key = name_key_in(name, case);
     if key.is_empty() || (cfg!(windows) && key.contains([':', '/', '\\'])) {
         return None;
     }

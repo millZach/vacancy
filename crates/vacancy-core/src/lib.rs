@@ -17,7 +17,7 @@ mod text;
 mod volume;
 
 pub use categorize::{
-    Categories, Category, CategoryId, CloudRoot, Env, Item, ItemRef, KnownFolders, Platform,
+    Case, Categories, Category, CategoryId, CloudRoot, Env, Item, ItemRef, KnownFolders, Platform,
     categorize,
 };
 pub use guard::{Denied, Guard};

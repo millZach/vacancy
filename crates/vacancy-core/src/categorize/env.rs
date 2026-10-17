@@ -4,6 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::pathkey::Case;
+
 /// Which platform's rules apply.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Platform {
@@ -64,6 +66,9 @@ pub struct Env {
     pub local_app_data: PathBuf,
     /// Windows only: `%APPDATA%` (Roaming).
     pub app_data: PathBuf,
+    /// How the volume compares names. Allowed roots and known places are matched this way; deny entries always
+    /// ignore case.
+    pub case: Case,
 }
 
 impl Env {
@@ -89,6 +94,7 @@ impl Env {
             program_files: vec![root.join("Program Files"), root.join("Program Files (x86)")],
             program_data: root.join("ProgramData"),
             app_data: home.join("AppData").join("Roaming"),
+            case: Case::Insensitive,
             local_app_data: local,
             home,
         }
@@ -120,6 +126,7 @@ impl Env {
             program_data: root.join("Library"),
             local_app_data: library.join("Application Support"),
             app_data: library.join("Application Support"),
+            case: Case::Insensitive,
             home,
         }
     }
@@ -569,6 +576,7 @@ mod detect {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let mut env = Env::macos(root, &user);
+        env.case = case_of(root);
         env.known = super::KnownFolders {
             downloads: home.join("Downloads"),
             documents: home.join("Documents"),
@@ -611,5 +619,27 @@ mod detect {
         }
         env.home = home;
         env
+    }
+
+    /// Whether the volume at `root` tells names apart by case. If it can't say, it is taken to: allowed roots then
+    /// match only exact spellings, which allows less.
+    fn case_of(root: &Path) -> super::Case {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(path) = std::ffi::CString::new(root.as_os_str().as_bytes()) else {
+            return super::Case::Sensitive;
+        };
+        #[cfg(target_os = "macos")]
+        // SAFETY: `path` is NUL-terminated; pathconf only reads it.
+        let answer = unsafe { libc::pathconf(path.as_ptr(), libc::_PC_CASE_SENSITIVE) };
+        #[cfg(not(target_os = "macos"))]
+        let answer = {
+            let _ = path;
+            1
+        };
+        if answer == 0 {
+            super::Case::Insensitive
+        } else {
+            super::Case::Sensitive
+        }
     }
 }

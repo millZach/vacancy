@@ -10,8 +10,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use support::{Fixture, KIB, MIB, age};
 use vacancy_core::{
-    CategoryId, CloudRoot, DriveKind, Env, ItemKind, ItemRef, Moment, Proposal, ProposalAction,
-    ProposalSource, Proposals, Risk, Snapshot, VolumeInfo, categorize, overview, propose,
+    Case, CategoryId, CloudRoot, DriveKind, Env, ItemKind, ItemRef, Moment, Proposal,
+    ProposalAction, ProposalSource, Proposals, Risk, Snapshot, VolumeInfo, categorize, overview,
+    propose,
 };
 
 fn now() -> i64 {
@@ -781,6 +782,25 @@ mod guard {
             all_targets(&fx, &snap, &proposals),
             vec!["Users/alex/.Trash/old.zip".to_owned()],
             "only the zip: not a library, a folder holding one, or a backup"
+        );
+    }
+
+    /// On a case-sensitive volume a folder spelled differently from the home folder is someone else's: the scan
+    /// listing `Users/Alex` is not the home `Users/alex`. (The test volume itself ignores case, so one folder stands
+    /// for both spellings; what matters is how the rules compare them.)
+    #[test]
+    fn a_case_sensitive_volume_matches_only_exact_spellings() {
+        let fx = Fixture::new();
+        bait(&fx, "Users/Alex/code");
+        let mut env = mac(&fx);
+        env.case = Case::Sensitive;
+        let (snap, proposals) = run(&fx, &env, &moment(&[]));
+        assert_eq!(all_targets(&fx, &snap, &proposals), Vec::<String>::new());
+        // The same tree on a case-insensitive volume is the home folder.
+        let (snap, proposals) = run(&fx, &mac(&fx), &moment(&[]));
+        assert_eq!(
+            all_targets(&fx, &snap, &proposals),
+            vec!["Users/Alex/code/proj/node_modules".to_owned()]
         );
     }
 

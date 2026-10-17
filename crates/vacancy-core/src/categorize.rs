@@ -17,12 +17,13 @@ use std::path::Path;
 use serde::Serialize;
 use ts_rs::TS;
 
-use crate::pathkey::{PathKey, name_key};
+use crate::pathkey::{PathKey, name_key_in};
 use crate::snapshot::{DirFlags, DirId, FileId, Markers, RootKind, Snapshot, UnixTime};
 
 mod catalog;
 mod env;
 
+pub use crate::pathkey::Case;
 pub use env::{CloudRoot, Env, KnownFolders, Platform};
 
 /// The categories, in the order the map lists them when sizes tie.
@@ -392,7 +393,7 @@ pub(crate) fn categorize_until(
     stop: &dyn Fn() -> bool,
 ) -> Option<Categories> {
     let rules = catalog::rules(env);
-    let trie = Trie::build(&rules);
+    let trie = Trie::build(&rules, env.case);
     let n = snapshot.dir_count();
     let mut node = vec![
         Node {
@@ -794,7 +795,7 @@ struct TrieNode {
 }
 
 impl Trie {
-    fn build(rules: &[catalog::Rule]) -> TrieWithRules<'_> {
+    fn build(rules: &[catalog::Rule], case: Case) -> TrieWithRules<'_> {
         let mut trie = Trie {
             nodes: vec![TrieNode::default()],
         };
@@ -804,7 +805,7 @@ impl Trie {
                 continue;
             };
             let mut at = 0;
-            for key in key.keys().iter().cloned() {
+            for key in key.keys_in(case).iter().cloned() {
                 at = match trie.nodes[at].children.get(&key) {
                     Some(&next) => next,
                     None => {
@@ -818,19 +819,21 @@ impl Trie {
             // The first rule for a place wins; catalogs list the specific before the general.
             trie.nodes[at].rule.get_or_insert(i);
         }
-        TrieWithRules { trie, rules }
+        TrieWithRules { trie, rules, case }
     }
 }
 
 struct TrieWithRules<'r> {
     trie: Trie,
     rules: &'r [catalog::Rule],
+    /// How the volume compares names: known places match exact spellings on a case-sensitive one.
+    case: Case,
 }
 
 impl TrieWithRules<'_> {
     fn find(&self, path: &Path) -> Option<usize> {
         let mut at = 0;
-        for key in PathKey::of(path)?.keys() {
+        for key in PathKey::of(path)?.keys_in(self.case) {
             at = *self.trie.nodes[at].children.get(key)?;
         }
         Some(at)
@@ -841,7 +844,7 @@ impl TrieWithRules<'_> {
         if node.children.is_empty() {
             return None;
         }
-        node.children.get(&name_key(name)).copied()
+        node.children.get(&name_key_in(name, self.case)).copied()
     }
 
     fn has_children(&self, at: usize) -> bool {
