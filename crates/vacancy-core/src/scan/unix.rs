@@ -1,14 +1,17 @@
-//! macOS (and other Unix): each folder is opened with `O_NOFOLLOW | O_DIRECTORY`, checked to be on the root's
-//! device, then listed with `readdir` and `fstatat(AT_SYMLINK_NOFOLLOW)`, which gives each entry's type, allocated
+//! macOS (and other Unix): each folder is opened with `O_NOFOLLOW | O_DIRECTORY`, checked to be on the root's file
+//! system, then listed with `readdir` and `fstatat(AT_SYMLINK_NOFOLLOW)`, which gives each entry's type, allocated
 //! blocks, times, inode and link count without opening it.
 //!
-//! The macOS startup disk is two volumes in one APFS container: the sealed system volume at `/` and the Data volume
-//! at `/System/Volumes/Data`, which firmlinks show inside `/` (`/Users`, `/Applications`, `/Library`). Following
-//! the firmlinks would cross file systems, and walking both `/Users` and `/System/Volumes/Data/Users` would count
-//! everything twice. So the scan walks each volume from its own root, never leaving its device, and shows the Data
-//! volume's paths the way Finder does (`/Users/alex`, not `/System/Volumes/Data/Users/alex`). Other volumes in the
-//! container (swap, Preboot, Recovery, snapshots) are not walked; their space shows as the part of the disk Vacancy
-//! can't see.
+//! The macOS startup disk is two volumes in one APFS volume group: the sealed system volume at `/` and the Data
+//! volume at `/System/Volumes/Data`, which firmlinks show inside `/` (`/Users`, `/Applications`, `/Library`).
+//! Following the firmlinks would cross file systems, and walking both `/Users` and `/System/Volumes/Data/Users`
+//! would count everything twice. So the scan walks each volume from its own root, never leaving its file system,
+//! and shows the Data volume's paths the way Finder does (`/Users/alex`, not `/System/Volumes/Data/Users/alex`).
+//! Other volumes in the container (swap, Preboot, Recovery, snapshots) are not walked; their space shows as the
+//! part of the disk Vacancy can't see.
+//!
+//! The two volumes of a volume group report the same device number (`st_dev`), so on macOS "the same file system"
+//! also means the same mount: every opened folder's `f_mntonname` is compared with its root's.
 
 use std::ffi::{CStr, OsStr};
 use std::io;
@@ -19,46 +22,102 @@ use std::path::{Path, PathBuf};
 use super::{Collector, Entry, EntryKind, LinkKey, ListError, RootSpec};
 use crate::snapshot::{RootKind, UnixTime};
 
-/// The device a walk stays on.
+/// The file system a walk stays on: its device and, on macOS, where it is mounted.
 #[derive(Clone, Debug)]
 pub(crate) struct Volume {
     dev: u64,
+    /// The root's mount point (`f_mntonname`), on macOS. See the module docs.
+    #[cfg(target_os = "macos")]
+    mount: std::sync::Arc<[u8]>,
 }
 
-pub(crate) fn roots(path: &Path) -> io::Result<Vec<RootSpec>> {
-    let meta = std::fs::symlink_metadata(path)?;
-    if !meta.is_dir() {
-        return Err(io::Error::new(io::ErrorKind::NotADirectory, "not a folder"));
-    }
-    let dev = std::os::unix::fs::MetadataExt::dev(&meta);
-    if cfg!(target_os = "macos") && path == Path::new("/") {
-        let data = Path::new("/System/Volumes/Data");
-        if let Ok(data_meta) = std::fs::symlink_metadata(data) {
-            let data_dev = std::os::unix::fs::MetadataExt::dev(&data_meta);
-            if data_meta.is_dir() && data_dev != dev {
-                return Ok(vec![
-                    RootSpec {
-                        real: PathBuf::from("/"),
-                        shown: PathBuf::from("/"),
-                        kind: RootKind::SealedSystem,
-                        volume: Volume { dev },
-                    },
-                    RootSpec {
-                        real: data.to_path_buf(),
-                        shown: PathBuf::from("/"),
-                        kind: RootKind::Data,
-                        volume: Volume { dev: data_dev },
-                    },
-                ]);
-            }
+impl Volume {
+    fn of(path: &Path) -> io::Result<Self> {
+        let meta = std::fs::symlink_metadata(path)?;
+        if !meta.is_dir() {
+            return Err(io::Error::new(io::ErrorKind::NotADirectory, "not a folder"));
         }
+        Ok(Self {
+            dev: std::os::unix::fs::MetadataExt::dev(&meta),
+            #[cfg(target_os = "macos")]
+            mount: mount_of(path)?.into(),
+        })
+    }
+}
+
+/// The macOS startup disk's Data volume, where the system volume's firmlinks lead.
+#[cfg(target_os = "macos")]
+const DATA: &str = "/System/Volumes/Data";
+
+pub(crate) fn roots(path: &Path) -> io::Result<Vec<RootSpec>> {
+    let volume = Volume::of(path)?;
+    #[cfg(target_os = "macos")]
+    if path == Path::new("/")
+        && let Ok(data) = Volume::of(Path::new(DATA))
+        && *data.mount == *DATA.as_bytes()
+        && data.mount != volume.mount
+    {
+        return Ok(vec![
+            RootSpec {
+                real: PathBuf::from("/"),
+                shown: PathBuf::from("/"),
+                kind: RootKind::SealedSystem,
+                volume,
+            },
+            RootSpec {
+                real: PathBuf::from(DATA),
+                shown: PathBuf::from("/"),
+                kind: RootKind::Data,
+                volume: data,
+            },
+        ]);
     }
     Ok(vec![RootSpec {
         real: path.to_path_buf(),
         shown: path.to_path_buf(),
         kind: RootKind::Volume,
-        volume: Volume { dev },
+        volume,
     }])
+}
+
+/// Where the file system holding `path` is mounted.
+#[cfg(target_os = "macos")]
+fn mount_of(path: &Path) -> io::Result<Vec<u8>> {
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let mut st = MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `c_path` is NUL-terminated; `st` is writable memory for one statfs.
+    if unsafe { libc::statfs(c_path.as_ptr(), st.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: statfs returned 0, so it filled `st`.
+    let st = unsafe { st.assume_init() };
+    Ok(mount_name(&st).to_vec())
+}
+
+/// A statfs's mount point, without its NUL.
+#[cfg(target_os = "macos")]
+fn mount_name(st: &libc::statfs) -> &[u8] {
+    // SAFETY: the kernel NUL-terminates f_mntonname within its array.
+    unsafe { CStr::from_ptr(st.f_mntonname.as_ptr()) }.to_bytes()
+}
+
+/// Whether an open folder is on the walk's mount (macOS; elsewhere the device check is enough).
+#[cfg(target_os = "macos")]
+fn on_mount(fd: libc::c_int, volume: &Volume) -> bool {
+    let mut st = MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `fd` is an open descriptor; `st` is writable memory for one statfs.
+    if unsafe { libc::fstatfs(fd, st.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    // SAFETY: fstatfs returned 0, so it filled `st`.
+    let st = unsafe { st.assume_init() };
+    *mount_name(&st) == *volume.mount
+}
+
+#[cfg(not(target_os = "macos"))]
+fn on_mount(_fd: libc::c_int, _volume: &Volume) -> bool {
+    true
 }
 
 /// Closes a directory stream when dropped.
@@ -107,7 +166,7 @@ impl Lister {
         }
         // SAFETY: fstat returned 0, so it filled `st`.
         let st = unsafe { st.assume_init() };
-        if st.st_dev as u64 != volume.dev {
+        if st.st_dev as u64 != volume.dev || !on_mount(fd, volume) {
             // SAFETY: `fd` is open and not used again.
             unsafe { libc::close(fd) };
             return Err(ListError::OtherVolume);
@@ -204,7 +263,8 @@ fn set_errno(value: i32) {
 mod tests {
     use super::*;
 
-    /// macOS 10.15 and later split the startup disk; the scan walks both halves from their own roots.
+    /// macOS 10.15 and later split the startup disk; the scan walks both halves from their own roots. The two
+    /// report the same device number, so only their mounts tell them apart.
     #[cfg(target_os = "macos")]
     #[test]
     fn the_startup_disk_is_its_system_and_data_volumes() {
@@ -234,8 +294,45 @@ mod tests {
                 Path::new("/"),
                 "shown the way Finder shows it"
             );
-            assert_ne!(roots[0].volume.dev, roots[1].volume.dev, "two file systems");
+            assert_ne!(
+                roots[0].volume.mount, roots[1].volume.mount,
+                "two file systems"
+            );
         }
+    }
+
+    /// Lists `dir` as part of a walk over `volume`.
+    #[cfg(target_os = "macos")]
+    fn list(dir: &str, volume: &Volume) -> Result<(), ListError> {
+        let mut listing = crate::snapshot::Listing::default();
+        let links = super::super::LinkSet::new();
+        let mut collector = Collector {
+            listing: &mut listing,
+            links: &links,
+            keep_from: u64::MAX,
+            now: i64::MAX,
+        };
+        Lister::default().list(Path::new(dir), volume, &mut collector)
+    }
+
+    /// The firmlinks from the system volume lead into the Data volume, which has the same device number: the walk
+    /// of `/` must stop there, and the Data volume's own walk must get in.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn never_walks_from_the_system_volume_into_the_data_volume() {
+        let roots = roots(Path::new("/")).expect("roots of /");
+        let [system, data] = roots.as_slice() else {
+            return; // a Mac without a separate Data volume (before 10.15)
+        };
+        assert!(list("/System", &system.volume).is_ok());
+        for crossing in ["/Users", "/Applications", "/System/Volumes/Data"] {
+            assert!(
+                matches!(list(crossing, &system.volume), Err(ListError::OtherVolume)),
+                "{crossing} is on the Data volume"
+            );
+        }
+        assert!(list("/System/Volumes/Data/Users", &data.volume).is_ok());
+        assert!(list("/System/Volumes/Data", &data.volume).is_ok());
     }
 
     #[test]

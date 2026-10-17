@@ -7,7 +7,8 @@
 //!   following links (`FILE_FLAG_OPEN_REPARSE_POINT`, `O_NOFOLLOW`), so a folder swapped for a link mid-scan is not
 //!   followed either.
 //! - It never crosses into another file system: on Windows only reparse points lead elsewhere; on macOS every
-//!   folder's device is compared with its root's, which also stops at firmlinks into the Data volume.
+//!   folder's device and mount point are compared with its root's, which also stops at firmlinks into the Data
+//!   volume (it has the same device number as the system volume).
 //! - It counts allocated bytes (what files take on disk), each hard-linked file once.
 //! - A folder it may not read is counted and flagged, never fatal.
 

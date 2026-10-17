@@ -4,7 +4,7 @@
 
 mod support;
 
-use support::{Fixture, KIB, MIB, Unreadable, in_ci};
+use support::{Fixture, KIB, MIB};
 use vacancy_core::permissions::{FullDiskAccess, probe};
 use vacancy_core::{
     CancelToken, CategoryId, Env, ItemKind, MapError, Overview, ScanOptions, VolumeInfo, browse,
@@ -234,19 +234,26 @@ fn tells_whether_full_disk_access_is_missing() {
         "no protected folder exists"
     );
 
-    // As the scanner's unreadable-folder test does: a folder with something in it, made unreadable before
-    // anything has listed it.
     let safari = fx.dir("Library/Safari");
     support::write_file(&safari.join("Bookmarks.plist"), 4 * KIB);
-    let guard = Unreadable::new(&safari);
-    if std::fs::read_dir(&safari).is_ok() {
-        assert!(!in_ci(), "CI must be able to make a folder unreadable");
-        eprintln!("skipped: this account can read any folder");
-        return;
-    }
-    assert_eq!(probe(fx.root()), FullDiskAccess::Missing);
-    drop(guard);
     assert_eq!(probe(fx.root()), FullDiskAccess::Granted);
+
+    // Full Disk Access is a macOS setting, and macOS refuses its protected folders the way `chmod 000` does.
+    // On the Windows CI runner, which runs as an administrator, this check could still list a folder denied by
+    // ACL; the scanner's own unreadable-folder test covers Windows ACLs.
+    #[cfg(unix)]
+    {
+        use support::{Unreadable, in_ci};
+        let guard = Unreadable::new(&safari);
+        if std::fs::read_dir(&safari).is_ok() {
+            assert!(!in_ci(), "CI must be able to make a folder unreadable");
+            eprintln!("skipped: this account can read any folder");
+            return;
+        }
+        assert_eq!(probe(fx.root()), FullDiskAccess::Missing);
+        drop(guard);
+        assert_eq!(probe(fx.root()), FullDiskAccess::Granted);
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
