@@ -1,6 +1,7 @@
 [
   {
     "id": "hint-windows-cleanup",
+    "guideId": "windowsCleanup",
     "action": { "kind": "windowsCleanupInstructions" },
     "title": "Review Windows cleanup",
     "summary": "Let Windows review update leftovers and temporary system files.",
@@ -16,6 +17,7 @@
   },
   {
     "id": "hint-windows-delivery",
+    "guideId": "windowsDelivery",
     "action": { "kind": "windowsDeliveryInstructions" },
     "title": "Review Delivery Optimization",
     "summary": "Use Windows to review its update download cache.",
@@ -31,6 +33,7 @@
   },
   {
     "id": "hint-docker-images",
+    "guideId": "dockerImages",
     "action": { "kind": "dockerImagesInstructions" },
     "title": "Review Docker images",
     "summary": "Choose images you no longer need in Docker Desktop.",
@@ -46,6 +49,7 @@
   },
   {
     "id": "hint-docker-cache",
+    "guideId": "dockerCache",
     "action": { "kind": "dockerCacheInstructions" },
     "title": "Review Docker build cache",
     "summary": "Let your Docker builder manage cache retention.",
@@ -61,13 +65,14 @@
   },
   {
     "id": "hint-xcode-components",
+    "guideId": "xcode",
     "action": { "kind": "xcodeInstructions" },
     "title": "Review Xcode simulators and runtimes",
     "summary": "Review unavailable devices and the runtimes you still test.",
     "intro": "A known Xcode app or developer folder was found. Vacancy has not inventoried devices or inferred that an older runtime is unused.",
     "steps": [
-      "Open Xcode → Window → Devices and Simulators → Simulators. Review devices marked unavailable and which runtimes they require.",
-      "If you no longer need a simulator device, select it and use Delete in Xcode. Its installed apps and data will be lost; keep devices needed for testing.",
+      "In Xcode 27, choose Xcode → Open Developer Tool → Device Hub (or Manage Devices from the run destination menu). In earlier versions, choose Window → Devices and Simulators → Simulators. Review unavailable devices and their required runtimes.",
+      "For a simulator you choose to remove, Control-click it in Device Hub and choose Remove. In the older Devices and Simulators window, use Delete. Read the tool's confirmation and preserve any test apps and data you still need.",
       "Open Xcode → Settings → Components (Platforms in some versions). Review installed simulator runtimes against the OS versions your projects still test, and use Xcode's removal control only for runtimes you choose to remove."
     ],
     "caution": "An unavailable device may only need its runtime reinstalled. Age alone does not establish disuse. Vacancy runs no simctl command and records no freed space for this reminder.",
@@ -76,6 +81,7 @@
   },
   {
     "id": "hint-homebrew-cleanup",
+    "guideId": "homebrew",
     "action": { "kind": "homebrewInstructions" },
     "title": "Preview Homebrew cleanup",
     "summary": "Review Homebrew's own preview before choosing cleanup.",

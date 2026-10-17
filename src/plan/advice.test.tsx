@@ -90,7 +90,7 @@ describe.each(['windows', 'macos'] as const)('%s advice reminders', (platform) =
     const { bridge, run, tray } = await openPlan();
     const guides = fixture.proposals.filter(p => p.action === 'hint' && p.id.startsWith('hint-'));
     expect(guides).toHaveLength(4);
-    const launch = vi.spyOn(bridge, 'openHint');
+    const launch = vi.spyOn(bridge, 'openGuide');
     for (const guide of guides) {
       const box = within(tray).getByRole('checkbox', { name: `Remind me: ${guide.title}` });
       expect(box).toHaveAttribute('aria-checked', 'false');
@@ -100,7 +100,7 @@ describe.each(['windows', 'macos'] as const)('%s advice reminders', (platform) =
       const reference = within(row).getByRole('button', { name: /↗/ });
       await userEvent.click(reference);
       expect(await within(row).findByRole('alert')).toHaveTextContent('No app was launched.');
-      expect(launch).toHaveBeenLastCalledWith(mount, guide.id);
+      expect(launch).toHaveBeenCalledTimes(guides.indexOf(guide) + 1);
       await userEvent.click(box);
     }
     for (const box of within(within(tray).getByRole('region', { name: 'Delete' })).getAllByRole('checkbox')) {

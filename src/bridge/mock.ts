@@ -202,6 +202,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
     },
     // Browser fixtures never open host apps or claim an external launch succeeded.
     openHint: () => failure('External advice can’t be opened from this fixture preview. No app was launched.'),
+    openGuide: () => failure('Vendor references can’t be opened from this fixture preview. No app was launched.'),
     unplug,
   };
 }

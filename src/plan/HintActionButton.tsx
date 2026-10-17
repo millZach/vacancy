@@ -1,12 +1,14 @@
 import { ExternalLink } from 'lucide-react';
 import { useState } from 'react';
 import { useBridge } from '../bridge';
+import type { GuideId } from '../bindings/GuideId';
 
 /** The shell resolves scan authority by these ids; the UI never supplies an external URL or command. */
-export function HintActionButton({ mountPoint, proposalId, label = 'Open Steam uninstall' }: {
+export function HintActionButton({ mountPoint, proposalId, guide, label = 'Open Steam uninstall' }: {
   mountPoint: string;
   proposalId: string;
   label?: string;
+  guide?: GuideId;
 }) {
   const bridge = useBridge();
   const [pending, setPending] = useState(false);
@@ -15,7 +17,7 @@ export function HintActionButton({ mountPoint, proposalId, label = 'Open Steam u
     if (pending) return;
     setPending(true);
     setError(null);
-    bridge.openHint(mountPoint, proposalId).then(
+    (guide ? bridge.openGuide(guide) : bridge.openHint(mountPoint, proposalId)).then(
       () => setPending(false),
       (reason: unknown) => {
         setPending(false);

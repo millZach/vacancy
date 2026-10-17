@@ -35,6 +35,9 @@ pub enum HintAction {
 }
 
 impl HintAction {
+    pub fn guide_id(&self) -> Option<GuideId> {
+        guidance::guide(self).map(|g| g.guide_id)
+    }
     /// Only compiled guide URLs or a numeric Steam URI can leave the app. No UI/history URL is accepted.
     pub fn external_uri(&self) -> Option<String> {
         self.steam_uri().or_else(|| guidance::guide(self).map(|g| g.source_url.clone()))
@@ -47,6 +50,33 @@ impl HintAction {
             }
             Self::SteamUninstall { .. } => None,
             _ => None,
+        }
+    }
+}
+
+/// Closed identities for compiled vendor references. They confer no filesystem or tool authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum GuideId {
+    WindowsCleanup,
+    WindowsDelivery,
+    DockerImages,
+    DockerCache,
+    Xcode,
+    Homebrew,
+}
+
+impl GuideId {
+    pub fn action(self) -> HintAction {
+        use HintAction::*;
+        match self {
+            Self::WindowsCleanup => WindowsCleanupInstructions,
+            Self::WindowsDelivery => WindowsDeliveryInstructions,
+            Self::DockerImages => DockerImagesInstructions,
+            Self::DockerCache => DockerCacheInstructions,
+            Self::Xcode => XcodeInstructions,
+            Self::Homebrew => HomebrewInstructions,
         }
     }
 }

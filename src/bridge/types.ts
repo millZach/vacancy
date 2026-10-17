@@ -28,6 +28,7 @@ import type { Skip } from '../bindings/Skip';
 import type { SkipKind } from '../bindings/SkipKind';
 import type { StepReport } from '../bindings/StepReport';
 import type { VolumeInfo } from '../bindings/VolumeInfo';
+import type { GuideId } from '../bindings/GuideId';
 
 export type {
   CategoryFreed,
@@ -120,6 +121,8 @@ export interface Bridge {
   listRuns(): Promise<RunHistory>;
   /** A kept run, as it was saved: everything its highlight slides and summary show. */
   openRun(id: string): Promise<RunReport>;
-  /** Opens a trusted numeric Steam hint or compiled vendor reference from a retained scan. Never accepts a URL or runs as part of a plan. */
+  /** Opens a trusted numeric Steam hint from a retained scan. Never accepts a URL or runs as part of a plan. */
   openHint(mountPoint: string, proposalId: string): Promise<void>;
+  /** Opens a compiled vendor reference, including from history with no current scan. */
+  openGuide(guide: GuideId): Promise<void>;
 }

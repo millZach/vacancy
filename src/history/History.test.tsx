@@ -52,6 +52,31 @@ it('reopens a saved move-only run with legacy advice without claiming no files m
   expect(screen.getByText(r.leftForYou[0]!.why)).toBeInTheDocument();
 });
 
+it('opens a saved vendor reference after restart without scanning or accepting a URL from the report', async () => {
+  const bridge = renderApp({ pastRuns: false });
+  const guide = fixtures.windows.proposals.find(p => p.id === 'hint-docker-images')!;
+  const r = { ...moveAdviceReport, movedItems: 0, reorganized: [], leftForYou: [{
+    id: guide.id, title: guide.title, summary: guide.summary,
+    why: `${guide.why}\nfile:///never-a-link`, bytes: 0, hintAction: guide.hintAction ?? null,
+  }] };
+  vi.spyOn(bridge, 'listRuns').mockResolvedValue({ unreadable: 0, runs: [{
+    id: r.id, mountPoint: r.mountPoint, volumeName: r.volumeName, volumeId: r.map.volume.id,
+    startedAt: r.startedAt, freedBytes: 0, deletedItems: 0, movedItems: 0, cancelled: false,
+  }] });
+  vi.spyOn(bridge, 'openRun').mockResolvedValue(r);
+  const scan = vi.spyOn(bridge, 'scan');
+  const steam = vi.spyOn(bridge, 'openHint');
+  const reference = vi.spyOn(bridge, 'openGuide').mockResolvedValue(undefined);
+  await openHistory();
+  await userEvent.click(within(menu()).getByRole('menuitem'));
+  await userEvent.click(await screen.findByText('Instructions and reference'));
+  expect(screen.getByText('file:///never-a-link')).toBeInTheDocument();
+  await userEvent.click(screen.getByRole('button', { name: 'Docker · Images view ↗' }));
+  expect(reference).toHaveBeenCalledExactlyOnceWith('dockerImages');
+  expect(scan).not.toHaveBeenCalled();
+  expect(steam).not.toHaveBeenCalled();
+});
+
 describe('past runs', () => {
   it('keeps swapped disks apart and follows a known disk to another mount point', async () => {
     const bridge = createMockBridge(fixtures.windows);
