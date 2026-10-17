@@ -104,6 +104,30 @@ jobs:
           mkdir -p out
           cp target/universal-apple-darwin/release/bundle/dmg/*.dmg "out/Vacancy-$VERSION-macos-universal.dmg"
 
+      # Nobody can open the .dmg by hand before the draft exists, so check what a Mac will get: both architectures,
+      # an intact (ad-hoc) signature, and the release's version.
+      - name: Check the disk image
+        if: runner.os == 'macOS'
+        run: |
+          mnt=$(mktemp -d)
+          hdiutil attach "out/Vacancy-$VERSION-macos-universal.dmg" -nobrowse -readonly -mountpoint "$mnt" > /dev/null
+          trap 'hdiutil detach "$mnt" > /dev/null' EXIT
+          app="$mnt/Vacancy.app"
+          archs=$(lipo -archs "$app"/Contents/MacOS/*)
+          bundle_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")
+          echo "Architectures: $archs. Bundle version: $bundle_version."
+          codesign --verify --deep --strict --verbose=2 "$app"
+          [[ "$archs" == *x86_64* && "$archs" == *arm64* ]] || { echo "::error::Vacancy.app is not universal: $archs"; exit 1; }
+          [ "$bundle_version" = "$VERSION" ] || { echo "::error::Vacancy.app is version $bundle_version, not $VERSION"; exit 1; }
+
+      - name: Check the Windows app version
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $version = (Get-Item target/release/vacancy.exe).VersionInfo.ProductVersion
+          Write-Output "vacancy.exe is version $version."
+          if ($version -ne $env:VERSION) { Write-Output "::error::vacancy.exe is version $version, not $env:VERSION"; exit 1 }
+
       - uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.name }}
