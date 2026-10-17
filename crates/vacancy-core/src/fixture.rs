@@ -164,6 +164,12 @@ const SETTLE: Duration = Duration::from_millis(3200);
 /// folder gets an old modified time, so the rules find what is idle; then it waits a moment, so that a scan right
 /// after sees nothing as changed since.
 pub fn build(root: &Path) -> io::Result<Profile> {
+    build_with(root, 0)
+}
+
+/// [`build`], with `bulk` more small files in the npm cache, spread over folders of a hundred: enough of them and a
+/// run takes long enough to watch.
+pub fn build_with(root: &Path, bulk: usize) -> io::Result<Profile> {
     fs::create_dir_all(root)?;
     if fs::read_dir(root)?.next().is_some() {
         return Err(io::Error::new(
@@ -308,6 +314,13 @@ pub fn build(root: &Path) -> io::Result<Profile> {
     let long_rel = format!("{npm}/index-v5/{}/entry.json", deep.join("/"));
     file(&long_rel, 2 * KIB, 20);
     file(&format!("{store}/store-file.js"), 64 * KIB, OLD);
+    for i in 0..bulk {
+        file(
+            &format!("{npm}/content-v2/bulk/{:03}/{i:06}", i / 100),
+            4 * KIB,
+            20,
+        );
+    }
 
     let now = SystemTime::now();
     for spec in &specs {
@@ -347,7 +360,8 @@ pub fn build(root: &Path) -> io::Result<Profile> {
 
     // Old times on everything, deepest first, so that writing a child doesn't make its folder new again. Links
     // keep the time they were made, which is before any scan.
-    let mut dirs: Vec<PathBuf> = Vec::new();
+    // A folder is as old as the youngest thing in it.
+    let mut dirs: std::collections::HashMap<PathBuf, u64> = std::collections::HashMap::new();
     for spec in &specs {
         let p = sub(&home, &spec.rel);
         set_age(&p, now, spec.days)?;
@@ -356,25 +370,18 @@ pub fn build(root: &Path) -> io::Result<Profile> {
             if !d.starts_with(root) || d == root {
                 break;
             }
-            if !dirs.iter().any(|x| x == d) {
-                dirs.push(d.to_path_buf());
-            }
+            let days = dirs.entry(d.to_path_buf()).or_insert(spec.days);
+            *days = (*days).min(spec.days);
             at = d.parent();
         }
     }
     // NTFS keeps a copy of a file's times in each folder that lists one of its names, refreshed only through that
     // name: set them through the hard link's other name too, or its folder lists it as new.
     set_age(&store_link, now, OLD)?;
-    dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
-    for d in &dirs {
-        // A folder is as old as the youngest thing in it.
-        let days = specs
-            .iter()
-            .filter(|s| sub(&home, &s.rel).starts_with(d))
-            .map(|s| s.days)
-            .min()
-            .unwrap_or(OLD);
-        set_age(d, now, days)?;
+    let mut dirs: Vec<(PathBuf, u64)> = dirs.into_iter().collect();
+    dirs.sort_by_key(|(d, _)| std::cmp::Reverse(d.components().count()));
+    for (d, days) in &dirs {
+        set_age(d, now, *days)?;
     }
 
     let mut perms = fs::metadata(&read_only)?.permissions();
