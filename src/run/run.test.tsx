@@ -24,6 +24,15 @@ const tile = (container: HTMLElement, id: string) => container.querySelector<HTM
 const freeTile = (container: HTMLElement) => container.querySelector<HTMLElement>('.map .map-tile--free')!;
 const area = (el: HTMLElement) => parseFloat(el.style.width) * parseFloat(el.style.height);
 
+/** From the ended run to its summary: the highlight slides come first, and Skip to recap goes past them. */
+async function seeWhatChanged() {
+  await userEvent.click(within(panel()).getByRole('button', { name: 'See what changed' }));
+  expect(screen.getByRole('region', { name: 'Highlights of this run' })).toBeInTheDocument();
+  expect(screen.queryByRole('complementary', { name: 'What Vacancy did' })).toBeNull();
+  await userEvent.click(screen.getByRole('button', { name: 'Skip to recap' }));
+  return screen.findByRole('complementary', { name: 'What Vacancy did' });
+}
+
 /** A bridge whose run is played by the test, event by event. */
 function scripted(made: PlanSummary = plan) {
   const bridge = createMockBridge(fixtures.windows, { scanMs: 0 });
@@ -210,8 +219,7 @@ describe('freeing space', () => {
     expect(within(header()).getByRole('button', { name: /Local Disk \(C:\)/ })).not.toHaveAttribute('aria-disabled');
     expect(within(header()).getByRole('img', { name: 'Vacancy' })).toHaveClass('is-lit');
 
-    await userEvent.click(within(panel()).getByRole('button', { name: 'See what changed' }));
-    const summary = screen.getByRole('complementary', { name: 'What Vacancy did' });
+    const summary = await seeWhatChanged();
     expect(within(summary).getByRole('heading', { level: 1 })).toHaveAccessibleName(/^26\.9\sGB freed$/);
     expect(screen.getByRole('slider', { name: 'Before and after' })).toBeInTheDocument();
   });
@@ -248,8 +256,7 @@ describe('freeing space', () => {
     expect(plain(within(panel()).getByText(/files left in place/).textContent)).toBe('12.0 GB freed, 260,429 files left in place.');
     expect(steps()[0]).toBe('node_modules in 61 idle projects12.0 GByou stopped the run, 9.0 GB kept');
     expect(steps()[1]).toBe('Browser caches0 BNot run: you stopped the run first; It changed since the scan, 620 MB kept');
-    await userEvent.click(within(panel()).getByRole('button', { name: 'See what changed' }));
-    expect(screen.getByRole('complementary', { name: 'What Vacancy did' })).toHaveTextContent('You stopped the run.');
+    expect(await seeWhatChanged()).toHaveTextContent('You stopped the run.');
   });
 
   it('says why a run failed, unlocks, and goes back to the plan', async () => {
@@ -271,9 +278,9 @@ describe('freeing space', () => {
     renderApp(run.bridge);
     await confirmRun();
     await run.finish(report);
-    await userEvent.click(within(panel()).getByRole('button', { name: 'See what changed' }));
+    await seeWhatChanged();
 
-    // To D: and back: C: still shows what changed.
+    // To D: and back: C: still shows what changed, at the summary now that it has been seen.
     await userEvent.click(within(header()).getByRole('button', { name: /Local Disk \(C:\)/ }));
     await userEvent.click(screen.getByRole('menuitemradio', { name: 'Data (D:)' }));
     expect(screen.queryByRole('complementary', { name: 'What Vacancy did' })).toBeNull();

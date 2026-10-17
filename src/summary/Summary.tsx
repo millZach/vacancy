@@ -1,6 +1,6 @@
-import { RotateCcw, TriangleAlert } from 'lucide-react';
+import { FolderInput, Info, Play, RotateCcw, Signpost, TriangleAlert, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
-import type { Overview, RunReport, Skip, StepReport } from '../bridge';
+import type { RunReport, Skip, StepReport } from '../bridge';
 import { formatBytes, formatCount, formatDuration } from '../format';
 import { Legend } from '../map/Legend';
 import { MapView, type TileLook } from '../map/MapView';
@@ -8,6 +8,10 @@ import { layoutAtlas, type AtlasModel, type Leaf, type Rect } from '../map/model
 import { useSize } from '../map/useSize';
 import { tileOf } from '../plan/totals';
 import { asSentence, neverReached } from '../run/progress';
+import { biggestWin, categoryOf, count, keptOf } from '../wrapped/deck';
+import { tokenMs } from '../wrapped/motion';
+import { HeroNumber } from './HeroNumber';
+import { formatWhen } from './when';
 import './summary.css';
 
 interface MapProps {
@@ -18,11 +22,6 @@ interface MapProps {
   onHot: (id: string | null) => void;
 }
 
-/** How long the swipe takes to sweep from Before to After when the summary opens, and its pause first. */
-const SWEEP_MS = 1250;
-const SWEEP_DELAY_MS = 200;
-/** A Before or After button's glide. */
-const GLIDE_MS = 700;
 /** Skips listed one by one; the rest are counted. */
 const SKIPS_SHOWN = 12;
 
@@ -73,8 +72,10 @@ export function SummaryMap({ model, report, hot, onHot }: MapProps) {
       if (reducedMotion()) return apply(to);
       const from = split.current;
       const start = performance.now() + delay;
-      const step = (now: number) => {
-        const t = Math.max(0, Math.min(1, (now - start) / ms));
+      // Timed by the clock it started from, not the frame's timestamp, which runs on another clock (devtools can
+      // slow it down).
+      const step = () => {
+        const t = Math.max(0, Math.min(1, (performance.now() - start) / ms));
         apply(from + (to - from) * ease(t));
         if (t < 1) raf.current = requestAnimationFrame(step);
       };
@@ -93,7 +94,7 @@ export function SummaryMap({ model, report, hot, onHot }: MapProps) {
       return;
     }
     swept.current = true;
-    glide(1, SWEEP_MS, SWEEP_DELAY_MS);
+    glide(1, tokenMs('--summary-sweep-ms'), tokenMs('--summary-sweep-delay-ms'));
   }, [ready, apply, glide]);
   useEffect(() => () => cancelAnimationFrame(raf.current), []);
 
@@ -147,10 +148,10 @@ export function SummaryMap({ model, report, hot, onHot }: MapProps) {
     <>
       <div className="atlas-toolbar">
         <div className="seg" role="group" aria-label="Compare">
-          <button type="button" className={side === 'before' ? 'is-on' : undefined} onClick={() => glide(0, GLIDE_MS)}>
+          <button type="button" className={side === 'before' ? 'is-on' : undefined} onClick={() => glide(0, tokenMs('--summary-glide-ms'))}>
             Before
           </button>
-          <button type="button" className={side === 'after' ? 'is-on' : undefined} onClick={() => glide(1, GLIDE_MS)}>
+          <button type="button" className={side === 'after' ? 'is-on' : undefined} onClick={() => glide(1, tokenMs('--summary-glide-ms'))}>
             After
           </button>
         </div>
@@ -204,49 +205,57 @@ export function SummaryMap({ model, report, hot, onHot }: MapProps) {
 }
 
 interface PanelProps {
-  /** The map the run started from: category names and sizes. */
-  overview: Overview;
+  /** The run, as it was kept. Every figure here comes from it, the categories from the map it started from. */
   report: RunReport;
   /** "Windows" or "macOS", for the free-space cross-check. */
   os: string;
   onHot: (id: string | null) => void;
-  onScanAgain: () => void;
+  /** Plays the highlight slides again. */
+  onReplay: () => void;
+  /** The drive's own summary: scan it again. */
+  onScanAgain?: () => void;
+  /** A run reopened from the history: back to where the user was. Its date shows at the top. */
+  onClose?: () => void;
 }
 
 /**
  * Variant D's summary panel: what the run freed and on which drive, free space before and after (and, when it
  * differs, what the drive itself reports), the counts, the biggest win, what each category got back, what was
- * left in place and why, and Scan again.
+ * moved, what was left in place and why, what was deleted but still holds its space, and the advice left for the
+ * user. The freed figure and the counts are where the checkout slide's numbers land. Replay highlights plays the
+ * slides again.
  */
-export function SummaryPanel({ overview, report: r, os, onHot, onScanAgain }: PanelProps) {
+export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onClose }: PanelProps) {
+  const [allSkips, setAllSkips] = useState(false);
+  const [allNotes, setAllNotes] = useState(false);
   const known = r.totalBytes > 0;
-  const [num = '', unit = ''] = formatBytes(r.freedBytes).split(' ');
-  const [whole, frac] = num.split('.');
   const growth = r.freeBefore > 0 ? r.freeAfter / r.freeBefore : 0;
   const differs = known && formatBytes(r.freeChange) !== formatBytes(r.freedBytes);
   const ran = r.steps.filter((s) => !neverReached(s.deletedItems, s.skipped));
-  const name = (id: string) => overview.categories.find((c) => c.id === id)?.name ?? id;
+  const name = (id: StepReport['category']) => categoryOf(r, id)?.name ?? id;
 
-  const win = r.steps.find((s) => s.id === r.biggestWin);
+  const win = biggestWin(r);
   const cats = r.freedByCategory
     .filter((c) => c.bytes > 0)
-    .map((c) => ({ ...c, before: overview.categories.find((x) => x.id === c.id)?.bytes ?? c.bytes }));
+    .map((c) => ({ ...c, before: categoryOf(r, c.id)?.bytes ?? c.bytes }));
   const widest = Math.max(1, ...cats.map((c) => c.before));
 
-  const skips = r.steps.flatMap((s) => s.skipped.map((k) => ({ k, step: s })));
-  const stopped = skips.filter(({ k }) => k.kind === 'cancelled');
-  const left = skips.filter(({ k }) => k.kind !== 'cancelled');
-  const stoppedSteps = [...new Set(stopped.map(({ step }) => step.title))];
-  const stoppedBytes = stopped.reduce((s, { k }) => s + k.bytes, 0);
+  const { left, stopped, notes } = keptOf(r);
+  const stoppedSteps = [...new Set(r.steps.filter((s) => s.skipped.some((k) => k.kind === 'cancelled')).map((s) => s.title))];
+  const stoppedBytes = stopped.reduce((s, k) => s + k.bytes, 0);
 
   return (
     <aside className="tray summary" aria-label="What Vacancy did" data-no-ripple>
       <div className="summary-scroll">
         <section className="summary-hero">
-          <h1 className="summary-num" aria-label={`${formatBytes(r.freedBytes)} freed`}>
-            {whole}
-            {frac !== undefined && <span className="summary-frac">.{frac}</span>}
-            <span className="summary-unit">{unit}</span>
+          {onClose && <p className="summary-when">Run of {formatWhen(r.startedAt)}</p>}
+          <h1
+            className="summary-num"
+            aria-label={`${formatBytes(r.freedBytes)} freed`}
+            data-fly-target="freed"
+            tabIndex={-1}
+          >
+            <HeroNumber bytes={r.freedBytes} />
           </h1>
           <p className="summary-sub">
             back on {r.volumeName}.
@@ -280,15 +289,15 @@ export function SummaryPanel({ overview, report: r, os, onHot, onScanAgain }: Pa
         <dl className="stats">
           <div>
             <dt>items deleted</dt>
-            <dd>{formatCount(r.deletedItems)}</dd>
+            <dd data-fly-target="deleted">{formatCount(r.deletedItems)}</dd>
           </div>
           <div>
             <dt>files moved</dt>
-            <dd>0</dd>
+            <dd data-fly-target="moved">{formatCount(r.movedItems)}</dd>
           </div>
           <div>
             <dt>start to finish</dt>
-            <dd>{formatDuration(r.durationMs)}</dd>
+            <dd data-fly-target="took">{formatDuration(r.durationMs)}</dd>
           </div>
         </dl>
 
@@ -335,11 +344,27 @@ export function SummaryPanel({ overview, report: r, os, onHot, onScanAgain }: Pa
           </section>
         )}
 
+        {r.reorganized.length > 0 && (
+          <section className="summary-sec">
+            <h3>Reorganized</h3>
+            <ul className="moves">
+              {r.reorganized.map((m) => (
+                <li key={m.id}>
+                  <FolderInput size={13} aria-hidden />
+                  <span>
+                    <b>{m.folder}.</b> {count(m.movedItems, 'file')} moved. Every move is recorded.
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
         {(left.length > 0 || stopped.length > 0) && (
           <section className="summary-sec">
             <h3>Skipped</h3>
             <ul className="skips">
-              {left.slice(0, SKIPS_SHOWN).map(({ k }, i) => (
+              {(allSkips ? left : left.slice(0, SKIPS_SHOWN)).map((k, i) => (
                 <li key={`${k.path}:${i}`}>
                   <TriangleAlert size={13} aria-hidden />
                   <span>
@@ -352,7 +377,9 @@ export function SummaryPanel({ overview, report: r, os, onHot, onScanAgain }: Pa
               {left.length > SKIPS_SHOWN && (
                 <li className="skips-more">
                   <span />
-                  <span>And {formatCount(left.length - SKIPS_SHOWN)} more.</span>
+                  <button type="button" className="replay" aria-expanded={allSkips} onClick={() => setAllSkips(!allSkips)}>
+                    {allSkips ? 'Show fewer skipped places' : `Show all ${formatCount(left.length)} skipped places`}
+                  </button>
                 </li>
               )}
               {stopped.length > 0 && (
@@ -366,11 +393,66 @@ export function SummaryPanel({ overview, report: r, os, onHot, onScanAgain }: Pa
             </ul>
           </section>
         )}
+
+        {notes.length > 0 && (
+          <section className="summary-sec">
+            <h3>Deleted, space still in use</h3>
+            <ul className="skips is-notes">
+              {(allNotes ? notes : notes.slice(0, SKIPS_SHOWN)).map((k, i) => (
+                <li key={`${k.path}:${i}`}>
+                  <Info size={13} aria-hidden />
+                  <span>
+                    {asSentence(k.reason)}
+                    <code>{k.path}</code>
+                  </span>
+                </li>
+              ))}
+              {notes.length > SKIPS_SHOWN && (
+                <li className="skips-more">
+                  <span />
+                  <button type="button" className="replay" aria-expanded={allNotes} onClick={() => setAllNotes(!allNotes)}>
+                    {allNotes ? 'Show fewer space notes' : `Show all ${formatCount(notes.length)} space notes`}
+                  </button>
+                </li>
+              )}
+            </ul>
+          </section>
+        )}
+
+        {r.leftForYou.length > 0 && (
+          <section className="summary-sec">
+            <h3>Left for you</h3>
+            <ul className="advice">
+              {r.leftForYou.map((a) => (
+                <li key={a.id} onMouseEnter={() => onHot(tileOf(a.id))} onMouseLeave={() => onHot(null)}>
+                  <Signpost size={14} aria-hidden />
+                  <span>
+                    <b>{a.title}</b>
+                    {a.summary}
+                  </span>
+                  <span className="advice-num">{formatBytes(a.bytes, 0)}</span>
+                </li>
+              ))}
+            </ul>
+            <p className="summary-note">Tips aren’t counted in freed space. Vacancy can’t do them for you.</p>
+          </section>
+        )}
       </div>
       <div className="summary-foot">
-        <button type="button" className="btn" onClick={onScanAgain}>
-          <RotateCcw size={14} aria-hidden /> Scan again
+        <button type="button" className="replay" onClick={onReplay}>
+          <Play size={12} strokeWidth={2.4} aria-hidden /> Replay highlights
         </button>
+        {onClose ? (
+          <button type="button" className="btn" onClick={onClose}>
+            <X size={14} aria-hidden /> Close
+          </button>
+        ) : (
+          onScanAgain && (
+            <button type="button" className="btn" onClick={onScanAgain}>
+              <RotateCcw size={14} aria-hidden /> Scan again
+            </button>
+          )
+        )}
       </div>
     </aside>
   );

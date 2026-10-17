@@ -11,8 +11,9 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use vacancy_core::permissions::{self, FullDiskAccess};
 use vacancy_core::{
-    CancelToken, Env, MapFolder, Moment, Plan, PlanSummary, RunEvent, RunReport, ScanError,
-    ScanOptions, ScanOutcome, ScanUpdate, ScannedVolume, Snapshot, VolumeInfo, fixture, report,
+    CancelToken, Env, MapFolder, Moment, Plan, PlanSummary, RunEvent, RunHistory, RunReport,
+    ScanError, ScanOptions, ScanOutcome, ScanUpdate, ScannedVolume, Snapshot, VolumeInfo, fixture,
+    report,
 };
 
 /// What the app remembers between commands: each drive's last finished scan (which its map's drill-down reads) with
@@ -543,9 +544,9 @@ fn cancel_run(session: State<'_, Session>) {
     }
 }
 
-/// The run history, newest first.
+/// The run history, newest first, with how many kept runs couldn't be read.
 #[tauri::command]
-async fn list_runs(app: AppHandle) -> Vec<RunReport> {
+async fn list_runs(app: AppHandle) -> RunHistory {
     tauri::async_runtime::spawn_blocking(move || {
         let mode = &app.state::<Session>().mode;
         mode.history(&app)
@@ -554,6 +555,20 @@ async fn list_runs(app: AppHandle) -> Vec<RunReport> {
     })
     .await
     .unwrap_or_default()
+}
+
+/// A run from the history, as it was kept, for its summary and its highlight slides.
+#[tauri::command]
+async fn open_run(id: String, app: AppHandle) -> Result<RunReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mode = &app.state::<Session>().mode;
+        let dir = mode
+            .history(&app)
+            .ok_or("The run history can't be found.")?;
+        report::open(&dir, &id).map_err(|e| format!("This run can't be opened: {e}."))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Starts the app and blocks until its last window closes.
@@ -573,6 +588,7 @@ pub fn run() {
             run_plan,
             cancel_run,
             list_runs,
+            open_run,
         ])
         .run(tauri::generate_context!())
         .expect("Vacancy failed to start");

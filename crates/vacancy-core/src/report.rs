@@ -1,6 +1,8 @@
-//! What a run did, as the run screen streams it and the summary shows it: per step, what was planned and what was
-//! freed, what was skipped and why; for the whole run, the totals cross-checked against the drive's own free-space
-//! figures. Each finished run is kept in the run history (see [`save`] and [`history`]).
+//! What a run did, as the run screen streams it and the finish shows it (the highlight slides, then the summary):
+//! per step, what was planned and what was freed, what was skipped and why; for the whole run, the totals
+//! cross-checked against the drive's own free-space figures, and the map the run started from. A report holds every
+//! figure the finish shows, so a run reopened from the history reads exactly as it did when it ended. Each finished
+//! run is kept in the run history (see [`save`], [`history`] and [`open`]).
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -9,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::categorize::CategoryId;
+use crate::map::Overview;
 
 /// How a step ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -93,6 +96,8 @@ pub struct StepReport {
     pub id: String,
     /// The proposal's title.
     pub title: String,
+    /// Why it was safe to remove, from the proposal.
+    pub why: String,
     /// The category its tile is in.
     pub category: CategoryId,
     /// It comes back on its own if needed.
@@ -127,6 +132,39 @@ pub struct CategoryFreed {
     pub bytes: u64,
 }
 
+/// Advice in the plan that Vacancy can't carry out itself (uninstall a game from its store), left for the user.
+/// Never counted as freed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LeftForYou {
+    /// The proposal's id.
+    pub id: String,
+    pub title: String,
+    /// One line with the numbers.
+    pub summary: String,
+    /// What to do, and why.
+    pub why: String,
+    /// What doing it would free, from the scan.
+    #[ts(type = "number")]
+    pub bytes: u64,
+}
+
+/// A folder the run reorganized: its files moved into a tidier layout, every move journaled so it can be undone.
+/// Reorganizations arrive with ticket 08; until then no run has any.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct Reorganized {
+    /// The reorganization's id.
+    pub id: String,
+    /// The folder, as the user knows it ("Downloads").
+    pub folder: String,
+    /// Files moved in it.
+    #[ts(type = "number")]
+    pub moved_items: u64,
+}
+
 /// What a run did. See the module docs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -158,6 +196,10 @@ pub struct RunReport {
     /// Files deleted.
     #[ts(type = "number")]
     pub deleted_items: u64,
+    /// Files moved by reorganizations.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub moved_items: u64,
     /// Files left in place, as far as is known.
     #[ts(type = "number")]
     pub skipped_items: u64,
@@ -180,8 +222,64 @@ pub struct RunReport {
     pub free_change: i64,
     /// The step that freed the most, by proposal id.
     pub biggest_win: Option<String>,
-    /// Advice in the plan that Vacancy can't carry out itself, by proposal id. Never counted as freed.
-    pub left_for_you: Vec<String>,
+    /// Advice in the plan that Vacancy can't carry out itself. Never counted as freed.
+    pub left_for_you: Vec<LeftForYou>,
+    /// Folders reorganized, in the plan's order.
+    #[serde(default)]
+    pub reorganized: Vec<Reorganized>,
+    /// The map the run started from: the scan's overview, with each category's name and size before the run. The
+    /// summary draws its before/after map from it.
+    pub map: Overview,
+}
+
+/// A run in the history list: enough to find it and to say what it did.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RunListing {
+    /// Opens the run with [`open`].
+    pub id: String,
+    pub mount_point: String,
+    pub volume_name: String,
+    /// The scanned volume's identity, so disks reusing a mount point keep separate histories.
+    pub volume_id: String,
+    /// When it started, in milliseconds since the Unix epoch.
+    #[ts(type = "number")]
+    pub started_at: i64,
+    #[ts(type = "number")]
+    pub freed_bytes: u64,
+    #[ts(type = "number")]
+    pub deleted_items: u64,
+    #[ts(type = "number")]
+    pub moved_items: u64,
+    /// The user stopped it part way.
+    pub cancelled: bool,
+}
+
+impl From<&RunReport> for RunListing {
+    fn from(r: &RunReport) -> Self {
+        Self {
+            id: r.id.clone(),
+            mount_point: r.mount_point.clone(),
+            volume_name: r.volume_name.clone(),
+            volume_id: r.map.volume.id.clone(),
+            started_at: r.started_at,
+            freed_bytes: r.freed_bytes,
+            deleted_items: r.deleted_items,
+            moved_items: r.moved_items,
+            cancelled: r.cancelled,
+        }
+    }
+}
+
+/// The run history: the runs that could be read, newest first, and how many files in the history folder couldn't
+/// be (damaged, cut short, or kept by a version of Vacancy with other figures). Those are passed over, never fatal.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RunHistory {
+    pub runs: Vec<RunListing>,
+    pub unreadable: u32,
 }
 
 /// The run history's folder inside the app's data folder.
@@ -189,12 +287,10 @@ pub fn history_dir(app_data: &Path) -> PathBuf {
     app_data.join("runs")
 }
 
-/// Keeps a finished run in the history folder `dir` (made if it isn't there), one JSON file per run. Returns the
-/// file. Written to a temporary name first and renamed into place, so a crash never leaves half a report.
-pub fn save(dir: &Path, report: &RunReport) -> io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
-    let name: String = report
-        .id
+/// A run's file name in the history folder: letters, digits and dashes kept, anything else made `_`, so no id can
+/// name a file outside the folder.
+fn file_name(id: &str) -> String {
+    let name: String = id
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' {
@@ -204,31 +300,82 @@ pub fn save(dir: &Path, report: &RunReport) -> io::Result<PathBuf> {
             }
         })
         .collect();
-    let file = dir.join(format!("{name}.json"));
-    let part = dir.join(format!("{name}.json.part"));
+    format!("{name}.json")
+}
+
+/// Keeps a finished run in the history folder `dir` (made if it isn't there), one JSON file per run. Returns the
+/// file. Written to a temporary name first and renamed into place, so a crash never leaves half a report.
+pub fn save(dir: &Path, report: &RunReport) -> io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let file = dir.join(file_name(&report.id));
+    let mut part = file.clone().into_os_string();
+    part.push(".part");
+    let part = PathBuf::from(part);
     let json = serde_json::to_vec_pretty(report).map_err(io::Error::other)?;
     std::fs::write(&part, json)?;
     std::fs::rename(&part, &file)?;
     Ok(file)
 }
 
-/// The runs kept in the history folder `dir`, newest first. Files that aren't reports are passed over.
-pub fn history(dir: &Path) -> Vec<RunReport> {
-    let mut out: Vec<RunReport> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-        .filter_map(|e| std::fs::read(e.path()).ok())
-        .filter_map(|bytes| serde_json::from_slice(&bytes).ok())
-        .collect();
-    out.sort_by_key(|r: &RunReport| std::cmp::Reverse(r.started_at));
+/// The runs kept in the history folder `dir`, newest first. A `.json` file that can't be read as a report is
+/// counted in `unreadable` and passed over; other files (a `.part` a crash left) are ignored. No folder yet is an
+/// empty history.
+pub fn history(dir: &Path) -> RunHistory {
+    let mut out = RunHistory::default();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|x| x == "json") {
+            continue;
+        }
+        match read(&path) {
+            Ok(report) => out.runs.push(RunListing::from(&report)),
+            Err(_) => out.unreadable += 1,
+        }
+    }
+    out.runs.sort_by(|a, b| {
+        b.started_at
+            .cmp(&a.started_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
     out
+}
+
+/// The run `id` from the history folder `dir`, as it was kept.
+pub fn open(dir: &Path, id: &str) -> io::Result<RunReport> {
+    let report = read(&dir.join(file_name(id)))?;
+    if report.id != id {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("the history has no run {id}"),
+        ));
+    }
+    Ok(report)
+}
+
+/// One kept run. Fails if the file can't be read or isn't a whole report.
+fn read(file: &Path) -> io::Result<RunReport> {
+    let bytes = std::fs::read(file)?;
+    let report: RunReport = serde_json::from_slice(&bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    // The webview renders this as a JavaScript Date. A JSON integer can deserialize successfully yet be outside
+    // its supported range, making Intl.DateTimeFormat throw while rendering the entire history list.
+    if !(-8_640_000_000_000_000..=8_640_000_000_000_000).contains(&report.started_at) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the run's timestamp is outside the supported date range",
+        ));
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::map::{ItemKind, MapCategory, MapItem, ScanSummary};
+    use crate::volume::{DriveKind, VolumeInfo};
 
     fn report(id: &str, at: i64) -> RunReport {
         RunReport {
@@ -242,6 +389,7 @@ mod tests {
             steps: vec![StepReport {
                 id: "w-temp".into(),
                 title: "Temp folders".into(),
+                why: "Apps make new ones as they need them.".into(),
                 category: CategoryId::Caches,
                 regenerable: true,
                 planned_bytes: 10,
@@ -261,6 +409,7 @@ mod tests {
             planned_bytes: 10,
             freed_bytes: 8,
             deleted_items: 1,
+            moved_items: 0,
             skipped_items: 1,
             freed_by_category: vec![CategoryFreed {
                 id: CategoryId::Caches,
@@ -273,25 +422,82 @@ mod tests {
             free_after: 58,
             free_change: 8,
             biggest_win: Some("w-temp".into()),
-            left_for_you: Vec::new(),
+            left_for_you: vec![LeftForYou {
+                id: "w-game".into(),
+                title: "A game you haven't played in a year".into(),
+                summary: "40 GB in Steam".into(),
+                why: "Uninstall it from Steam.".into(),
+                bytes: 40,
+            }],
+            reorganized: Vec::new(),
+            map: map(),
         }
     }
 
+    fn map() -> Overview {
+        Overview {
+            volume: VolumeInfo {
+                name: "Local Disk (C:)".into(),
+                mount_point: "C:\\".into(),
+                id: "1234".into(),
+                kind: DriveKind::Internal,
+                system: true,
+                total_bytes: 100,
+                used_bytes: 50,
+                free_bytes: 50,
+            },
+            free_bytes: 50,
+            scan: ScanSummary {
+                files: 3,
+                folders: 2,
+                scanned_bytes: 50,
+                hidden_bytes: 0,
+                over_count_bytes: 0,
+                unreadable: 0,
+                unreadable_samples: Vec::new(),
+                links_skipped: 0,
+                hard_links_merged: 0,
+                duration_ms: 10,
+            },
+            categories: vec![MapCategory {
+                id: CategoryId::Caches,
+                name: "Caches & temp".into(),
+                blurb: "Rebuilt on demand.".into(),
+                protected: false,
+                bytes: 50,
+                items: vec![MapItem {
+                    id: "p:w-temp".into(),
+                    name: "Temp folders".into(),
+                    path: String::new(),
+                    bytes: 10,
+                    files: 2,
+                    count: 0,
+                    last_used: Some(1),
+                    kind: ItemKind::Proposal,
+                    browsable: false,
+                    note: None,
+                    proposal: Some("w-temp".into()),
+                }],
+            }],
+        }
+    }
+
+    fn ids(h: &RunHistory) -> Vec<&str> {
+        h.runs.iter().map(|r| r.id.as_str()).collect()
+    }
+
     #[test]
-    fn keeps_runs_and_reads_them_back_newest_first() {
+    fn keeps_runs_and_lists_them_newest_first() {
         let dir = tempfile::tempdir().unwrap();
         let runs = history_dir(dir.path());
-        assert!(history(&runs).is_empty(), "no history yet");
+        assert_eq!(history(&runs), RunHistory::default(), "no history yet");
         save(&runs, &report("run/1:a", 1)).unwrap();
         save(&runs, &report("run-2", 2)).unwrap();
-        std::fs::write(runs.join("notes.txt"), "not a report").unwrap();
-        std::fs::write(runs.join("broken.json"), "{").unwrap();
         let back = history(&runs);
-        assert_eq!(
-            back.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
-            ["run-2", "run/1:a"]
-        );
-        assert_eq!(back[1], report("run/1:a", 1));
+        assert_eq!(ids(&back), ["run-2", "run/1:a"]);
+        assert_eq!(back.unreadable, 0);
+        assert_eq!(back.runs[1], RunListing::from(&report("run/1:a", 1)));
+        assert_eq!(back.runs[1].volume_id, "1234");
         assert!(
             std::fs::read_dir(&runs)
                 .unwrap()
@@ -299,5 +505,86 @@ mod tests {
                 .all(|e| !e.file_name().to_string_lossy().ends_with(".part")),
             "no half-written report is left"
         );
+    }
+
+    #[test]
+    fn opens_a_run_as_it_was_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = history_dir(dir.path());
+        save(&runs, &report("run/1:a", 1)).unwrap();
+        assert_eq!(open(&runs, "run/1:a").unwrap(), report("run/1:a", 1));
+        assert_eq!(
+            open(&runs, "run-9").unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        // Another id that maps to the same file name is not that run.
+        assert_eq!(
+            open(&runs, "run_1_a").unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        // An id can't reach outside the history folder.
+        std::fs::write(dir.path().join("outside.json"), "{}").unwrap();
+        assert!(open(&runs, "../outside").is_err());
+    }
+
+    #[test]
+    fn counts_damaged_files_and_passes_over_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs = history_dir(dir.path());
+        save(&runs, &report("run-1", 1)).unwrap();
+        std::fs::write(runs.join("notes.txt"), "not a report").unwrap();
+        std::fs::write(runs.join("run-2.json.part"), "{\"id\":").unwrap();
+        std::fs::write(runs.join("broken.json"), "{").unwrap();
+        std::fs::write(runs.join("empty.json"), "").unwrap();
+        // A report from before reports kept their map.
+        let mut old = serde_json::to_value(report("run-0", 0)).unwrap();
+        old.as_object_mut().unwrap().remove("map");
+        std::fs::write(runs.join("run-0.json"), old.to_string()).unwrap();
+        std::fs::create_dir(runs.join("folder.json")).unwrap();
+        let back = history(&runs);
+        assert_eq!(ids(&back), ["run-1"]);
+        assert_eq!(back.unreadable, 4, "broken, empty, old and the folder");
+        assert_eq!(
+            open(&runs, "run-0").unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn passes_over_reports_with_dates_the_webview_cant_render() {
+        let dir = tempfile::tempdir().unwrap();
+        save(dir.path(), &report("valid", 1)).unwrap();
+        for (id, at) in [
+            ("too-late", i64::MAX),
+            ("too-early", i64::MIN),
+            ("just-too-late", 8_640_000_000_000_001),
+            ("just-too-early", -8_640_000_000_000_001),
+        ] {
+            save(dir.path(), &report(id, at)).unwrap();
+            assert_eq!(
+                open(dir.path(), id).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        let back = history(dir.path());
+        assert_eq!(ids(&back), ["valid"]);
+        assert_eq!(back.unreadable, 4);
+        for (id, at) in [
+            ("latest", 8_640_000_000_000_000),
+            ("earliest", -8_640_000_000_000_000),
+        ] {
+            save(dir.path(), &report(id, at)).unwrap();
+            assert_eq!(open(dir.path(), id).unwrap().started_at, at);
+        }
+    }
+
+    #[test]
+    fn reads_reports_kept_before_moves_were_counted() {
+        let mut json = serde_json::to_value(report("run-1", 1)).unwrap();
+        let fields = json.as_object_mut().unwrap();
+        fields.remove("movedItems");
+        fields.remove("reorganized");
+        let back: RunReport = serde_json::from_value(json).unwrap();
+        assert_eq!(back, report("run-1", 1));
     }
 }

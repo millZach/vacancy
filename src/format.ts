@@ -1,5 +1,5 @@
 /** A no-break space, so "476 GB" never wraps between the number and its unit. */
-const NBSP = '\u00a0';
+export const NBSP = '\u00a0';
 
 /**
  * Bytes in decimal units, the way Finder, Explorer's drive view and most people count: "476 GB". Terabytes always

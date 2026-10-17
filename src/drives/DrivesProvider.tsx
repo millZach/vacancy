@@ -231,6 +231,7 @@ function drivesValue(
       void bridge.cancelRun();
     },
     showSummary: () => dispatch({ type: 'showSummary', mountPoint: session.current }),
+    summarySeen: () => dispatch({ type: 'summarySeen', mountPoint: session.current }),
     leaveRun: () => dispatch({ type: 'leaveRun', mountPoint: session.current }),
     dismissGone: () => dispatch({ type: 'dismissGone' }),
   };

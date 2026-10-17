@@ -13,7 +13,8 @@
     "test:watch": "vitest",
     "tauri": "tauri",
     "ripple-strip": "node tools/ripple-strip.mjs",
-    "map-shots": "node tools/map-shots.mjs"
+    "map-shots": "node tools/map-shots.mjs",
+    "wrapped-shots": "node tools/wrapped-shots.mjs"
   },
   "dependencies": {
     "@fontsource-variable/overpass": "^5.3.0",

@@ -28,8 +28,8 @@ use ts_rs::TS;
 use crate::categorize::{CategoryId, Env, ItemRef};
 use crate::fsid::{Identity, Walker};
 use crate::guard::{Denied, Guard};
-use crate::map::ScannedVolume;
-use crate::report::{Skip, SkipKind};
+use crate::map::{Overview, ScannedVolume};
+use crate::report::{LeftForYou, Skip, SkipKind};
 use crate::rules::{ProposalAction, loose};
 use crate::snapshot::{DirId, Snapshot, file_digest_key};
 
@@ -135,6 +135,8 @@ pub(crate) struct Action {
 pub(crate) struct Step {
     pub(crate) id: String,
     pub(crate) title: String,
+    /// Why it is safe to remove, from the proposal.
+    pub(crate) why: String,
     pub(crate) category: CategoryId,
     pub(crate) regenerable: bool,
     /// Its rule may take a folder that holds a macOS app bundle (Xcode's DerivedData).
@@ -154,7 +156,9 @@ pub struct Plan {
     /// When the scan began.
     since: SystemTime,
     steps: Vec<Step>,
-    left_for_you: Vec<String>,
+    left_for_you: Vec<LeftForYou>,
+    /// The map of the scan it was made from, for the run's report.
+    map: Overview,
 }
 
 impl Plan {
@@ -190,7 +194,7 @@ impl Plan {
                 .iter()
                 .flat_map(|s| s.refused.iter().map(|(skip, _)| skip.clone()))
                 .collect(),
-            left_for_you: self.left_for_you.clone(),
+            left_for_you: self.left_for_you.iter().map(|l| l.id.clone()).collect(),
         }
     }
 
@@ -210,8 +214,12 @@ impl Plan {
         &self.steps
     }
 
-    pub(crate) fn left_for_you(&self) -> &[String] {
+    pub(crate) fn left_for_you(&self) -> &[LeftForYou] {
         &self.left_for_you
+    }
+
+    pub(crate) fn map(&self) -> &Overview {
+        &self.map
     }
 }
 
@@ -244,12 +252,19 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
     for i in chosen {
         let p = &proposals.list()[i];
         if p.action != ProposalAction::Delete {
-            left_for_you.push(p.id.clone());
+            left_for_you.push(LeftForYou {
+                id: p.id.clone(),
+                title: p.title.clone(),
+                summary: p.summary.clone(),
+                why: p.why.clone(),
+                bytes: p.bytes,
+            });
             continue;
         }
         let mut step = Step {
             id: p.id.clone(),
             title: p.title.clone(),
+            why: p.why.clone(),
             category: p.category,
             regenerable: p.regenerable,
             takes_built_apps: proposals.takes_built_apps(i),
@@ -362,6 +377,7 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
         since: snap.started(),
         steps,
         left_for_you,
+        map: scanned.overview.clone(),
     })
 }
 

@@ -15,18 +15,29 @@ interface Props {
   reclaimable?: number | null;
   /** The screen's call to action in the header ("Build a plan"), if it has one. */
   action?: ReactNode;
+  /** The run history's button, once the drives are known. */
+  history?: ReactNode;
   /** Light the sign: a run has just made vacancy. */
   lit?: boolean;
   children: ReactNode;
 }
 
 /**
- * The window's frame: the header (wordmark, the drive plate, what can be reclaimed, the AI agent and the screen's
- * call to action) over the current screen.
+ * The window's frame: the header (wordmark, the drive plate, what can be reclaimed, past runs, the AI agent and the
+ * screen's call to action) over the current screen.
  * On macOS the title bar is an overlay, so the traffic lights sit in the header's left end and the header drags
  * the window. On Windows the native title bar does both.
  */
-export function Shell({ platform, drive, agent, reclaimable = null, action = null, lit = false, children }: Props) {
+export function Shell({
+  platform,
+  drive,
+  agent,
+  reclaimable = null,
+  action = null,
+  history = null,
+  lit = false,
+  children,
+}: Props) {
   const overlay = platform === 'macos';
   // "deep": anywhere in the header drags the window, except on its controls.
   const drag = overlay ? { 'data-tauri-drag-region': 'deep' } : {};
@@ -47,6 +58,7 @@ export function Shell({ platform, drive, agent, reclaimable = null, action = nul
               )}
             </span>
           )}
+          {history}
           <span
             className={agent ? 'pill' : 'pill is-muted'}
             title={agent ? `${agent} explains unfamiliar folders and suggests reorganizations` : 'No AI agent found'}

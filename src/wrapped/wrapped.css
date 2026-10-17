@@ -1,0 +1,832 @@
+/* Variant D's highlight slides: C's "Wrapped" finish in A's look, over the whole window. Colours, type and timings
+   are tokens (tokens.css, "the finish"). */
+
+/* The slides and the summary sit side by side in the shell's body; the wrapper only carries their state. */
+.finish {
+  display: contents;
+}
+
+/* ---------- the frame ---------- */
+.wrap {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  overflow: hidden;
+}
+.wrap-bg {
+  position: absolute;
+  inset: 0;
+  background: var(--wrap-bg);
+  transition: opacity var(--wrap-bg-fade) var(--ease-fade) var(--wrap-bg-delay);
+}
+.wrap-haze {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: var(--wrap-haze);
+  transition: opacity var(--wrap-bg-fade);
+}
+.wrap--freed .wrap-haze {
+  background: var(--wrap-haze-sign);
+}
+/* The wordmark where the header's is, so the hand-off keeps it still. */
+.wrap-top {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  height: var(--header-h);
+  display: flex;
+  align-items: center;
+  padding: 0 16px 0 var(--space-6);
+  transition: opacity var(--wrap-top-fade);
+}
+.shell[data-chrome='overlay'] .wrap-top {
+  padding-left: var(--traffic-lights-w);
+}
+.wrap-top.is-hidden {
+  opacity: 0;
+}
+.wrap-deck {
+  position: absolute;
+  inset: 0;
+}
+/* Focus is put here for the keyboard and screen readers; it is the whole window, so it draws no ring. */
+.wrap-deck:focus {
+  outline: none;
+}
+.wrap-stage {
+  position: absolute;
+  inset: 64px 0 88px;
+  display: grid;
+  place-items: center;
+}
+.slide {
+  width: min(1060px, calc(100% - 140px));
+  max-height: 100%;
+}
+
+/* ---------- the controls ---------- */
+.wrap-nav {
+  position: absolute;
+  left: 50%;
+  bottom: 24px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  transform: translateX(-50%);
+}
+.dots {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 6px;
+}
+.dot {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--color-dot);
+  cursor: pointer;
+  overflow: hidden;
+  transition:
+    width var(--dot-grow),
+    background var(--dot-grow);
+}
+.dot.is-past {
+  background: var(--color-dot-past);
+}
+.dot.is-on {
+  width: 46px;
+  background: var(--color-dot-on);
+}
+/* The countdown: filled by the slides' script (a compositor animation of this scale). */
+.dot i {
+  position: absolute;
+  inset: 0;
+  background: var(--color-neon);
+  box-shadow: var(--glow-dot);
+  transform: scaleX(0);
+  transform-origin: left;
+}
+.dot:focus-visible {
+  outline-offset: 3px;
+}
+.round {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid var(--color-line-2);
+  border-radius: 50%;
+  background: var(--color-raise);
+  color: var(--color-text);
+  cursor: pointer;
+  transition:
+    border-color var(--finish-control-ms),
+    background var(--finish-control-ms);
+}
+.round:hover:not(:disabled) {
+  border-color: var(--color-line-hover);
+  background: var(--color-raise-hover);
+}
+.round:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+.round.is-ghost {
+  border-color: transparent;
+  background: none;
+  color: var(--color-text-2);
+}
+.wrap-skip {
+  position: absolute;
+  right: 30px;
+  bottom: 36px;
+  z-index: 3;
+  padding: 2px;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  color: var(--color-link);
+  font: 600 var(--text-base) / 1.2 var(--font-sans);
+  cursor: pointer;
+}
+.wrap-skip:hover {
+  color: var(--color-neon-ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+/* ---------- the hand-off and the replay ---------- */
+.wrap .wrap-fade {
+  transition: opacity var(--wrap-chrome-fade) ease;
+}
+.wrap.is-leaving {
+  pointer-events: none;
+}
+/* As the numbers fly, everything else on the slides gives way to the summary under them. */
+.wrap.is-fly .wrap-fade,
+.wrap.is-fly .wrap-haze,
+.wrap.is-fly .wrap-top,
+.wrap.is-fly .wrap-bg {
+  opacity: 0;
+}
+.wrap.is-fly .wrap-top {
+  transition-duration: var(--wrap-chrome-fade);
+}
+
+/* ---------- type ---------- */
+.sl-title {
+  margin: 0 0 26px;
+  max-width: 24ch;
+  font: 300 var(--text-slide-title) / 1.1 var(--font-sans);
+  letter-spacing: -0.03em;
+  color: var(--color-text);
+  text-wrap: balance;
+}
+.sl-sub {
+  margin: 0;
+  max-width: 62ch;
+  font-size: var(--text-slide);
+  line-height: 1.6;
+  color: var(--color-text-2);
+}
+.sl-lead {
+  margin: 0;
+  max-width: 56ch;
+  font-size: var(--text-slide-lead);
+  line-height: 1.55;
+  color: var(--color-text-2);
+  text-wrap: balance;
+}
+
+/* ---------- 1. the sign and the letterboard ---------- */
+.sl-freed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 24px;
+  text-align: center;
+}
+.sign {
+  position: relative;
+  display: inline-block;
+  padding: 0.06em 0.16em 0.2em;
+  margin-bottom: -0.12em;
+  font: 400 var(--text-sign) / 1 var(--font-script);
+  white-space: nowrap;
+  user-select: none;
+}
+.sign::before {
+  content: '';
+  position: absolute;
+  inset: -25% -14%;
+  background: var(--glow-sign-halo);
+  pointer-events: none;
+  animation: sign-glow var(--sign-glow) ease both var(--sign-halo-start);
+}
+.sign-off {
+  position: relative;
+  color: var(--color-sign-off);
+  text-shadow: var(--glow-sign-off);
+}
+.sign-lit {
+  position: absolute;
+  inset: 0;
+  padding: inherit;
+  color: var(--color-neon-ink);
+  text-shadow: var(--glow-sign);
+}
+.sign-lit > span {
+  opacity: 0;
+  will-change: opacity;
+  animation: sign-flick var(--sign-flick) linear both;
+  animation-delay: calc(var(--sign-start) + var(--k) * var(--sign-gap));
+}
+.board {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 18px 32px 15px;
+  border-radius: var(--radius-card);
+  background: var(--board-bg);
+  box-shadow: var(--board-edge);
+}
+.board-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 5px;
+  perspective: 600px;
+}
+.board-tile {
+  display: inline-block;
+  font: 800 var(--text-board) / 1 var(--font-sans);
+  color: var(--color-board-tile);
+  text-shadow: var(--shadow-board-tile);
+  transform-origin: 50% 0;
+  animation: tile-drop var(--board-flip) both;
+  animation-delay: calc(var(--board-start) + var(--row) * var(--board-row-gap) + var(--i) * var(--board-tile-gap));
+}
+.board-row + .board-row .board-tile {
+  font-size: var(--text-board-2);
+  letter-spacing: 0.06em;
+  color: var(--color-board-tile-2);
+}
+.board-gap {
+  width: 0.35em;
+}
+
+/* ---------- 2. disk before and after ---------- */
+.dbars {
+  display: grid;
+  gap: 22px;
+  margin: 6px 0 30px;
+}
+.dbar {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr) 170px;
+  gap: 20px;
+  align-items: center;
+}
+.dbar-label {
+  font-size: var(--text-lg);
+  color: var(--color-text-2);
+}
+.dbar-track {
+  display: flex;
+  height: 52px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--ground);
+  box-shadow: inset 0 0 0 1px var(--color-line-2);
+  contain: layout paint;
+}
+.dbar-track > i {
+  flex: none;
+  height: 100%;
+  background: oklch(var(--map-seg-l) var(--map-seg-c) var(--h));
+  box-shadow: inset -2px 0 0 var(--color-bg);
+}
+.dbar-track > i.is-locked {
+  background: var(--hatch), var(--color-seg-locked);
+}
+.dbar.is-after .dbar-track > i {
+  animation: seg-shrink var(--bar-move) var(--ease-grow) both;
+  animation-delay: calc(var(--bar-start) + var(--k) * var(--bar-gap));
+}
+.dbar-free {
+  flex: 1;
+  min-width: 0;
+}
+.dbar-vacant {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px dashed var(--color-vacant-edge);
+  border-radius: 3px;
+  background: var(--color-vacant-lot);
+  box-shadow: var(--edge-vacant-lot);
+}
+.dbar-vacant em {
+  font: 700 var(--text-slide-lead) / 1 var(--font-sans);
+  font-style: normal;
+  color: var(--color-neon-ink);
+  text-shadow: var(--glow-vacant-text);
+  white-space: nowrap;
+  animation: fade-in var(--vacant-label-in) ease both var(--vacant-label-at);
+}
+.dbar-val {
+  font-size: var(--text-lg);
+  color: var(--color-text-2);
+  white-space: nowrap;
+}
+.dbar-val b {
+  margin-right: 4px;
+  font-size: var(--text-slide-num);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+}
+.dbar.is-after .dbar-val b {
+  color: var(--color-neon-ink);
+  text-shadow: var(--glow-free-after);
+}
+
+/* ---------- 3. the key fob ---------- */
+.sl-win {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 64px;
+  align-items: center;
+}
+.fob-wrap {
+  position: relative;
+  width: 200px;
+  height: 320px;
+  justify-self: center;
+  transform-origin: 50% 0;
+  transform: rotate(-9deg);
+  filter: var(--shadow-fob);
+  animation: fob-swing var(--fob-swing) both var(--fob-start);
+}
+.fob-ring {
+  position: absolute;
+  left: 50%;
+  top: -46px;
+  width: 58px;
+  height: 58px;
+  margin-left: -29px;
+  border-radius: 50%;
+  border: 4px solid var(--color-fob-ring);
+  box-shadow: var(--shadow-fob-ring);
+}
+.fob {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding-top: 30px;
+  clip-path: polygon(50% 0, 100% 15%, 100% 85%, 50% 100%, 0 85%, 0 15%);
+  background: var(--fob-fill);
+  color: var(--color-fob-text);
+  text-align: center;
+}
+.fob::after {
+  content: '';
+  position: absolute;
+  inset: 10px;
+  clip-path: polygon(50% 0, 100% 15%, 100% 85%, 50% 100%, 0 85%, 0 15%);
+  border: 1px solid var(--color-fob-edge);
+  background: var(--fob-sheen);
+  pointer-events: none;
+}
+.fob-hole {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  width: 20px;
+  height: 20px;
+  margin-left: -10px;
+  border-radius: 50%;
+  background: var(--color-bg);
+  box-shadow: var(--shadow-fob-hole);
+}
+.fob small {
+  font: 700 var(--text-md) / 1 var(--font-sans);
+  letter-spacing: 0.03em;
+  opacity: 0.9;
+}
+.fob b {
+  font: 800 var(--text-fob) / 1 var(--font-sans);
+  letter-spacing: -0.03em;
+  text-shadow: var(--emboss-fob);
+}
+.fob em {
+  font: 700 var(--text-fob-unit) / 1 var(--font-sans);
+  font-style: normal;
+}
+.fob-foot {
+  max-width: 120px;
+  margin-top: 12px;
+  font-size: var(--text-ui);
+  line-height: 1.25;
+  opacity: 0.92;
+}
+.win-words .sl-title {
+  margin-bottom: 18px;
+}
+.win-why {
+  max-width: 56ch;
+  margin: 18px 0 0;
+  padding-left: 14px;
+  border-left: 2px solid var(--color-win-why);
+  font-size: var(--text-lg);
+  line-height: 1.6;
+  color: var(--color-text-2);
+}
+
+/* ---------- 4. by category ---------- */
+.chart {
+  display: grid;
+  gap: 6px;
+  max-width: 940px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.chart li {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr) 90px 46px;
+  gap: 18px;
+  align-items: center;
+  height: 42px;
+  padding: 0 8px;
+  border-radius: var(--radius-sm);
+}
+.chart li:hover {
+  background: var(--color-row-hover);
+}
+.chart-name {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: var(--text-slide-row);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chart-name i {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  background: oklch(var(--map-chip-l) var(--map-chip-c) var(--h));
+}
+.chart-track {
+  height: 14px;
+}
+.chart-track i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--color-chart-fill);
+  box-shadow: var(--edge-chart);
+  transform-origin: left;
+  animation: bar-grow var(--chart-grow) var(--ease-grow) both;
+  animation-delay: calc(var(--chart-start) + var(--k) * var(--chart-gap));
+}
+.chart-val {
+  text-align: right;
+  font-size: var(--text-slide-lead);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.chart-pct {
+  text-align: right;
+  font-size: var(--text-slide-note);
+  color: var(--color-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 5. moved ---------- */
+.moved {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 18px;
+  margin: 24px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.moved-card {
+  display: grid;
+  gap: 4px;
+  padding: 18px 20px;
+  border: 1px solid var(--color-line-2);
+  border-radius: var(--radius-card);
+  background: var(--color-panel);
+}
+.moved-card b {
+  font-size: var(--text-fob-unit);
+  font-weight: 600;
+}
+.moved-card span {
+  font-size: var(--text-slide-note);
+  color: var(--color-text-3);
+}
+
+/* ---------- 6. skipped and left for you ---------- */
+.kept {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 48px;
+}
+.kept h2 {
+  margin: 0 0 10px;
+  font: 600 var(--text-lg) / 1.3 var(--font-sans);
+  color: var(--color-text-2);
+}
+.kept ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.kept li {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--color-line);
+}
+.kept li > svg {
+  margin-top: 3px;
+  color: var(--color-review);
+}
+.kept li.is-advice > svg {
+  color: var(--color-text-2);
+}
+.kept li b {
+  display: block;
+  font-size: var(--text-slide-row);
+  font-weight: 600;
+}
+.kept li div span,
+.kept li code {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-size: var(--text-slide-note);
+  line-height: 1.45;
+  color: var(--color-text-3);
+}
+.kept li code {
+  font: 400 var(--text-sm) / 1.5 var(--font-mono);
+}
+.kept li em {
+  font-style: normal;
+  font-size: var(--text-md);
+  color: var(--color-text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.kept li.kept-more {
+  display: block;
+  font-size: var(--text-slide-note);
+  color: var(--color-text-3);
+}
+.kept-none {
+  margin: 0;
+  font-size: var(--text-md);
+  color: var(--color-text-3);
+}
+.kept-hint {
+  margin: 12px 0 0;
+  font-size: var(--text-base);
+  color: var(--color-text-3);
+}
+/* Deleted, but its space is still in use: a note, not a warning. */
+.kept ul.kept-notes {
+  margin-top: 18px;
+}
+.kept-notes li {
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 10px;
+  padding: 8px 0;
+  border: 0;
+  font-size: var(--text-base);
+  line-height: 1.45;
+  color: var(--color-text-3);
+}
+.kept-notes li > svg {
+  margin-top: 2px;
+  color: var(--color-text-3);
+}
+.kept-notes li code {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--text-2xs);
+  -webkit-line-clamp: 1;
+}
+
+/* ---------- 7. checkout, whose numbers fly into the summary panel ---------- */
+.sl-checkout .sl-title {
+  margin-bottom: 28px;
+}
+.co-num {
+  display: inline-block;
+  font-size: var(--text-checkout);
+  text-shadow: var(--glow-hero-em);
+}
+[data-fly] {
+  transform-origin: 0 0;
+  will-change: transform;
+}
+.co-sub {
+  max-width: 46ch;
+  margin: 14px 0 0;
+  font-size: var(--text-slide-lead);
+  line-height: 1.5;
+  color: var(--color-text-2);
+}
+.co-stats {
+  display: flex;
+  gap: 64px;
+  max-width: 760px;
+  margin: 28px 0 0;
+  padding: 18px 0 16px;
+  border-top: 1px solid var(--color-line);
+  border-bottom: 1px solid var(--color-line);
+}
+.co-stats div {
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: flex-start;
+}
+.co-stats dd {
+  display: inline-block;
+  margin: 0;
+  font: 600 var(--text-checkout-stat) / 1.2 var(--font-sans);
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.co-stats dt {
+  margin-top: 4px;
+  font-size: var(--text-md);
+  color: var(--color-text-3);
+}
+.co-actions {
+  margin-top: 28px;
+}
+
+/* ---------- smaller windows ---------- */
+@media (max-width: 1260px) {
+  .sl-win {
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 40px;
+  }
+  .chart li {
+    grid-template-columns: 200px minmax(0, 1fr) 80px 42px;
+  }
+  .co-stats {
+    gap: 44px;
+  }
+}
+@media (max-height: 760px) {
+  .sl-title {
+    margin-bottom: 18px;
+  }
+  .sign {
+    font-size: var(--text-sign-short);
+  }
+  .sl-freed {
+    gap: 16px;
+  }
+  .fob-wrap {
+    scale: 0.85;
+  }
+  .dbar-track {
+    height: 44px;
+  }
+  .co-num {
+    font-size: var(--text-checkout-short);
+  }
+  .co-stats {
+    margin-top: 20px;
+    padding: 14px 0 12px;
+  }
+  .co-actions {
+    margin-top: 20px;
+  }
+}
+
+/* ---------- motion ---------- */
+@keyframes sign-flick {
+  0% {
+    opacity: 0;
+  }
+  8% {
+    opacity: 1;
+  }
+  11% {
+    opacity: 0.12;
+  }
+  18% {
+    opacity: 0.9;
+  }
+  21% {
+    opacity: 0.25;
+  }
+  33% {
+    opacity: 1;
+  }
+  37% {
+    opacity: 0.5;
+  }
+  44%,
+  100% {
+    opacity: 1;
+  }
+}
+@keyframes sign-glow {
+  from {
+    opacity: 0;
+  }
+}
+/* A tile on its hinge: dropping past level, then settling, like the prototype's spring. */
+@keyframes tile-drop {
+  0% {
+    opacity: 0;
+    transform: rotateX(-95deg);
+  }
+  45% {
+    opacity: 1;
+    transform: rotateX(14deg);
+  }
+  68% {
+    transform: rotateX(-6deg);
+  }
+  84% {
+    transform: rotateX(2deg);
+  }
+  100% {
+    opacity: 1;
+    transform: rotateX(0);
+  }
+}
+/* The fob drops on its ring and swings to rest at a tilt. */
+@keyframes fob-swing {
+  0% {
+    opacity: 0;
+    transform: translateY(-40px) rotate(-22deg);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(3px) rotate(1deg);
+  }
+  50% {
+    transform: translateY(-1px) rotate(-15deg);
+  }
+  68% {
+    transform: translateY(0) rotate(-5deg);
+  }
+  84% {
+    transform: rotate(-10.5deg);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) rotate(-9deg);
+  }
+}
+/* From the category's size before the run to what it holds now (widths set per segment). */
+@keyframes seg-shrink {
+  from {
+    width: var(--from);
+  }
+}
+@keyframes bar-grow {
+  from {
+    transform: scaleX(0);
+  }
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}

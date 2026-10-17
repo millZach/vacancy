@@ -130,7 +130,7 @@
   text-shadow: var(--glow-hero);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  animation: neon-on 1.3s linear both 0.4s;
+  animation: neon-on var(--summary-neon-ms) linear both var(--summary-neon-start-ms);
 }
 .summary-frac {
   font-size: 0.5em;
@@ -365,4 +365,155 @@
   justify-content: flex-end;
   padding: 12px 24px;
   border-top: 1px solid var(--color-line);
+}
+
+/* A run reopened from the history: when it ran. */
+.summary-when {
+  margin: 0 0 10px;
+  font: 700 var(--text-caps) / 1 var(--font-sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-3);
+}
+/* Focus lands on the freed figure when the summary comes up; it is a heading, so it draws no ring. */
+.summary-num:focus {
+  outline: none;
+}
+
+/* Moves, notes about space still in use, and advice. */
+.moves,
+.advice {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.moves li {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 9px;
+  padding: var(--space-2) 0;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--color-text-2);
+}
+.moves li svg {
+  margin-top: 2px;
+  color: var(--color-text-3);
+}
+.moves b {
+  color: var(--color-text);
+  font-weight: 600;
+}
+/* Deleted, but its space is still in use: a quiet note, not a warning. */
+.skips.is-notes li {
+  color: var(--color-text-3);
+}
+.skips.is-notes li svg {
+  color: var(--color-text-3);
+}
+.advice li {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  gap: 9px;
+  padding: var(--space-2) 0;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--color-text-2);
+}
+.advice li svg {
+  margin-top: 2px;
+  color: var(--color-text-2);
+}
+.advice b {
+  display: block;
+  color: var(--color-text);
+  font-weight: 600;
+}
+.advice-num {
+  color: var(--color-text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.summary-foot {
+  justify-content: space-between;
+  align-items: center;
+}
+.replay {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: -4px;
+  padding: 7px 6px 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  font: 600 var(--text-ui) / 1.2 var(--font-sans);
+  color: var(--color-text-2);
+  cursor: pointer;
+  transition:
+    color var(--finish-control-ms),
+    background var(--finish-control-ms);
+}
+.replay svg {
+  color: var(--color-neon);
+}
+.replay:hover {
+  color: var(--color-text);
+  background: var(--color-raise);
+}
+
+/* ---------- the hand-off from the slides ---------- */
+/* While the checkout's numbers fly, their twins here wait unseen for them to land. */
+.finish.is-fly [data-fly-target] {
+  opacity: 0;
+}
+/* After the flight the panel is already in place (its numbers landed on it), and the rest of it rises in. */
+.finish.is-handed .tray.summary,
+.finish.is-handed .summary-num {
+  animation: none;
+}
+.finish.is-handed .summary-sub,
+.finish.is-handed .summary-note,
+.finish.is-handed .diskba,
+.finish.is-handed .stats dt,
+.finish.is-handed .summary-sec,
+.finish.is-handed .summary-foot {
+  animation: rise var(--rise) both;
+}
+.finish.is-handed .summary-sub,
+.finish.is-handed .summary-note {
+  animation-delay: var(--rise-words);
+}
+.finish.is-handed .diskba {
+  animation-delay: var(--rise-bars);
+}
+.finish.is-handed .stats dt {
+  animation-delay: var(--rise-labels);
+}
+.finish.is-handed .summary-sec {
+  animation-delay: var(--rise-sections);
+}
+.finish.is-handed .summary-sec + .summary-sec {
+  animation-delay: calc(var(--rise-sections) + var(--rise-gap));
+}
+.finish.is-handed .summary-sec + .summary-sec + .summary-sec {
+  animation-delay: calc(var(--rise-sections) + 2 * var(--rise-gap));
+}
+.finish.is-handed .summary-foot {
+  animation-delay: var(--rise-foot);
+}
+.finish.is-handed .finish-map {
+  animation: settle var(--settle) both;
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+}
+@keyframes settle {
+  from {
+    transform: scale(0.985);
+  }
 }

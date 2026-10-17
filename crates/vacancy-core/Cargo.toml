@@ -49,3 +49,7 @@ windows-sys = { version = "0.61", features = [
 
 [lints]
 workspace = true
+
+[[example]]
+name = "fixture_mutator"
+test = true

@@ -16,6 +16,10 @@ id: string,
  */
 title: string, 
 /**
+ * Why it was safe to remove, from the proposal.
+ */
+why: string, 
+/**
  * The category its tile is in.
  */
 category: CategoryId, 

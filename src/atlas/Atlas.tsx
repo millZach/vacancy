@@ -18,7 +18,7 @@ import type { StepView } from '../run/progress';
 import { RunPanel, type ShownRun } from '../run/RunPanel';
 import { ScanHud } from '../scan/ScanHud';
 import { ScanPlate } from '../scan/ScanPlate';
-import { SummaryMap, SummaryPanel } from '../summary/Summary';
+import { Finish } from '../wrapped/Finish';
 import './atlas.css';
 
 interface Props {
@@ -43,8 +43,8 @@ const ALMOST = 0.98;
  * a category, then opens its folders, with a breadcrumb back out; hovering shows what a tile is, how big and when it
  * was last used. Reclaimable tiles (the drive's proposals) glow; with the plan tray open, clicking one puts it in
  * the drive's plan or takes it out. "Free X GB" checks the plan and asks once; while it runs the tray is the run
- * panel and the plan's tiles drain to vacant ground. After the run the drive's screen is its summary: the
- * before/after map and what changed.
+ * panel and the plan's tiles drain to vacant ground. After the run the drive's screen is its finish: the highlight
+ * slides, then the summary (the before/after map and what changed), which the drive keeps until it is scanned again.
  */
 export function Atlas({ drives, agent, planOpen, onPlanOpen }: Props) {
   const bridge = useBridge();
@@ -156,13 +156,14 @@ export function Atlas({ drives, agent, planOpen, onPlanOpen }: Props) {
 
   const up = useCallback(() => navigate((ls) => ls.slice(0, -1)), [navigate]);
   useEffect(() => {
-    if (!overview) return;
+    // The finish has its own keys: Escape there skips the slides.
+    if (!overview || summary) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') up();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [overview, up]);
+  }, [overview, summary, up]);
 
   const inPlan = (leaf: Leaf) => leaf.proposal !== null && plan.includes(leaf.proposal);
   /** Changing the plan drops one still being checked, and an old reason it couldn't be made. */
@@ -280,10 +281,10 @@ export function Atlas({ drives, agent, planOpen, onPlanOpen }: Props) {
 
   return (
     <>
-      <main className={overview ? 'atlas is-map' : 'atlas is-scan'}>
+      {/* Kept while the finish is up (hidden), so the map's size is still followed when it comes back. */}
+      <main className={overview ? 'atlas is-map' : 'atlas is-scan'} hidden={!!summary}>
         {!overview && <DotField ref={field} calm={onPlate ? calm : null} scan={scanning ? progress : null} out={progress > 0.85} />}
-        {summary && top && <SummaryMap model={top} report={summary.report} hot={hot} onHot={setHot} />}
-        <div className="atlas-toolbar" hidden={!!summary}>
+        <div className="atlas-toolbar">
           <nav className="crumbs" aria-label="Map location">
             {levels.length === 0 || !overview ? (
               <span className="crumb is-here" aria-current="location">
@@ -356,8 +357,7 @@ export function Atlas({ drives, agent, planOpen, onPlanOpen }: Props) {
             </>
           )}
         </div>
-        {/* Kept while the summary is up (hidden), so the map's size is still followed when it comes back. */}
-        <div className={onPlate ? 'atlas-stage is-empty' : 'atlas-stage'} ref={stageRef} hidden={!!summary}>
+        <div className={onPlate ? 'atlas-stage is-empty' : 'atlas-stage'} ref={stageRef}>
           {shown && !summary && (
             <MapView
               freeLabel={
@@ -424,12 +424,12 @@ export function Atlas({ drives, agent, planOpen, onPlanOpen }: Props) {
           onScanAgain={drives.showScanScreen}
         />
       )}
-      {summary && overview && (
-        <SummaryPanel
-          overview={overview}
+      {summary && (
+        <Finish
+          key={summary.report.id}
           report={summary.report}
-          os={bridge.platform === 'macos' ? 'macOS' : 'Windows'}
-          onHot={setHot}
+          start={summary.fresh ? 'slides' : 'rest'}
+          onSeen={drives.summarySeen}
           onScanAgain={drives.showScanScreen}
         />
       )}

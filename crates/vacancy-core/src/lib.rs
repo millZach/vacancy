@@ -34,7 +34,10 @@ pub use map::{
     scan_update,
 };
 pub use plan::{Plan, PlanError, PlanStep, PlanSummary, plan};
-pub use report::{CategoryFreed, Outcome, RunReport, Skip, SkipKind, StepReport};
+pub use report::{
+    CategoryFreed, LeftForYou, Outcome, Reorganized, RunHistory, RunListing, RunReport, Skip,
+    SkipKind, StepReport,
+};
 pub use rules::{
     ActionKind, Moment, Proposal, ProposalAction, ProposalSource, Proposals, Risk, propose,
 };

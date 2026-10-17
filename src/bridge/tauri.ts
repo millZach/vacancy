@@ -6,6 +6,7 @@ import type {
   PlanSummary,
   Platform,
   RunEvent,
+  RunHistory,
   RunReport,
   ScanOutcome,
   ScanUpdate,
@@ -35,7 +36,8 @@ export function createTauriBridge(): Bridge {
       return invoke<RunReport>('run_plan', { mountPoint, planId, onEvent: onEventChannel });
     },
     cancelRun: () => invoke<undefined>('cancel_run'),
-    listRuns: () => invoke<RunReport[]>('list_runs'),
+    listRuns: () => invoke<RunHistory>('list_runs'),
+    openRun: (id) => invoke<RunReport>('open_run', { id }),
   };
 }
 
