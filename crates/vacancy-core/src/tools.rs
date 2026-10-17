@@ -323,7 +323,13 @@ fn run(mut command: Command, limits: Limits, cancel: &CancelToken) -> Output {
                     Status::Failed(exit.code())
                 };
             }
-            Ok(None) if !progressed => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) if !progressed => {
+                if let Err(e) = pipe::wait(&stdout, &stderr, (out_read.eof, err_read.eof)) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Status::Refused(format!("Cannot wait for tool output: {e}"));
+                }
+            }
             Ok(None) => {}
             Err(e) => {
                 let _ = child.kill();
@@ -418,6 +424,10 @@ mod pipe {
     pub fn prepare<T: Pipe>(_: &T) -> io::Result<()> {
         Ok(())
     }
+    pub fn wait<A: Pipe, B: Pipe>(_: &A, _: &B, _: (bool, bool)) -> io::Result<()> {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        Ok(())
+    }
     pub fn available<T: Pipe>(pipe: &T) -> io::Result<Option<usize>> {
         use windows_sys::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_NO_DATA};
         use windows_sys::Win32::System::Pipes::PeekNamedPipe;
@@ -471,6 +481,38 @@ mod pipe {
     }
     pub fn available<T: Pipe>(_: &T) -> io::Result<Option<usize>> {
         Ok(Some(16 * 1024))
+    }
+    pub fn wait<A: Pipe, B: Pipe>(stdout: &A, stderr: &B, eof: (bool, bool)) -> io::Result<()> {
+        // A nonblocking read can reach WouldBlock just before the writer fills the pipe again. Wake for that
+        // data instead of imposing a full polling sleep on every burst. Closed pipes are omitted so their
+        // persistent hangup cannot cause a busy loop while the child is still alive.
+        let mut fds = [libc::pollfd {
+            fd: 0,
+            events: libc::POLLIN,
+            revents: 0,
+        }; 2];
+        let mut count = 0;
+        for (fd, closed) in [(stdout.as_raw_fd(), eof.0), (stderr.as_raw_fd(), eof.1)] {
+            if !closed {
+                fds[count].fd = fd;
+                count += 1;
+            }
+        }
+        // SAFETY: the initialized array has room for count <= 2 descriptors borrowed from live owned pipes.
+        // A zero count is a bounded sleep. The unchanged 10ms maximum keeps cancellation/deadline checks live.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), count as libc::nfds_t, 10) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        } else if fds[..count]
+            .iter()
+            .any(|fd| fd.revents & libc::POLLNVAL != 0)
+        {
+            return Err(io::Error::other("tool output pipe is no longer valid"));
+        }
+        Ok(())
     }
 }
 
