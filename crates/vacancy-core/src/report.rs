@@ -145,7 +145,7 @@ pub struct LeftForYou {
     pub summary: String,
     /// What to do, and why.
     pub why: String,
-    /// What doing it would free, from the scan.
+    /// Zero for advice: a store-reported installed size is never a reclaim estimate.
     #[ts(type = "number")]
     pub bytes: u64,
     /// Trusted advice affordance, absent in older history. Never counted as freed or executed with the plan.

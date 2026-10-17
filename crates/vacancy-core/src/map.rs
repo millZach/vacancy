@@ -349,7 +349,13 @@ fn build_map_with(
         return None;
     }
     let categories = categorize_until(snapshot, env, stop)?;
-    let proposals = propose_until(snapshot, &categories, env, moment, stop)?;
+    let mut proposals = propose_until(snapshot, &categories, env, moment, stop)?;
+    for hint in crate::hints::discover_until(env, snapshot, moment.now, stop)? {
+        if stop() {
+            return None;
+        }
+        proposals.append_hint(&hint);
+    }
     let claims: Vec<(CategoryId, &[ItemRef])> = proposals
         .list()
         .iter()

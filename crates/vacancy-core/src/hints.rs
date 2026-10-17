@@ -11,6 +11,9 @@ use ts_rs::TS;
 
 const MAX_MANIFEST: u64 = 1024 * 1024;
 const SIX_MONTHS: i64 = 183 * 24 * 60 * 60;
+const MAX_LIBRARIES: usize = 128;
+const MAX_MANIFESTS: usize = 512;
+const MAX_DISCOVERY_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(
@@ -29,7 +32,10 @@ impl HintAction {
     /// Only a known Steam id can produce an external URI. Logic is an in-app instruction.
     pub fn steam_uri(&self) -> Option<String> {
         match self {
-            Self::SteamUninstall { app_id } => Some(format!("steam://uninstall/{app_id}")),
+            Self::SteamUninstall { app_id } if *app_id > 0 => {
+                Some(format!("steam://uninstall/{app_id}"))
+            }
+            Self::SteamUninstall { .. } => None,
             Self::LogicInstructions => None,
         }
     }
@@ -50,6 +56,28 @@ pub struct Hint {
 /// history (including zero), future dates, corrupt manifests, linked paths and unreadable libraries are omitted.
 /// Only known Steam locations and libraries named by `libraryfolders.vdf` are inspected.
 pub fn steam(env: &Env, snapshot: &Snapshot, now: i64) -> Vec<Hint> {
+    steam_until(env, snapshot, now, &|| false).expect("discovery that never stops completes")
+}
+
+fn steam_until(
+    env: &Env,
+    snapshot: &Snapshot,
+    now: i64,
+    stop: &dyn Fn() -> bool,
+) -> Option<Vec<Hint>> {
+    steam_with_registry(env, snapshot, now, stop, installed_steam)
+}
+
+fn steam_with_registry(
+    env: &Env,
+    snapshot: &Snapshot,
+    now: i64,
+    stop: &dyn Fn() -> bool,
+    installed: impl FnOnce() -> Option<PathBuf>,
+) -> Option<Vec<Hint>> {
+    if stop() {
+        return None;
+    }
     let mut roots: Vec<PathBuf> = match env.platform {
         Platform::Windows => env.program_files.iter().map(|p| p.join("Steam")).collect(),
         Platform::MacOs => vec![env.home.join("Library/Application Support/Steam")],
@@ -59,24 +87,60 @@ pub fn steam(env: &Env, snapshot: &Snapshot, now: i64) -> Vec<Hint> {
     if env.platform == Platform::Windows
         && env.confined_to.is_none()
         && std::env::var_os(crate::fixture::ROOT_VAR).is_none()
-        && let Some(root) = installed_steam()
+        && let Some(root) = installed()
     {
         roots.push(root);
     }
-    steam_with_roots(env, snapshot, now, &roots)
+    steam_with_roots_until(env, snapshot, now, &roots, stop)
 }
 
 /// Inject installed roots for recorded/platform tests. All reads still enforce fixture identity confinement;
 /// libraries on an unscanned volume never generate a result for the current volume.
 pub fn steam_with_roots(env: &Env, snapshot: &Snapshot, now: i64, roots: &[PathBuf]) -> Vec<Hint> {
-    let roots = roots.to_vec();
+    steam_with_roots_until(env, snapshot, now, roots, &|| false)
+        .expect("discovery that never stops completes")
+}
+
+fn steam_with_roots_until(
+    env: &Env,
+    snapshot: &Snapshot,
+    now: i64,
+    roots: &[PathBuf],
+    stop: &dyn Fn() -> bool,
+) -> Option<Vec<Hint>> {
+    let roots: Vec<_> = roots.iter().take(MAX_LIBRARIES).cloned().collect();
     let mut libraries = roots.clone();
+    let mut bytes_left = MAX_DISCOVERY_BYTES;
     for root in roots {
-        if let Ok(text) = read_manifest(env, &root.join("steamapps/libraryfolders.vdf"))
+        if stop() {
+            return None;
+        }
+        if bytes_left == 0 {
+            break;
+        }
+        // Reserve the maximum read even for malformed UTF-8/failed parses. Failed inputs cannot bypass budgets.
+        let reserved = MAX_MANIFEST.saturating_add(1).min(bytes_left);
+        bytes_left -= reserved;
+        let text = read_manifest(
+            env,
+            &root.join("steamapps/libraryfolders.vdf"),
+            reserved.saturating_sub(1),
+            stop,
+        );
+        if stop() {
+            return None;
+        }
+        if let Ok(text) = text
             && let Some(Vdf::Object(library)) =
                 parse(&text).and_then(|mut v| v.remove("libraryfolders"))
         {
             for entry in library.values() {
+                if stop() {
+                    return None;
+                }
+                if libraries.len() >= MAX_LIBRARIES {
+                    break;
+                }
                 if let Vdf::Object(values) = entry
                     && let Some(Vdf::Text(path)) = values.get("path")
                 {
@@ -85,23 +149,37 @@ pub fn steam_with_roots(env: &Env, snapshot: &Snapshot, now: i64, roots: &[PathB
             }
         }
     }
-    let libraries: Vec<_> = libraries
-        .into_iter()
-        .take(128)
-        .filter_map(|p| {
+    let mut library_ids = Vec::new();
+    for p in libraries.into_iter().take(MAX_LIBRARIES) {
+        if stop() {
+            return None;
+        }
+        if let Some(id) =
             crate::fsid::chain(&p.join("steamapps")).and_then(|c| c.last().map(|s| s.id))
-        })
-        .collect();
+        {
+            library_ids.push(id);
+        }
+    }
     let mut found = BTreeMap::new();
+    let mut manifests = 0usize;
     // Reuse the scanner's no-link listing. Never re-enumerate a path that could have become a junction.
     for dir in snapshot.dirs() {
+        if stop() {
+            return None;
+        }
         if !snapshot
             .dir_identity(dir)
-            .is_some_and(|id| libraries.contains(&id))
+            .is_some_and(|id| library_ids.contains(&id))
         {
             continue;
         }
         for file in snapshot.files(dir) {
+            if stop() {
+                return None;
+            }
+            if manifests >= MAX_MANIFESTS || bytes_left == 0 {
+                return Some(found.into_values().collect());
+            }
             let path = snapshot.file_path(file);
             let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
                 continue;
@@ -114,15 +192,63 @@ pub fn steam_with_roots(env: &Env, snapshot: &Snapshot, now: i64, roots: &[PathB
             else {
                 continue;
             };
-            let Ok(text) = read_manifest(env, &path) else {
+            manifests += 1;
+            let Some(identity) = snapshot.file_full_identity(file) else {
                 continue;
             };
+            let expected = crate::fsid::ReadFingerprint {
+                identity,
+                logical: snapshot.file_logical(file),
+                scan_started: snapshot.started(),
+            };
+            let reserved = expected.logical.saturating_add(1);
+            if reserved > bytes_left || expected.logical > MAX_MANIFEST {
+                continue;
+            }
+            bytes_left -= reserved;
+            let Ok(text) = crate::fsid::read_scanned_bounded(
+                &path,
+                env.confined_to.as_deref(),
+                expected.logical,
+                expected,
+                stop,
+            ) else {
+                if stop() {
+                    return None;
+                }
+                continue;
+            };
+            if stop() {
+                return None;
+            }
             if let Some(hint) = steam_manifest(&text, id, now, path) {
                 found.entry(id).or_insert(hint);
             }
         }
     }
-    found.into_values().collect()
+    if stop() {
+        None
+    } else {
+        Some(found.into_values().collect())
+    }
+}
+
+/// Bounded read-only scan advice. Cancellation discards the whole result before the map can publish it. At most
+/// 128 libraries, 512 app manifests and 8 MiB of reserved metadata reads are considered; no app is launched.
+pub fn discover_until(
+    env: &Env,
+    snapshot: &Snapshot,
+    now: i64,
+    stop: &dyn Fn() -> bool,
+) -> Option<Vec<Hint>> {
+    let mut found = steam_until(env, snapshot, now, stop)?;
+    if stop() {
+        return None;
+    }
+    if let Some(hint) = logic_until(env, snapshot, stop)? {
+        found.push(hint);
+    }
+    if stop() { None } else { Some(found) }
 }
 
 #[cfg(windows)]
@@ -192,25 +318,102 @@ pub fn steam_manifest(text: &str, expected_id: u32, now: i64, path: PathBuf) -> 
 /// Recognize known library layouts, including Logic12's consolidated bundle. Allocated totals cannot tell how
 /// much shared APFS clone data would become free, so this advice deliberately carries no reclaim estimate.
 pub fn logic(env: &Env, snapshot: &Snapshot) -> Option<Hint> {
+    logic_until(env, snapshot, &|| false).expect("discovery that never stops completes")
+}
+
+fn logic_until(env: &Env, snapshot: &Snapshot, stop: &dyn Fn() -> bool) -> Option<Option<Hint>> {
     if env.platform != Platform::MacOs {
-        return None;
+        return Some(None);
     }
     let paths = [
         env.home.join("Music/Logic Pro Library.bundle"),
         env.root.join("Library/Application Support/Logic"),
         env.root.join("Library/Audio/Apple Loops/Apple"),
     ];
-    let path = paths.into_iter().find(|p| {
-        readable_path(env, p) && snapshot.find(p).is_some_and(|d| snapshot.tree(d).bytes > 0)
-    })?;
-    Some(Hint {
+    let mut chosen = None;
+    for path in paths {
+        if stop() {
+            return None;
+        }
+        if snapshot.find(&path).is_some_and(|d| {
+            snapshot.tree(d).bytes > 0
+                && readable_path(env, &path)
+                && crate::fsid::identity(&path) == snapshot.dir_identity(d)
+        }) {
+            chosen = Some(path);
+            break;
+        }
+    }
+    let Some(path) = chosen else {
+        return Some(None);
+    };
+    Some(Some(Hint {
         id: "hint-logic-library".into(),
         title: "Review the Logic sound library".into(),
         why: "In Logic Pro, open Sound Library and review your downloaded content (Manage Packs in Logic Pro 12; Sound Library Manager in earlier versions). Use the app's controls for content you no longer need, or relocate the library through Logic. Existing projects may need these sounds. Shared or cloned content means the library's size is not a promise of space recovered.".into(),
         reported_bytes: None,
         manifest: path,
         action: HintAction::LogicInstructions,
-    })
+    }))
+}
+
+/// Native registered-app dispatch for the one numeric Steam affordance. Callers must first authorize a retained
+/// scan and reject fixture mode. No URL, program, arguments or filesystem target are accepted from the UI.
+pub fn open_steam_uninstall(app_id: u32) -> io::Result<()> {
+    if std::env::var_os(crate::fixture::ROOT_VAR).is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "fixture mode never opens host apps",
+        ));
+    }
+    let uri = HintAction::SteamUninstall { app_id }
+        .steam_uri()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid Steam app id"))?;
+    #[cfg(windows)]
+    {
+        let operation: Vec<u16> = "open\0".encode_utf16().collect();
+        let uri: Vec<u16> = uri.encode_utf16().chain([0]).collect();
+        // SAFETY: NUL-terminated fixed operation and generated numeric URI, null optional arguments, no handles
+        // or pointers survive the call. ShellExecute dispatches a registered scheme, never shell command text.
+        let result = unsafe {
+            windows_sys::Win32::UI::Shell::ShellExecuteW(
+                std::ptr::null_mut(),
+                operation.as_ptr(),
+                uri.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        } as isize;
+        if result > 32 {
+            Ok(())
+        } else {
+            Err(io::Error::other(
+                "Steam could not be opened. Check that Steam is installed.",
+            ))
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("/usr/bin/open")
+            .arg(uri)
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(
+                "Steam could not be opened. Check that Steam is installed.",
+            ))
+        }
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = uri;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Steam opening is supported on Windows and macOS",
+        ))
+    }
 }
 
 impl Hint {
@@ -340,13 +543,45 @@ fn readable_path(env: &Env, path: &Path) -> bool {
     true
 }
 
-fn read_manifest(env: &Env, path: &Path) -> io::Result<String> {
-    crate::fsid::read_bounded(path, env.confined_to.as_deref(), MAX_MANIFEST, |_| {})
+fn read_manifest(
+    env: &Env,
+    path: &Path,
+    limit: u64,
+    stop: &dyn Fn() -> bool,
+) -> io::Result<String> {
+    crate::fsid::read_bounded(path, env.confined_to.as_deref(), limit, |_| {}, stop)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn positively_confined_discovery_never_queries_host_registry() {
+        let snapshot = crate::snapshot::Builder::new(1, std::time::SystemTime::now())
+            .finish(std::time::Duration::ZERO);
+        let mut env = Env::windows(Path::new("unused-fixture-root"), "fixture");
+        env.confined_to = Some(env.root.clone());
+        assert!(
+            steam_with_registry(&env, &snapshot, 1_000_000, &|| false, || panic!(
+                "fixture must never query registry"
+            ))
+            .unwrap()
+            .is_empty()
+        );
+        env.confined_to = None;
+        assert!(
+            steam_with_registry(&env, &snapshot, 1_000_000, &|| true, || panic!(
+                "cancelled discovery must never query registry"
+            ))
+            .is_none()
+        );
+        assert!(
+            HintAction::SteamUninstall { app_id: 0 }
+                .steam_uri()
+                .is_none()
+        );
+    }
 
     #[cfg(windows)]
     #[test]
@@ -455,18 +690,24 @@ mod tests {
         fs::write(&manifest, b"inside fixture manifest").unwrap();
         let moved = root.join("moved-manifest.acf");
         let mut attacked = false;
-        let result = crate::fsid::read_bounded(&manifest, Some(&root), MAX_MANIFEST, |directory| {
-            if directory == apps && !attacked {
-                fs::rename(&manifest, &moved).unwrap();
-                retag(&apps, &outside).unwrap();
-                attacked = true;
-                assert_eq!(
-                    fs::read_to_string(&manifest).unwrap(),
-                    sentinel,
-                    "actual held ancestor was successfully retagged and redirects an absolute lookup"
-                );
-            }
-        });
+        let result = crate::fsid::read_bounded(
+            &manifest,
+            Some(&root),
+            MAX_MANIFEST,
+            |directory| {
+                if directory == apps && !attacked {
+                    fs::rename(&manifest, &moved).unwrap();
+                    retag(&apps, &outside).unwrap();
+                    attacked = true;
+                    assert_eq!(
+                        fs::read_to_string(&manifest).unwrap(),
+                        sentinel,
+                        "actual held ancestor was successfully retagged and redirects an absolute lookup"
+                    );
+                }
+            },
+            &|| false,
+        );
         assert!(
             attacked,
             "the race must execute while the verified parent is held"

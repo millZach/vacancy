@@ -237,6 +237,16 @@ pub fn build(root: &Path) -> io::Result<Profile> {
 /// [`build`], with `bulk` more small files in the npm cache, spread over folders of a hundred: enough of them and a
 /// run takes long enough to watch.
 pub fn build_with(root: &Path, bulk: usize) -> io::Result<Profile> {
+    build_options(root, bulk, false)
+}
+
+/// A fresh profile with deterministic native-layout Steam advice and, on macOS, Logic library instructions.
+/// Existing profiles are refused, just as in [`build`]; this is never a seed operation on arbitrary user data.
+pub fn build_with_advice(root: &Path, bulk: usize) -> io::Result<Profile> {
+    build_options(root, bulk, true)
+}
+
+fn build_options(root: &Path, bulk: usize, advice: bool) -> io::Result<Profile> {
     fs::create_dir_all(root)?;
     if fs::read_dir(root)?.next().is_some() {
         return Err(io::Error::new(
@@ -473,6 +483,34 @@ pub fn build_with(root: &Path, bulk: usize) -> io::Result<Profile> {
         fs::set_permissions(&ro_folder, perms)?;
     }
 
+    let mut advice_files = Vec::new();
+    if advice {
+        let env = env(root);
+        let steam = match env.platform {
+            crate::Platform::Windows => env.program_files[0].join("Steam"),
+            crate::Platform::MacOs => sub(&env.home, "Library/Application Support/Steam"),
+        };
+        let manifest = sub(&steam, "steamapps/appmanifest_42.acf");
+        fs::create_dir_all(manifest.parent().unwrap())?;
+        fs::write(
+            &manifest,
+            r#""AppState" { "appid" "42" "name" "Vacancy fixture game" "LastPlayed" "100000" "SizeOnDisk" "123456789" }"#,
+        )?;
+        advice_files.push(manifest);
+        if !windows {
+            let sample = sub(
+                &env.home,
+                "Music/Logic Pro Library.bundle/fixture-sound.dat",
+            );
+            write_file(&sample, KIB)?;
+            advice_files.push(sample);
+        }
+    }
+    let mut untouched = vec![
+        sub(&home, "Downloads/new-setup.exe"),
+        sub(&home, "code/live-app/node_modules"),
+    ];
+    untouched.extend(advice_files);
     std::thread::sleep(SETTLE);
     Ok(Profile {
         root: root.to_path_buf(),
@@ -493,10 +531,7 @@ pub fn build_with(root: &Path, bulk: usize) -> io::Result<Profile> {
         long_path: sub(&home, &long_rel),
         node_modules,
         store_file,
-        untouched: vec![
-            sub(&home, "Downloads/new-setup.exe"),
-            sub(&home, "code/live-app/node_modules"),
-        ],
+        untouched,
         home,
     })
 }

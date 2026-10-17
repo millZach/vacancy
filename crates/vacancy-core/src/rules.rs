@@ -173,6 +173,28 @@ pub struct Proposals {
 }
 
 impl Proposals {
+    /// Trusted catalog advice carries no targets and cannot acquire deletion authority. Append before carving,
+    /// after the positive-size rules, preserving both their order and their existing nonoverlapping claims.
+    pub(crate) fn append_hint(&mut self, hint: &crate::hints::Hint) {
+        if self.position(&hint.id).is_some() {
+            return;
+        }
+        self.list.push(hint.proposal());
+        self.targets.push(Vec::new());
+        self.kinds.push(ActionKind::Hint);
+        self.built_apps.push(false);
+    }
+
+    /// Trusted action in this scan's retained catalog, never an action supplied by a frontend or history JSON.
+    pub fn hint_action(&self, id: &str) -> Option<&crate::hints::HintAction> {
+        self.position(id).and_then(|i| {
+            let proposal = &self.list[i];
+            (proposal.action == ProposalAction::Hint)
+                .then_some(proposal.hint_action.as_ref())
+                .flatten()
+        })
+    }
+
     /// Every proposal, biggest first.
     pub fn list(&self) -> &[Proposal] {
         &self.list

@@ -101,8 +101,42 @@ pub(crate) fn read_bounded(
     confined_to: Option<&Path>,
     limit: u64,
     mut after_directory: impl FnMut(&Path),
+    stop: &dyn Fn() -> bool,
+) -> std::io::Result<String> {
+    read_bounded_impl(path, confined_to, limit, &mut after_directory, None, stop)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReadFingerprint {
+    pub(crate) identity: Identity,
+    pub(crate) logical: u64,
+    pub(crate) scan_started: std::time::SystemTime,
+}
+
+/// The same retained read, additionally pinned to a file recorded by the scan and cancellable between chunks.
+pub(crate) fn read_scanned_bounded(
+    path: &Path,
+    confined_to: Option<&Path>,
+    limit: u64,
+    expected: ReadFingerprint,
+    stop: &dyn Fn() -> bool,
+) -> std::io::Result<String> {
+    read_bounded_impl(path, confined_to, limit, &mut |_| {}, Some(expected), stop)
+}
+
+fn read_bounded_impl(
+    path: &Path,
+    confined_to: Option<&Path>,
+    limit: u64,
+    after_directory: &mut dyn FnMut(&Path),
+    expected: Option<ReadFingerprint>,
+    stop: &dyn Fn() -> bool,
 ) -> std::io::Result<String> {
     use std::io::{self, Read};
+    let cancelled = || io::Error::new(io::ErrorKind::Interrupted, "manifest discovery cancelled");
+    if stop() {
+        return Err(cancelled());
+    }
     let refused = || io::Error::other("manifest chain is linked, unconfined, or unreadable");
     let scope = match confined_to {
         Some(root) => Some(
@@ -130,6 +164,9 @@ pub(crate) fn read_bounded(
     let mut chain = vec![root];
     let mut pins = vec![dir];
     for name in parents {
+        if stop() {
+            return Err(cancelled());
+        }
         let (step, opened) = sys::read_directory(pins.last().unwrap(), name).ok_or_else(refused)?;
         pins.push(opened);
         chain.push(step);
@@ -145,15 +182,25 @@ pub(crate) fn read_bounded(
             return Err(refused());
         }
     }
-    let (file, identity) = sys::read_file(pins.last().unwrap(), leaf).ok_or_else(refused)?;
+    let (mut file, identity) = sys::read_file(pins.last().unwrap(), leaf).ok_or_else(refused)?;
     if scope
         .as_ref()
         .is_some_and(|scope| scope.id.volume() != identity.volume())
     {
         return Err(refused());
     }
-    if !file.metadata()?.is_file() || file.metadata()?.len() > limit {
+    let before = file.metadata()?;
+    if !before.is_file() || before.len() > limit {
         return Err(io::Error::other("not a bounded manifest"));
+    }
+    if let Some(expected) = expected
+        && (identity != expected.identity
+            || before.len() != expected.logical
+            || !before
+                .modified()
+                .is_ok_and(|modified| modified < expected.scan_started))
+    {
+        return Err(io::Error::other("manifest changed since scan"));
     }
     // Read-directory handles stay held throughout. Verify the held leaf and its full identity chain are
     // still at the authorized path immediately before reading, including on POSIX where names can move.
@@ -168,13 +215,29 @@ pub(crate) fn read_bounded(
     {
         return Err(refused());
     }
-    let mut text = String::new();
-    file.take(limit.saturating_add(1))
-        .read_to_string(&mut text)?;
-    if text.len() as u64 > limit {
-        return Err(io::Error::other("manifest grew beyond limit"));
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        if stop() {
+            return Err(cancelled());
+        }
+        let remaining = limit.saturating_add(1).saturating_sub(bytes.len() as u64);
+        let n = file.read(&mut chunk[..remaining.min(4096) as usize])?;
+        if n == 0 {
+            break;
+        }
+        if (bytes.len() as u64).saturating_add(n as u64) > limit {
+            return Err(io::Error::other("manifest grew beyond limit"));
+        }
+        bytes.extend_from_slice(&chunk[..n]);
     }
-    Ok(text)
+    let after = file.metadata()?;
+    if expected.is_some()
+        && (after.len() != before.len() || after.modified()? != before.modified()?)
+    {
+        return Err(io::Error::other("manifest changed during read"));
+    }
+    String::from_utf8(bytes).map_err(|_| io::Error::other("manifest is not UTF-8"))
 }
 
 /// Fixture proof primitive: create a fresh directory under retained, no-follow parents and apply a mutation

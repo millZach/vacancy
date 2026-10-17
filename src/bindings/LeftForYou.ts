@@ -19,7 +19,7 @@ summary: string,
  */
 why: string, 
 /**
- * What doing it would free, from the scan.
+ * Zero for advice: a store-reported installed size is never a reclaim estimate.
  */
 bytes: number, 
 /**
