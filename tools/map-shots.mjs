@@ -52,12 +52,14 @@ try {
   await settle(page, 1200);
   await shot(page, '1-plate');
 
+  const started = Date.now();
   await scan.click();
   await page.locator('.hud').waitFor({ timeout: 30_000 });
   await settle(page, Number(o['scanning-at']));
   await shot(page, '2-scanning');
 
   await page.locator('.atlas.is-map').waitFor({ timeout: Number(o.timeout) });
+  console.log(`The scan took ${((Date.now() - started) / 1000).toFixed(1)} s from pressing Scan to the map.`);
   await settle(page, 1400);
   await shot(page, '3-map');
 
@@ -99,10 +101,11 @@ try {
   }
 } finally {
   await browser?.close();
-  // Leave the app running when driving it over CDP.
 }
 if (errors.length) {
   console.error(`The page logged errors:\n${errors.join('\n')}`);
   process.exit(1);
 }
 console.log(`Wrote ${o.out}/${o.name}-*.png`);
+// Over CDP the open connection would keep Node alive; the app itself is left running.
+process.exit(0);
