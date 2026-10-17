@@ -17,7 +17,7 @@
   position: absolute;
   inset: 0;
   background: var(--wrap-bg);
-  transition: opacity var(--wrap-bg-fade) var(--ease-fade) 0.12s;
+  transition: opacity var(--wrap-bg-fade) var(--ease-fade) var(--wrap-bg-delay);
 }
 .wrap-haze {
   position: absolute;
@@ -129,8 +129,8 @@
   color: var(--color-text);
   cursor: pointer;
   transition:
-    border-color 0.15s,
-    background 0.15s;
+    border-color var(--finish-control-ms),
+    background var(--finish-control-ms);
 }
 .round:hover:not(:disabled) {
   border-color: var(--color-line-hover);
@@ -230,7 +230,7 @@
   inset: -25% -14%;
   background: var(--glow-sign-halo);
   pointer-events: none;
-  animation: sign-glow var(--sign-glow) ease both 0.3s;
+  animation: sign-glow var(--sign-glow) ease both var(--sign-halo-start);
 }
 .sign-off {
   position: relative;
@@ -378,7 +378,7 @@
   transform-origin: 50% 0;
   transform: rotate(-9deg);
   filter: var(--shadow-fob);
-  animation: fob-swing var(--fob-swing) both 0.15s;
+  animation: fob-swing var(--fob-swing) both var(--fob-start);
 }
 .fob-ring {
   position: absolute;

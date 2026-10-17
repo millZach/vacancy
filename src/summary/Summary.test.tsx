@@ -1,5 +1,6 @@
 import { render, screen, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import userEvent from '@testing-library/user-event';
 import { fixtures, type RunReport } from '../bridge';
 import { overviewModel } from '../map/model';
 import { changed, inUse, report, stepReport } from '../test/run';
@@ -108,6 +109,23 @@ describe('the summary panel', () => {
     renderPanel(report, onScanAgain);
     within(panel()).getByRole('button', { name: 'Scan again' }).click();
     expect(onScanAgain).toHaveBeenCalledTimes(1);
+  });
+
+  it('makes every skipped place and space note available beyond the initial twelve', async () => {
+    const skips = Array.from({ length: 13 }, (_, i) => ({ ...inUse, path: `C:\\cache\\skip-${i}` }));
+    const notes = Array.from({ length: 13 }, (_, i) => ({
+      ...inUse, kind: 'hardLinked' as const, path: `C:\\cache\\note-${i}`, reason: `Space note ${i}`,
+    }));
+    renderPanel({ ...report, steps: [{ ...report.steps[0]!, skipped: [...skips, ...notes] }] });
+    expect(screen.queryByText(skips[12]!.path)).toBeNull();
+    expect(screen.queryByText(notes[12]!.path)).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'Show all 13 skipped places' }));
+    expect(screen.getByText(skips[12]!.path)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Show all 13 space notes' }));
+    expect(screen.getByText(notes[12]!.path)).toBeInTheDocument();
+    expect(panel()).toHaveTextContent('Space note 12.');
+    await userEvent.click(screen.getByRole('button', { name: 'Show fewer skipped places' }));
+    expect(screen.queryByText(skips[12]!.path)).toBeNull();
   });
 });
 

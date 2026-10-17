@@ -130,7 +130,7 @@
   text-shadow: var(--glow-hero);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  animation: neon-on 1.3s linear both 0.4s;
+  animation: neon-on var(--summary-neon-ms) linear both var(--summary-neon-start-ms);
 }
 .summary-frac {
   font-size: 0.5em;
@@ -452,8 +452,8 @@
   color: var(--color-text-2);
   cursor: pointer;
   transition:
-    color 0.15s,
-    background 0.15s;
+    color var(--finish-control-ms),
+    background var(--finish-control-ms);
 }
 .replay svg {
   color: var(--color-neon);

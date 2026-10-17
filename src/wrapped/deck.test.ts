@@ -43,6 +43,14 @@ describe('what the slides say', () => {
     );
   });
 
+  it('reports deleted names honestly when they free no space', () => {
+    const r = { ...report, freedBytes: 0, deletedItems: 1 };
+    expect(plain(headlineSub(r))).toBe(
+      'Vacancy deleted 1 item in 1 min 12 s. No disk space was freed. The next slides show what changed and what stayed.',
+    );
+    expect(plain(headlineSub({ ...r, cancelled: true }))).toContain('Vacancy deleted 1 item');
+  });
+
   it('keeps notes about space still in use apart from what was left, and a stopped run’s places together', () => {
     const stopped = { path: 'C:\\b', reason: 'You stopped the run before it got here', kind: 'cancelled' as const, bytes: 1, items: 1 };
     const r = { ...fullReport, steps: [...fullReport.steps, { ...fullReport.steps[1]!, id: 'x', skipped: [stopped] }] };

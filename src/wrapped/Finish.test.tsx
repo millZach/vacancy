@@ -72,6 +72,27 @@ afterEach(() => {
 });
 
 describe('the highlight slides', () => {
+  it('keeps actual deletions visible when hard-link names free zero bytes', async () => {
+    const r: RunReport = {
+      ...report, freedBytes: 0, deletedItems: 1, biggestWin: null, freedByCategory: [],
+      steps: [{ ...report.steps[0]!, freedBytes: 0, deletedItems: 1, skipped: [{
+        path: 'C:\\cache\\linked', reason: 'Space still in use by another hard link', kind: 'hardLinked', bytes: 4096, items: 1,
+      }] }],
+    };
+    renderFinish(r);
+    expect(plain(slide().textContent)).toContain('Vacancy deleted 1 item');
+    await key('ArrowRight');
+    await key('ArrowRight');
+    expect(slide()).toHaveTextContent('Items were deleted without freeing space.');
+    expect(slide()).not.toHaveTextContent('Nothing was deleted');
+    await key('ArrowRight');
+    expect(slide()).toHaveTextContent('No category freed any disk space.');
+    await key('ArrowRight');
+    expect(slide()).toHaveTextContent('Space still in use by another hard link');
+    await key('Escape');
+    expect(within(panel()).getByText('items deleted').parentElement).toHaveTextContent('1');
+  });
+
   it('tell the run in seven slides, each named for screen readers, every figure from the report', async () => {
     renderFinish();
     expect(deck()).toHaveAttribute('aria-roledescription', 'carousel');

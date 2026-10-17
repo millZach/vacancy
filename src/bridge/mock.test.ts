@@ -145,6 +145,7 @@ describe('the mock bridge', () => {
         id: report.id,
         mountPoint: 'C:\\',
         volumeName: 'Local Disk (C:)',
+        volumeId: report.map.volume.id,
         startedAt: report.startedAt,
         freedBytes: report.freedBytes,
         deletedItems: report.deletedItems,

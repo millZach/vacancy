@@ -16,12 +16,15 @@ interface Props {
 type Listing = { status: 'loading' } | { status: 'ready'; history: RunHistory } | { status: 'error'; message: string };
 
 /** The runs grouped by drive, the drive with the newest run first; each drive's runs newest first. */
-function byDrive(runs: RunListing[]): { mountPoint: string; name: string; runs: RunListing[] }[] {
-  const groups: { mountPoint: string; name: string; runs: RunListing[] }[] = [];
+function byDrive(runs: RunListing[]): { key: string; name: string; runs: RunListing[] }[] {
+  const groups: { key: string; name: string; runs: RunListing[] }[] = [];
   for (const run of runs) {
-    const group = groups.find((g) => g.mountPoint === run.mountPoint);
+    // A mount point can belong to a different USB disk next time. With no identity, keep a legacy run on its own
+    // rather than guessing which disk it belongs to from a name or drive letter.
+    const key = run.volumeId ? `volume:${run.volumeId}` : `run:${run.id}`;
+    const group = groups.find((g) => g.key === key);
     if (group) group.runs.push(run);
-    else groups.push({ mountPoint: run.mountPoint, name: run.volumeName, runs: [run] });
+    else groups.push({ key, name: run.volumeName, runs: [run] });
   }
   return groups;
 }
@@ -158,7 +161,7 @@ export function HistoryMenu({ locked, onOpen }: Props) {
             <p className="history-note">No runs yet. Each plan you run is kept here, with its summary.</p>
           )}
           {groups.map((g) => (
-            <div key={g.mountPoint} className="history-drive" role="group" aria-label={g.name}>
+            <div key={g.key} className="history-drive" role="group" aria-label={g.name}>
               <div className="history-drive-name" aria-hidden>
                 {g.name}
               </div>

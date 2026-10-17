@@ -162,6 +162,11 @@
   --shadow-knob: 0 4px 18px rgba(0, 0, 0, 0.55);
   --color-seg: #171c23; /* the Before/After switch */
   --color-seg-on: #2a323e;
+  --summary-sweep-ms: 1250ms;
+  --summary-sweep-delay-ms: 200ms;
+  --summary-glide-ms: 700ms;
+  --summary-neon-ms: 1300ms;
+  --summary-neon-start-ms: 400ms;
 
   /* ---------- the finish: the highlight slides ---------- */
   /* Timing. The slides' script reads these too (src/wrapped/motion.ts), so they are the only copy. */
@@ -177,6 +182,9 @@
   --ease-fly: cubic-bezier(0.65, 0, 0.25, 1);
   --fade-out-ms: 480ms; /* Skip to recap, and the hand-off with reduced motion */
   --fade-in-ms: 400ms; /* Replay highlights */
+  --finish-control-ms: 150ms; /* highlight, replay and history controls */
+  --history-pop-ms: 160ms;
+  --history-spin-ms: 900ms;
   --ease-fade: cubic-bezier(0.4, 0, 0.2, 1);
   --rise: 0.6s cubic-bezier(0.2, 0.7, 0.2, 1); /* the summary's sections rising in after the flight */
   --rise-words: 0.5s; /* when each part of the summary starts to rise */
@@ -191,16 +199,19 @@
   --vacant-label-at: 1.1s;
   --wrap-chrome-fade: 0.24s; /* the slides' controls and words fading as the numbers fly */
   --wrap-bg-fade: 0.75s; /* the slides' ground giving way to the map */
+  --wrap-bg-delay: 120ms;
   --dot-grow: 0.25s; /* a dot widening into the lit one */
   --sign-flick: 1.1s; /* each letter of the sign catching */
   --sign-start: 160ms;
   --sign-gap: 95ms; /* between letters */
   --sign-glow: 1.6s; /* the halo behind it warming up */
+  --sign-halo-start: 300ms;
   --board-flip: 0.7s; /* each letterboard tile dropping into place */
   --board-start: 0.9s;
   --board-row-gap: 0.45s;
   --board-tile-gap: 60ms;
   --fob-swing: 1.4s; /* the key fob dropping in and swinging to rest */
+  --fob-start: 150ms;
   --bar-move: 0.9s; /* the disk bars' categories shrinking */
   --bar-start: 0.55s;
   --bar-gap: 50ms;

@@ -241,6 +241,8 @@ pub struct RunListing {
     pub id: String,
     pub mount_point: String,
     pub volume_name: String,
+    /// The scanned volume's identity, so disks reusing a mount point keep separate histories.
+    pub volume_id: String,
     /// When it started, in milliseconds since the Unix epoch.
     #[ts(type = "number")]
     pub started_at: i64,
@@ -260,6 +262,7 @@ impl From<&RunReport> for RunListing {
             id: r.id.clone(),
             mount_point: r.mount_point.clone(),
             volume_name: r.volume_name.clone(),
+            volume_id: r.map.volume.id.clone(),
             started_at: r.started_at,
             freed_bytes: r.freed_bytes,
             deleted_items: r.deleted_items,
@@ -355,7 +358,17 @@ pub fn open(dir: &Path, id: &str) -> io::Result<RunReport> {
 /// One kept run. Fails if the file can't be read or isn't a whole report.
 fn read(file: &Path) -> io::Result<RunReport> {
     let bytes = std::fs::read(file)?;
-    serde_json::from_slice(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    let report: RunReport = serde_json::from_slice(&bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    // The webview renders this as a JavaScript Date. A JSON integer can deserialize successfully yet be outside
+    // its supported range, making Intl.DateTimeFormat throw while rendering the entire history list.
+    if !(-8_640_000_000_000_000..=8_640_000_000_000_000).contains(&report.started_at) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the run's timestamp is outside the supported date range",
+        ));
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -484,6 +497,7 @@ mod tests {
         assert_eq!(ids(&back), ["run-2", "run/1:a"]);
         assert_eq!(back.unreadable, 0);
         assert_eq!(back.runs[1], RunListing::from(&report("run/1:a", 1)));
+        assert_eq!(back.runs[1].volume_id, "1234");
         assert!(
             std::fs::read_dir(&runs)
                 .unwrap()
@@ -534,6 +548,34 @@ mod tests {
             open(&runs, "run-0").unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn passes_over_reports_with_dates_the_webview_cant_render() {
+        let dir = tempfile::tempdir().unwrap();
+        save(dir.path(), &report("valid", 1)).unwrap();
+        for (id, at) in [
+            ("too-late", i64::MAX),
+            ("too-early", i64::MIN),
+            ("just-too-late", 8_640_000_000_000_001),
+            ("just-too-early", -8_640_000_000_000_001),
+        ] {
+            save(dir.path(), &report(id, at)).unwrap();
+            assert_eq!(
+                open(dir.path(), id).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        let back = history(dir.path());
+        assert_eq!(ids(&back), ["valid"]);
+        assert_eq!(back.unreadable, 4);
+        for (id, at) in [
+            ("latest", 8_640_000_000_000_000),
+            ("earliest", -8_640_000_000_000_000),
+        ] {
+            save(dir.path(), &report(id, at)).unwrap();
+            assert_eq!(open(dir.path(), id).unwrap().started_at, at);
+        }
     }
 
     #[test]

@@ -170,13 +170,16 @@ try {
         new Promise((done) => {
           const times = [];
           let last = 0;
-          const start = performance.now();
-          const tick = (now) => {
+          let start = 0;
+          // Use one clock for both intervals and total elapsed time. CDP animation playback can put the rAF
+          // timestamp on another clock, producing a plausible mean interval but an impossible FPS total.
+          const tick = () => {
+            const now = performance.now();
             times.push(now - last);
             last = now;
-            if (performance.now() - start < ms) requestAnimationFrame(tick);
+            if (now - start < ms) requestAnimationFrame(tick);
             else {
-              const wall = performance.now() - start;
+              const wall = now - start;
               const sorted = [...times].sort((a, b) => a - b);
               const at = (p) => sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
               done({
@@ -192,8 +195,8 @@ try {
               });
             }
           };
-          requestAnimationFrame((now) => {
-            last = now;
+          requestAnimationFrame(() => {
+            start = last = performance.now();
             requestAnimationFrame(tick);
           });
         }),

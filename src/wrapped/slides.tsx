@@ -103,8 +103,14 @@ export function WinSlide({ report: r }: SlideProps) {
   if (!w) {
     return (
       <div className="sl">
-        <h1 className="sl-title">Nothing was deleted this time.</h1>
-        <p className="sl-sub">Everything in the plan stayed where it was. The next slides say why.</p>
+        <h1 className="sl-title">{r.deletedItems > 0 ? 'Items were deleted without freeing space.' : 'Nothing was deleted this time.'}</h1>
+        <p className="sl-sub">
+          {r.deletedItems > 0
+            ? `${count(r.deletedItems, 'item')} deleted. Their space may still be in use, or the items held no allocated space.`
+            : r.movedItems > 0
+              ? 'Folders were reorganized. The next slides show what moved.'
+            : 'Everything in the plan stayed where it was. The next slides say why.'}
+        </p>
       </div>
     );
   }
@@ -148,7 +154,7 @@ export function CategoriesSlide({ report: r }: SlideProps) {
           ))}
         </ul>
       ) : (
-        <p className="sl-sub">Nothing was deleted, so no category got space back.</p>
+        <p className="sl-sub">No category freed any disk space.</p>
       )}
     </div>
   );

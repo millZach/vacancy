@@ -9,6 +9,10 @@ export type RunListing = {
  */
 id: string, mountPoint: string, volumeName: string, 
 /**
+ * The scanned volume's identity, so disks reusing a mount point keep separate histories.
+ */
+volumeId: string, 
+/**
  * When it started, in milliseconds since the Unix epoch.
  */
 startedAt: number, freedBytes: number, deletedItems: number, movedItems: number, 

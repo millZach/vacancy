@@ -37,6 +37,23 @@ beforeEach(() => {
 });
 
 describe('past runs', () => {
+  it('keeps swapped disks apart and follows a known disk to another mount point', async () => {
+    const bridge = createMockBridge(fixtures.windows);
+    const base = (await bridge.listRuns()).runs[0]!;
+    vi.spyOn(bridge, 'listRuns').mockResolvedValue({ unreadable: 0, runs: [
+      { ...base, id: 'new-disk', volumeId: 'usb-b', volumeName: 'New USB', mountPoint: 'E:\\' },
+      { ...base, id: 'old-disk', volumeId: 'usb-a', volumeName: 'Old USB', mountPoint: 'E:\\' },
+      { ...base, id: 'old-disk-before', volumeId: 'usb-a', volumeName: 'Old USB', mountPoint: 'F:\\' },
+      { ...base, id: 'unknown-1', volumeId: '', volumeName: 'Unknown disk', mountPoint: 'E:\\' },
+      { ...base, id: 'unknown-2', volumeId: '', volumeName: 'Unknown disk', mountPoint: 'E:\\' },
+    ] });
+    render(<BridgeProvider bridge={bridge}><HistoryMenu locked={false} onOpen={() => {}} /></BridgeProvider>);
+    await userEvent.click(screen.getByRole('button', { name: 'Past runs' }));
+    const groups = within(await screen.findByRole('menu')).getAllByRole('group');
+    expect(groups.map((g) => g.getAttribute('aria-label'))).toEqual(['New USB', 'Old USB', 'Unknown disk', 'Unknown disk']);
+    expect(groups.map((g) => within(g).getAllByRole('menuitem').length)).toEqual([1, 2, 1, 1]);
+  });
+
   it('lists each drive’s runs, newest first, with when each ran and what it freed', async () => {
     const bridge = renderApp();
     const { runs } = await bridge.listRuns();

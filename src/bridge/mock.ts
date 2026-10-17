@@ -210,6 +210,7 @@ function listing(r: RunReport): RunListing {
     id: r.id,
     mountPoint: r.mountPoint,
     volumeName: r.volumeName,
+    volumeId: r.map.volume.id,
     startedAt: r.startedAt,
     freedBytes: r.freedBytes,
     deletedItems: r.deletedItems,

@@ -47,7 +47,7 @@ export function count(n: number, one: string, many = `${one}s`): string {
 /** The sentence under the sign. */
 export function headlineSub(r: RunReport): string {
   const took = formatDuration(r.durationMs);
-  if (r.freedBytes <= 0 && r.movedItems <= 0) {
+  if (r.freedBytes <= 0 && r.movedItems <= 0 && r.deletedItems <= 0) {
     return `${r.volumeName} is as it was: nothing in the plan could go this time. The next slides say why.`;
   }
   const did = [
@@ -57,6 +57,7 @@ export function headlineSub(r: RunReport): string {
     .filter(Boolean)
     .join(' and ');
   if (r.cancelled) return `You stopped the run part way. Before it stopped, Vacancy ${did} in ${took}.`;
+  if (r.freedBytes <= 0) return `Vacancy ${did} in ${took}. No disk space was freed. The next slides show what changed and what stayed.`;
   return `${r.volumeName} has room again. Vacancy ${did} in ${took}.`;
 }
 

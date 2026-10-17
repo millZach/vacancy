@@ -9,6 +9,7 @@ import { useSize } from '../map/useSize';
 import { tileOf } from '../plan/totals';
 import { asSentence, neverReached } from '../run/progress';
 import { biggestWin, categoryOf, count, keptOf } from '../wrapped/deck';
+import { tokenMs } from '../wrapped/motion';
 import { HeroNumber } from './HeroNumber';
 import { formatWhen } from './when';
 import './summary.css';
@@ -21,11 +22,6 @@ interface MapProps {
   onHot: (id: string | null) => void;
 }
 
-/** How long the swipe takes to sweep from Before to After when the summary opens, and its pause first. */
-const SWEEP_MS = 1250;
-const SWEEP_DELAY_MS = 200;
-/** A Before or After button's glide. */
-const GLIDE_MS = 700;
 /** Skips listed one by one; the rest are counted. */
 const SKIPS_SHOWN = 12;
 
@@ -98,7 +94,7 @@ export function SummaryMap({ model, report, hot, onHot }: MapProps) {
       return;
     }
     swept.current = true;
-    glide(1, SWEEP_MS, SWEEP_DELAY_MS);
+    glide(1, tokenMs('--summary-sweep-ms'), tokenMs('--summary-sweep-delay-ms'));
   }, [ready, apply, glide]);
   useEffect(() => () => cancelAnimationFrame(raf.current), []);
 
@@ -152,10 +148,10 @@ export function SummaryMap({ model, report, hot, onHot }: MapProps) {
     <>
       <div className="atlas-toolbar">
         <div className="seg" role="group" aria-label="Compare">
-          <button type="button" className={side === 'before' ? 'is-on' : undefined} onClick={() => glide(0, GLIDE_MS)}>
+          <button type="button" className={side === 'before' ? 'is-on' : undefined} onClick={() => glide(0, tokenMs('--summary-glide-ms'))}>
             Before
           </button>
-          <button type="button" className={side === 'after' ? 'is-on' : undefined} onClick={() => glide(1, GLIDE_MS)}>
+          <button type="button" className={side === 'after' ? 'is-on' : undefined} onClick={() => glide(1, tokenMs('--summary-glide-ms'))}>
             After
           </button>
         </div>
@@ -230,6 +226,8 @@ interface PanelProps {
  * slides again.
  */
 export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onClose }: PanelProps) {
+  const [allSkips, setAllSkips] = useState(false);
+  const [allNotes, setAllNotes] = useState(false);
   const known = r.totalBytes > 0;
   const growth = r.freeBefore > 0 ? r.freeAfter / r.freeBefore : 0;
   const differs = known && formatBytes(r.freeChange) !== formatBytes(r.freedBytes);
@@ -366,7 +364,7 @@ export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onCl
           <section className="summary-sec">
             <h3>Skipped</h3>
             <ul className="skips">
-              {left.slice(0, SKIPS_SHOWN).map((k, i) => (
+              {(allSkips ? left : left.slice(0, SKIPS_SHOWN)).map((k, i) => (
                 <li key={`${k.path}:${i}`}>
                   <TriangleAlert size={13} aria-hidden />
                   <span>
@@ -379,7 +377,9 @@ export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onCl
               {left.length > SKIPS_SHOWN && (
                 <li className="skips-more">
                   <span />
-                  <span>And {formatCount(left.length - SKIPS_SHOWN)} more.</span>
+                  <button type="button" className="replay" aria-expanded={allSkips} onClick={() => setAllSkips(!allSkips)}>
+                    {allSkips ? 'Show fewer skipped places' : `Show all ${formatCount(left.length)} skipped places`}
+                  </button>
                 </li>
               )}
               {stopped.length > 0 && (
@@ -398,7 +398,7 @@ export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onCl
           <section className="summary-sec">
             <h3>Deleted, space still in use</h3>
             <ul className="skips is-notes">
-              {notes.slice(0, SKIPS_SHOWN).map((k, i) => (
+              {(allNotes ? notes : notes.slice(0, SKIPS_SHOWN)).map((k, i) => (
                 <li key={`${k.path}:${i}`}>
                   <Info size={13} aria-hidden />
                   <span>
@@ -410,7 +410,9 @@ export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onCl
               {notes.length > SKIPS_SHOWN && (
                 <li className="skips-more">
                   <span />
-                  <span>And {formatCount(notes.length - SKIPS_SHOWN)} more.</span>
+                  <button type="button" className="replay" aria-expanded={allNotes} onClick={() => setAllNotes(!allNotes)}>
+                    {allNotes ? 'Show fewer space notes' : `Show all ${formatCount(notes.length)} space notes`}
+                  </button>
                 </li>
               )}
             </ul>
