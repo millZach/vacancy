@@ -38,7 +38,12 @@ Layout: a Cargo workspace with `crates/vacancy-core` (all disk logic, no Tauri) 
 - Change the app icon: edit `tools/app-icon.html`, then run `node tools/render-icon.mjs`. It renders the icon in Edge and regenerates every size. Don't run `tauri icon` by hand, because the Windows `.ico` comes from a full-bleed second render.
 - Prove a UI change: with `npm run dev` running, run `npm run ripple-strip -- --out shots` (the scan screen and the ripple and splash frame strips) and `npm run map-shots -- --out shots` (scanning, the map, a hover card, a zoomed category, an opened folder and the plan tray), both in Edge. Either drives the installed app over CDP with `--cdp`.
 - Measure the scanner on a real drive (read-only): `cargo run --release -p vacancy-core --example scan -- C:\` prints time, counts, peak memory and the categories. `cargo run -p vacancy-core --example drives` lists the drives the picker offers, and how long listing took.
-- Prove an app change: install the built installer, scan a fixture tree (never a real home folder during tests), approve a plan, and check the summary against what changed on disk.
+- Prove an app change: install the built installer, run it in fixture mode against a fixture profile, approve a plan, and check the summary against what changed on disk. **Never run a plan against a real drive or a real home folder.**
+  - Make a profile: `cargo run -p vacancy-core --example fixture -- D:\tmp\vacancy-fixture-1`. It needs an empty folder outside your home, and fills it with caches, temp files, an idle pnpm-style project, a link from a cache to the profile's `Documents`, a read-only file, and a path longer than 260 characters. The list it prints names the file to hold open and the file to change after the scan.
+  - Run the app in fixture mode by setting `VACANCY_FIXTURE_ROOT` to the folder. On Windows: `$env:VACANCY_FIXTURE_ROOT='D:\tmp\vacancy-fixture-1'; & "$env:LOCALAPPDATA\Vacancy\vacancy.exe"`. On macOS, run `Vacancy.app/Contents/MacOS/vacancy` with it set; `open` doesn't pass it on.
+  - In fixture mode the drive list holds one pseudo-drive, the folder. Home, app data and temp are inside it, and the run history goes to its app data. The Guard denies everything outside the folder, by identity.
+  - The app refuses the mode, and scans and deletes nothing, if the folder is missing, is reached through a link, is a drive's root, or is in or holds your home. It never falls back to the real drives.
+  - List the tree before and after with `cargo run -p vacancy-core --example fixture -- --list D:\tmp\vacancy-fixture-1 before.tsv`. The listing gives path, size and hash, never follows links, and diffs cleanly. ADR 0005 has the details.
 
 ## CI
 

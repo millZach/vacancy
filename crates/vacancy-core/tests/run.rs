@@ -37,9 +37,17 @@ struct Fx {
 
 impl Fx {
     fn new() -> Self {
+        Self::with(|_| {})
+    }
+
+    /// A profile changed by `setup` before it is scanned.
+    fn with(setup: impl FnOnce(&Profile)) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = support::real_path(dir.path()).join("fixture");
         let profile = fixture::build(&root).expect("build the fixture profile");
+        setup(&profile);
+        // What `setup` changed must look older than the scan, as everything `build` wrote does.
+        std::thread::sleep(std::time::Duration::from_millis(3200));
         let env = fixture::env(&root);
         let scanned = scan(&root, &env);
         Self {
@@ -697,5 +705,113 @@ fn fixture_mode_refuses_roots_that_could_widen_it() {
             "{what}: {}",
             root.display()
         );
+    }
+}
+
+/// A volume mounted inside a cache folder is never entered or unmounted: the folder is skipped whole. On Windows the
+/// mount is a mount-point reparse point naming a volume (a junction to `\\?\Volume{...}\`, made before the scan); on
+/// macOS a disk image mounted on an empty folder of the cache after the plan was made.
+#[test]
+fn a_volume_mounted_inside_a_target_is_left_alone() {
+    #[cfg(windows)]
+    {
+        let fx = Fx::with(|p| {
+            let drive = p
+                .root
+                .components()
+                .next()
+                .unwrap()
+                .as_os_str()
+                .to_string_lossy()
+                .into_owned();
+            let out = std::process::Command::new("cmd")
+                .args(["/C", &format!("mountvol {drive}\\ /L")])
+                .output()
+                .unwrap();
+            let volume = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            assert!(volume.starts_with(r"\\?\Volume{"), "mountvol: {volume}");
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(p.cache.join("mounted"))
+                .arg(&volume)
+                .output()
+                .unwrap();
+            assert!(made.status.success(), "mklink /J to {volume}");
+        });
+        let before = fx.inventory();
+        let plan = fx.plan(&[cache_step().to_owned()]);
+        let (report, _) = fx.run(&plan, &CancelToken::new());
+        let skip = skips(&report)
+            .into_iter()
+            .find(|k| Path::new(&k.path) == fx.profile.cache)
+            .expect("the folder with the volume in it is reported");
+        assert_eq!(skip.kind, SkipKind::OtherVolume, "{skip:?}");
+        let cache = fx.rel(&fx.profile.cache);
+        let after = fx.inventory();
+        for line in before.iter().filter(|l| path_of(l).starts_with(&cache)) {
+            assert!(after.contains(line), "{line} stays");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        struct Detach(PathBuf);
+        impl Drop for Detach {
+            fn drop(&mut self) {
+                let _ = Command::new("hdiutil")
+                    .args(["detach", "-quiet", "-force"])
+                    .arg(&self.0)
+                    .status();
+            }
+        }
+        let fx = Fx::with(|p| std::fs::create_dir(p.cache.join("mnt")).unwrap());
+        let plan = fx.plan(&[cache_step().to_owned()]);
+        let images = tempfile::tempdir().unwrap();
+        let image = images.path().join("vacancy-run-test.dmg");
+        let mnt = fx.profile.cache.join("mnt");
+        let ran = |cmd: &mut Command| match cmd.output() {
+            Ok(out) if out.status.success() => true,
+            out => {
+                assert!(!support::in_ci(), "hdiutil must work in CI: {out:?}");
+                eprintln!("skipped: hdiutil: {out:?}");
+                false
+            }
+        };
+        if !ran(Command::new("hdiutil")
+            .args([
+                "create",
+                "-quiet",
+                "-size",
+                "4m",
+                "-fs",
+                "HFS+",
+                "-volname",
+                "VacancyRun",
+            ])
+            .arg(&image))
+        {
+            return;
+        }
+        if !ran(Command::new("hdiutil")
+            .args(["attach", "-quiet", "-nobrowse", "-mountpoint"])
+            .arg(&mnt)
+            .arg(&image))
+        {
+            return;
+        }
+        let _detach = Detach(mnt.clone());
+        let on_volume = mnt.join("keep-me.txt");
+        std::fs::write(&on_volume, b"on another volume").unwrap();
+        let (report, _) = fx.run(&plan, &CancelToken::new());
+        assert!(on_volume.exists(), "nothing on the mounted volume goes");
+        let skip = skips(&report)
+            .into_iter()
+            .find(|k| Path::new(&k.path) == fx.profile.cache)
+            .expect("the folder with the volume in it is reported");
+        assert!(
+            matches!(skip.kind, SkipKind::OtherVolume | SkipKind::Changed),
+            "{skip:?}"
+        );
+        assert!(fx.profile.cache.join("f_000001").exists(), "skipped whole");
     }
 }
