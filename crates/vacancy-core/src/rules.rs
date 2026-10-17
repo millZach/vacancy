@@ -312,7 +312,7 @@ struct Guarded<'a> {
     /// The folder holds, somewhere below it, a protected folder other than an app bundle, or a folder whose contents
     /// are unknown.
     holds: Vec<bool>,
-    /// The folder holds a macOS app bundle somewhere below it: only build-output rules may take it whole.
+    /// The folder holds a macOS app bundle somewhere below it: only the DerivedData rule may take it whole.
     holds_app: Vec<bool>,
 }
 
@@ -371,8 +371,8 @@ impl<'a> Guarded<'a> {
 
     /// Whether `at` may be deleted: the Guard allows its path, and nothing the scan saw in or around it is
     /// protected, a link, or unread.
-    /// `build_output` says the rule takes build output or dependencies, which may hold the apps they build.
-    fn allows(&self, at: ItemRef, build_output: bool) -> bool {
+    /// `takes_built_apps` says the rule takes Xcode's DerivedData, which holds the apps Xcode builds.
+    fn allows(&self, at: ItemRef, takes_built_apps: bool) -> bool {
         let snap = self.snap;
         match at {
             ItemRef::Dir(d) => {
@@ -381,7 +381,7 @@ impl<'a> Guarded<'a> {
                     && !flags.contains(DirFlags::LINK)
                     && !self.under[d.index()]
                     && !self.holds[d.index()]
-                    && (build_output || !self.holds_app[d.index()])
+                    && (takes_built_apps || !self.holds_app[d.index()])
                     && PathKey::of(&snap.path(d)).is_some_and(|k| self.guard.check_key(&k).is_ok())
             }
             ItemRef::File(f) => {
@@ -629,7 +629,8 @@ impl Engine<'_> {
                 }
                 continue;
             }
-            if !self.wanted(rule, at, owners_in) || !self.guarded.allows(at, rule.build_output) {
+            if !self.wanted(rule, at, owners_in) || !self.guarded.allows(at, rule.takes_built_apps)
+            {
                 continue;
             }
             if self.claims.overlaps(self.snap, at) {

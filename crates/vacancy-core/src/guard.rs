@@ -204,8 +204,7 @@ impl Guard {
     }
 
     /// [`protected_name`](Self::protected_name) for a name as the OS spells it, and whether it is an app bundle
-    /// (only build-output rules may take a folder holding one: Xcode's build output and archives hold the apps they
-    /// build, and an Electron dependency in `node_modules` holds `Electron.app`).
+    /// (only the DerivedData rule may take a folder holding one: Xcode's build products are the apps it builds).
     pub(crate) fn protected_os_name(&self, name: &std::ffi::OsStr) -> Option<(&'static str, bool)> {
         let key = name_key(name);
         let what = self.protected_name(&key)?;

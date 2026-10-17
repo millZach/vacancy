@@ -34,10 +34,10 @@ pub(super) struct Rule {
     pub(super) action: ActionKind,
     pub(super) find: Find,
     pub(super) skip: Skip,
-    /// It takes build output or dependencies (DerivedData, archives, `node_modules`, `target`), which may hold the
-    /// apps they build: a folder holding an app bundle is not off-limits to it. Every other rule leaves alone any
-    /// folder that holds one.
-    pub(super) build_output: bool,
+    /// It takes Xcode's DerivedData, whose build products are the apps Xcode builds: a folder holding an app bundle
+    /// is not off-limits to it. Every other rule (dependencies, Rust build output and Xcode archives included)
+    /// leaves alone any folder that holds one.
+    pub(super) takes_built_apps: bool,
     pub(super) text: Text,
 }
 
@@ -223,7 +223,7 @@ fn node_modules(env: &Env, prune: Vec<PathBuf>) -> Rule {
             prune,
         },
         skip: Skip::default(),
-        build_output: true,
+        takes_built_apps: false,
         text: Text {
             title: "node_modules in {n} idle project{s}",
             summary: "Dependencies in projects you haven't touched for 90 days or more.",
@@ -254,7 +254,7 @@ fn rust_targets(env: &Env, prune: Vec<PathBuf>) -> Rule {
             prune,
         },
         skip: Skip::default(),
-        build_output: true,
+        takes_built_apps: false,
         text: Text {
             title: "Rust build output in {n} project{s}",
             summary: "target folders from cargo builds, in projects you haven't touched for 90 days or more.",
@@ -307,7 +307,7 @@ fn windows(env: &Env) -> Vec<Rule> {
                 idle_days: 1,
                 ..Skip::default()
             },
-            build_output: false,
+            takes_built_apps: false,
             text: Text {
                 title: "Temp folders",
                 summary: "{files} temporary file{fs} left behind by installers and apps.",
@@ -324,7 +324,7 @@ fn windows(env: &Env) -> Vec<Rule> {
             action: ActionKind::DeleteContents,
             find: Find::Places(browsers),
             skip: Skip::default(),
-            build_output: false,
+            takes_built_apps: false,
             text: Text {
                 title: "Browser caches",
                 summary: "Pages and images {labels} saved to load sites faster.",
@@ -353,7 +353,7 @@ fn windows(env: &Env) -> Vec<Rule> {
                 place(local, "pypoetry/Cache/artifacts", "Poetry"),
             ]),
             skip: Skip::default(),
-            build_output: false,
+            takes_built_apps: false,
             text: Text {
                 title: "Package manager caches",
                 summary: "Download caches from {labels}.",
@@ -374,7 +374,7 @@ fn windows(env: &Env) -> Vec<Rule> {
                 unlabelled(sub(local, "Microsoft/Windows/WER/ReportQueue")),
             ]),
             skip: Skip::default(),
-            build_output: false,
+            takes_built_apps: false,
             text: Text {
                 title: "Crash dumps & error reports",
                 summary: "{files} crash dump{fs} and error report{fs} from apps that crashed.",
@@ -396,7 +396,7 @@ fn windows(env: &Env) -> Vec<Rule> {
                 chromium: true,
             },
             skip: Skip::default(),
-            build_output: false,
+            takes_built_apps: false,
             text: Text {
                 title: "App caches",
                 summary: "Browser-engine caches that {labels} rebuild on their own.",
@@ -422,7 +422,7 @@ fn windows(env: &Env) -> Vec<Rule> {
                 chromium: false,
             },
             skip: Skip::default(),
-            build_output: false,
+            takes_built_apps: false,
             text: Text {
                 title: "Other app caches",
                 summary: "Folders named Cache in {labels}.",
@@ -445,7 +445,7 @@ fn windows(env: &Env) -> Vec<Rule> {
                 place(local, "Spotify/Data", "Spotify"),
             ]),
             skip: Skip::default(),
-            build_output: false,
+            takes_built_apps: false,
             text: Text {
                 title: "Shader and streaming caches",
                 summary: "Caches from {labels}.",
@@ -470,7 +470,7 @@ fn windows(env: &Env) -> Vec<Rule> {
                 idle_days: 30,
                 ..Skip::default()
             },
-            build_output: false,
+            takes_built_apps: false,
             text: Text {
                 title: "Old installers in Downloads",
                 summary: "{n} .exe and .msi file{s} older than 30 days.",
@@ -504,7 +504,7 @@ fn macos(env: &Env) -> Vec<Rule> {
                 place(home, ".cargo/registry/cache", "Cargo"),
             ]),
             skip: Skip::default(),
-            build_output: false,
+            takes_built_apps: false,
             text: Text {
                 title: "Homebrew & package caches",
                 summary: "Downloaded bottles and package archives from {labels}.",
@@ -524,7 +524,7 @@ fn macos(env: &Env) -> Vec<Rule> {
                 unless_running: &["Xcode", "com.apple.dt.Xcode"],
                 ..Skip::default()
             },
-            build_output: true,
+            takes_built_apps: true,
             text: Text {
                 title: "Xcode DerivedData",
                 summary: "Build files for {n} project{s} you opened in Xcode.",
@@ -547,7 +547,7 @@ fn macos(env: &Env) -> Vec<Rule> {
                 idle_days: 365,
                 ..Skip::default()
             },
-            build_output: true,
+            takes_built_apps: false,
             text: Text {
                 title: "Xcode archives older than a year",
                 summary: "{n} archive{s} of builds you already shipped.",
@@ -563,7 +563,7 @@ fn macos(env: &Env) -> Vec<Rule> {
             action: ActionKind::DeleteContents,
             find: Find::Places(vec![unlabelled(lib.join("Logs"))]),
             skip: Skip::default(),
-            build_output: false,
+            takes_built_apps: false,
             text: Text {
                 title: "Logs & diagnostic reports",
                 summary: "{files} log file{fs} and crash report{fs} from apps.",
@@ -582,7 +582,7 @@ fn macos(env: &Env) -> Vec<Rule> {
                 "Containers/com.apple.mail/Data/Library/Mail Downloads",
             ))]),
             skip: Skip::default(),
-            build_output: false,
+            takes_built_apps: false,
             text: Text {
                 title: "Mail attachment downloads",
                 summary: "Copies of {files} attachment{fs} you opened from Mail.",
@@ -598,7 +598,7 @@ fn macos(env: &Env) -> Vec<Rule> {
             action: ActionKind::DeleteContents,
             find: Find::Places(vec![unlabelled(home.join(".Trash"))]),
             skip: Skip::default(),
-            build_output: false,
+            takes_built_apps: false,
             text: Text {
                 title: "Empty the Trash",
                 summary: "{files} file{fs} already in the Trash.",
@@ -622,7 +622,7 @@ fn macos(env: &Env) -> Vec<Rule> {
                 running_apps: true,
                 ..Skip::default()
             },
-            build_output: false,
+            takes_built_apps: false,
             text: Text {
                 title: "App caches",
                 summary: "Browser-engine caches that {labels} rebuild on their own.",
@@ -647,7 +647,7 @@ fn macos(env: &Env) -> Vec<Rule> {
                 running_apps: true,
                 ..Skip::default()
             },
-            build_output: false,
+            takes_built_apps: false,
             text: Text {
                 title: "Other app caches",
                 summary: "Folders named Cache in {labels}.",
@@ -675,7 +675,7 @@ fn macos(env: &Env) -> Vec<Rule> {
                 ],
                 ..Skip::default()
             },
-            build_output: false,
+            takes_built_apps: false,
             text: Text {
                 title: "Library caches",
                 summary: "Caches in your Library, from {labels_n} app{ls}.",
@@ -700,7 +700,7 @@ fn macos(env: &Env) -> Vec<Rule> {
                 idle_days: 30,
                 ..Skip::default()
             },
-            build_output: false,
+            takes_built_apps: false,
             text: Text {
                 title: "Old disk images in Downloads",
                 summary: "{n} .dmg and .pkg file{s} older than 30 days.",

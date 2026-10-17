@@ -1038,30 +1038,70 @@ mod guard {
     }
 
     /// Wrapping an app in a folder doesn't make the folder fair game: nothing that holds an app bundle is taken
-    /// whole, except by the rules for build output and dependencies, which hold the apps they build.
+    /// whole. Only Xcode's DerivedData, whose build products are the apps it builds, may be: a `node_modules` with
+    /// Electron.app in it, a Rust `target` with a bundled app and an Xcode archive with its app all stay, while the
+    /// same folders without an app go.
     #[test]
     fn a_folder_holding_an_app() {
         let fx = Fixture::new();
+        let code = "Users/alex/code";
+        let xcode = "Users/alex/Library/Developer/Xcode";
         fx.file(
             "Users/alex/.Trash/wrapper/Tool.app/Contents/MacOS/Tool",
             MIB,
         );
         fx.file("Users/alex/.Trash/old.zip", MIB);
-        fx.file("Users/alex/code/app/package.json", 4 * KIB);
-        fx.file("Users/alex/code/app/package-lock.json", 4 * KIB);
+        for (p, app) in [("desktop", true), ("web", false)] {
+            fx.file(&format!("{code}/{p}/package.json"), 4 * KIB);
+            fx.file(&format!("{code}/{p}/package-lock.json"), 4 * KIB);
+            fx.file(&format!("{code}/{p}/node_modules/dep/index.js"), MIB);
+            if app {
+                fx.file(
+                    &format!(
+                        "{code}/{p}/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
+                    ),
+                    MIB,
+                );
+            }
+        }
+        for (p, app) in [("tauri", true), ("cli", false)] {
+            fx.file(&format!("{code}/{p}/Cargo.toml"), 4 * KIB);
+            fx.file(&format!("{code}/{p}/target/CACHEDIR.TAG"), 4 * KIB);
+            fx.file(&format!("{code}/{p}/target/release/{p}"), MIB);
+            if app {
+                fx.file(
+                    &format!("{code}/{p}/target/release/bundle/macos/Tool.app/Contents/MacOS/Tool"),
+                    MIB,
+                );
+            }
+        }
+        age(&fx.path(code), 120);
         fx.file(
-            "Users/alex/code/app/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+            &format!("{xcode}/Archives/2024-03-14/Shipped 1.0.xcarchive/Products/Applications/Shipped.app/Contents/MacOS/Shipped"),
             MIB,
         );
-        age(&fx.path("Users/alex/code"), 120);
+        fx.file(
+            &format!("{xcode}/Archives/2024-03-14/Plain 1.0.xcarchive/Info.plist"),
+            MIB,
+        );
+        age(&fx.path(&format!("{xcode}/Archives/2024-03-14")), 400);
+        fx.file(
+            &format!("{xcode}/DerivedData/Weatherly-abc/Build/Products/Debug/Weatherly.app/Contents/MacOS/Weatherly"),
+            MIB,
+        );
         let (snap, proposals) = run(&fx, &mac(&fx), &moment(&[]));
+        let mut found = all_targets(&fx, &snap, &proposals);
+        found.sort();
         assert_eq!(
-            all_targets(&fx, &snap, &proposals),
+            found,
             vec![
                 "Users/alex/.Trash/old.zip".to_owned(),
-                "Users/alex/code/app/node_modules".to_owned(),
+                format!("{xcode}/Archives/2024-03-14/Plain 1.0.xcarchive"),
+                format!("{xcode}/DerivedData/Weatherly-abc"),
+                format!("{code}/cli/target"),
+                format!("{code}/web/node_modules"),
             ],
-            "not the wrapper; an idle project's node_modules with Electron.app in it, yes"
+            "not the wrapper, nor anything else holding an app but DerivedData"
         );
     }
 
