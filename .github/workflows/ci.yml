@@ -72,7 +72,7 @@ jobs:
       - name: Core tests
         run: |
           rm -rf src/bindings
-          cargo test --workspace --locked --no-fail-fast
+          cargo test --workspace --locked
 
       - name: Generated TypeScript types are up to date
         run: |

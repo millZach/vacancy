@@ -80,7 +80,7 @@ pub fn check_root(root: &Path, home: &Path) -> Result<PathBuf, FixtureError> {
     // The root of a volume mounted in a folder (a disk image at /Volumes/Test, a drive in a folder): its device
     // or volume isn't its parent's, or the OS says a volume is mounted right there.
     let (parent, last) = (&chain[chain.len() - 2], &chain[chain.len() - 1]);
-    if cfg!(windows) && (last.id.volume() != parent.id.volume() || is_mount_point(root)) {
+    if last.id.volume() != parent.id.volume() || is_mount_point(root) {
         return Err(FixtureError::MountRoot(root.to_path_buf()));
     }
     let root_id = last.id;
