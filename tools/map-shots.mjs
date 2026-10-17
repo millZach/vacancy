@@ -1,6 +1,7 @@
 // Screenshots the map's screens in Edge: the scan plate, scanning (the HUD over the map filling in), the overview,
 // a hover card, a category zoomed in, a folder opened from it, the plan tray beside the map with its tiles lit, and
-// then freeing the plan: the confirm dialog, the run mid-way and done, and the summary.
+// then freeing the plan: the confirm dialog, the run mid-way and done, and the summary (past the highlight slides,
+// which npm run wrapped-shots takes).
 //
 //   npm run dev                       (the UI on the mock bridge, http://localhost:1420)
 //   npm run map-shots -- [options]
@@ -157,6 +158,8 @@ try {
       await shot(page, '11-run-done');
 
       await seeChanges.click();
+      // The highlight slides come first (npm run wrapped-shots takes them); skip to the summary.
+      await page.getByRole('button', { name: 'Skip to recap' }).click();
       await page.locator('.tray.summary').waitFor({ timeout: 10_000 });
       // The swipe sweeps to After and the Vacant signs catch.
       await settle(page, 2800);

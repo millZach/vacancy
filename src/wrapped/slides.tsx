@@ -221,7 +221,7 @@ export function KeptSlide({ report: r }: SlideProps) {
             <p className="kept-hint">
               {inUse && 'Files in use can go next time, once nothing has them open.'}
               {inUse && changed && ' '}
-              {changed && 'Scan again to see what changed as it is now.'}
+              {changed && 'Scan again to see the changed files as they are now.'}
             </p>
           )}
           {notes.length > 0 && (

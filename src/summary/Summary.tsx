@@ -76,8 +76,10 @@ export function SummaryMap({ model, report, hot, onHot }: MapProps) {
       if (reducedMotion()) return apply(to);
       const from = split.current;
       const start = performance.now() + delay;
-      const step = (now: number) => {
-        const t = Math.max(0, Math.min(1, (now - start) / ms));
+      // Timed by the clock it started from, not the frame's timestamp, which runs on another clock (devtools can
+      // slow it down).
+      const step = () => {
+        const t = Math.max(0, Math.min(1, (performance.now() - start) / ms));
         apply(from + (to - from) * ease(t));
         if (t < 1) raf.current = requestAnimationFrame(step);
       };

@@ -169,19 +169,20 @@ try {
       (ms) =>
         new Promise((done) => {
           const times = [];
-          let last = performance.now();
-          const end = last + ms;
+          let last = 0;
+          const start = performance.now();
           const tick = (now) => {
             times.push(now - last);
             last = now;
-            if (now < end) requestAnimationFrame(tick);
+            if (performance.now() - start < ms) requestAnimationFrame(tick);
             else {
+              const wall = performance.now() - start;
               const sorted = [...times].sort((a, b) => a - b);
               const at = (p) => sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
               done({
-                seconds: ms / 1000,
+                seconds: Math.round(wall) / 1000,
                 frames: times.length,
-                fps: Math.round((times.length / ms) * 1000 * 10) / 10,
+                fps: Math.round((times.length / wall) * 1000 * 10) / 10,
                 meanMs: Math.round((times.reduce((s, t) => s + t, 0) / times.length) * 100) / 100,
                 p95Ms: Math.round(at(0.95) * 100) / 100,
                 p99Ms: Math.round(at(0.99) * 100) / 100,

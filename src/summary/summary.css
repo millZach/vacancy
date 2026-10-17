@@ -483,28 +483,28 @@
 }
 .finish.is-handed .summary-sub,
 .finish.is-handed .summary-note {
-  animation-delay: 0.5s;
+  animation-delay: var(--rise-words);
 }
 .finish.is-handed .diskba {
-  animation-delay: 0.58s;
+  animation-delay: var(--rise-bars);
 }
 .finish.is-handed .stats dt {
-  animation-delay: 0.9s;
+  animation-delay: var(--rise-labels);
 }
 .finish.is-handed .summary-sec {
-  animation-delay: 0.7s;
+  animation-delay: var(--rise-sections);
 }
 .finish.is-handed .summary-sec + .summary-sec {
-  animation-delay: 0.78s;
+  animation-delay: calc(var(--rise-sections) + var(--rise-gap));
 }
 .finish.is-handed .summary-sec + .summary-sec + .summary-sec {
-  animation-delay: 0.86s;
+  animation-delay: calc(var(--rise-sections) + 2 * var(--rise-gap));
 }
 .finish.is-handed .summary-foot {
-  animation-delay: 0.95s;
+  animation-delay: var(--rise-foot);
 }
 .finish.is-handed .finish-map {
-  animation: settle 1.1s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  animation: settle var(--settle) both;
 }
 @keyframes rise {
   from {

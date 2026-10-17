@@ -179,6 +179,16 @@
   --fade-in-ms: 400ms; /* Replay highlights */
   --ease-fade: cubic-bezier(0.4, 0, 0.2, 1);
   --rise: 0.6s cubic-bezier(0.2, 0.7, 0.2, 1); /* the summary's sections rising in after the flight */
+  --rise-words: 0.5s; /* when each part of the summary starts to rise */
+  --rise-bars: 0.58s;
+  --rise-sections: 0.7s;
+  --rise-gap: 80ms; /* between one section and the next */
+  --rise-labels: 0.9s;
+  --rise-foot: 0.95s;
+  --settle: 1.1s cubic-bezier(0.2, 0.7, 0.2, 1); /* the map easing into place under the landing numbers */
+  --wrap-top-fade: 0.45s; /* the small wordmark appearing after the sign's slide */
+  --vacant-label-in: 0.4s; /* "+26.9 GB" on the vacant lot */
+  --vacant-label-at: 1.1s;
   --wrap-chrome-fade: 0.24s; /* the slides' controls and words fading as the numbers fly */
   --wrap-bg-fade: 0.75s; /* the slides' ground giving way to the map */
   --dot-grow: 0.25s; /* a dot widening into the lit one */
@@ -235,6 +245,9 @@
   --color-fob-text: #fff;
   --color-fob-edge: rgba(255, 255, 255, 0.35);
   --color-fob-ring: #aeb6c2;
+  --shadow-fob-ring: inset 0 0 0 1px rgba(0, 0, 0, 0.3);
+  --shadow-fob-hole: inset 0 2px 4px rgba(0, 0, 0, 0.6);
+  --color-win-why: rgba(var(--neon-rgb), 0.45); /* the rule beside the biggest win's reason */
   --shadow-fob: drop-shadow(0 22px 30px rgba(0, 0, 0, 0.55)) drop-shadow(0 0 34px rgba(var(--neon-rgb), 0.3));
   --emboss-fob: 0 1px 0 rgba(255, 255, 255, 0.3), 0 -1px 0 rgba(0, 0, 0, 0.3);
   /* The category chart's bars. */
@@ -255,6 +268,7 @@
   --text-slide-note: 13.5px;
   --text-slide-num: 26px;
   --text-fob: 64px;
+  --text-fob-unit: 19px; /* also a moved folder's name */
   --text-checkout: clamp(104px, 11.5vw, 152px);
   --text-checkout-short: clamp(96px, 10vw, 128px);
   --text-checkout-stat: 38px;
