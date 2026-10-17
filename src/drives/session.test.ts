@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { fixtures, type Overview, type VolumeInfo } from '../bridge';
-import { EMPTY, reduce, scanOf, shownVolume, type Action, type Session } from './session';
+import { EMPTY, reclaimableBytes, reclaimableOf, reduce, scanOf, shownVolume, type Action, type Session } from './session';
 
 const [C, D, E] = fixtures.windows.volumes as [VolumeInfo, VolumeInfo, VolumeInfo];
 
@@ -8,11 +8,14 @@ function mapOf(volume: VolumeInfo): Overview {
   return { ...fixtures.windows.overview, volume };
 }
 
+/** A finished scan of `volume`: its map and the fixture's proposals. */
+const done = (volume: VolumeInfo) => ({ status: 'done' as const, overview: mapOf(volume), proposals: fixtures.windows.proposals });
+
 const run = (s: Session, ...actions: Action[]) => actions.reduce(reduce, s);
 const listed = (drives: VolumeInfo[] = [C, D, E]): Action => ({ type: 'listed', drives });
 const scanned = (volume: VolumeInfo, id: number): Action[] => [
   { type: 'scanStarted', mountPoint: volume.mountPoint, run: id },
-  { type: 'scanEnded', mountPoint: volume.mountPoint, run: id, outcome: { status: 'done', overview: mapOf(volume) }, at: 1 },
+  { type: 'scanEnded', mountPoint: volume.mountPoint, run: id, outcome: done(volume), at: 1 },
 ];
 const start = run(EMPTY, listed());
 
@@ -48,7 +51,7 @@ describe('the drive session', () => {
       type: 'scanEnded',
       mountPoint: C.mountPoint,
       run: 1,
-      outcome: { status: 'done', overview: mapOf(C) },
+      outcome: done(C),
       at: 1,
     });
     expect(late).toBe(s);
@@ -56,7 +59,7 @@ describe('the drive session', () => {
       type: 'scanEnded',
       mountPoint: C.mountPoint,
       run: 2,
-      outcome: { status: 'done', overview: mapOf(D) },
+      outcome: done(D),
       at: 1,
     });
     expect(wrongDrive).toBe(s);
@@ -137,5 +140,58 @@ describe('the drive session', () => {
   it('ignores a listing that changed nothing, or came back empty', () => {
     expect(run(start, listed([{ ...C }, { ...D }, { ...E }]))).toBe(start);
     expect(run(start, listed([]))).toBe(start);
+  });
+});
+
+describe('each drive’s plan', () => {
+  const planOf = (s: Session, volume: VolumeInfo) => {
+    const scan = scanOf(s, volume.mountPoint);
+    return scan.phase === 'done' ? scan.plan : null;
+  };
+  const defaults = fixtures.windows.proposals.filter((p) => p.defaultOn).map((p) => p.id);
+  const plan = (volume: VolumeInfo, id: string, on: boolean): Action => ({
+    type: 'plan',
+    mountPoint: volume.mountPoint,
+    id,
+    on,
+  });
+
+  it('starts with the proposals that are on by default: the safe ones, and old installers', () => {
+    const s = run(start, ...scanned(C, 1));
+    expect(planOf(s, C)).toEqual(defaults);
+    expect(defaults).toContain('w-installers');
+    expect(defaults).toContain('w-node');
+  });
+
+  it('adds and removes proposals on its own drive only', () => {
+    let s = run(start, ...scanned(C, 1), { type: 'switch', mountPoint: D.mountPoint }, ...scanned(D, 2));
+    s = run(s, plan(C, 'w-node', false), plan(C, 'w-node', false));
+    expect(planOf(s, C)).toEqual(defaults.filter((id) => id !== 'w-node'));
+    expect(planOf(s, D)).toEqual(defaults); // D:'s plan is its own
+
+    s = run(s, plan(D, 'w-temp', false), plan(C, 'w-node', true));
+    expect(planOf(s, C)).toContain('w-node');
+    expect(planOf(s, D)).not.toContain('w-temp');
+    expect(planOf(s, C)).toContain('w-temp');
+  });
+
+  it('ignores a proposal the drive doesn’t have, a drive with no map, and a change that changes nothing', () => {
+    const s = run(start, ...scanned(C, 1));
+    expect(run(s, plan(C, 'm-trash', true))).toBe(s);
+    expect(run(s, plan(D, 'w-node', false))).toBe(s);
+    expect(run(s, plan(C, 'w-node', true))).toBe(s);
+  });
+
+  it('starts afresh when the drive is scanned again', () => {
+    const s = run(start, ...scanned(C, 1), plan(C, 'w-node', false), ...scanned(C, 2));
+    expect(planOf(s, C)).toEqual(defaults);
+  });
+
+  it('adds up what a drive could reclaim from its delete proposals', () => {
+    const total = fixtures.windows.proposals.reduce((sum, p) => sum + p.bytes, 0);
+    expect(reclaimableBytes(fixtures.windows.proposals)).toBe(total);
+    const s = run(start, ...scanned(C, 1));
+    expect(reclaimableOf(scanOf(s, C.mountPoint))).toBe(total);
+    expect(reclaimableOf(scanOf(s, D.mountPoint))).toBe(0);
   });
 });

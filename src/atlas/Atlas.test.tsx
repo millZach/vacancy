@@ -304,11 +304,11 @@ describe('the map', () => {
 
     tile(container, 'code').focus();
     await userEvent.keyboard('{Enter}');
-    await waitFor(() => expect(tile(container, 'node_modules')).toBeInTheDocument());
+    await waitFor(() => expect(tile(container, 'target')).toBeInTheDocument());
     const crumbs = screen.getByRole('navigation', { name: 'Map location' });
     expect(within(crumbs).getByText('code')).toHaveAttribute('aria-current', 'location');
     // Folders that hold nothing more to show are not buttons.
-    expect(tile(container, 'node_modules')).not.toHaveAttribute('role');
+    expect(tile(container, 'target')).not.toHaveAttribute('role');
   });
 
   it('starts again from the scan screen, which can also go back to the map', async () => {
@@ -330,5 +330,141 @@ describe('the map', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Scan again' }));
     expect(await screen.findByLabelText('Map key')).toBeInTheDocument();
     expect(scan).toHaveBeenCalledTimes(2);
+  });
+});
+
+/** A proposal's tile on the map. */
+const proposalTile = (container: HTMLElement, id: string) => {
+  const el = container.querySelector<HTMLElement>(`[data-tile="p:${id}"]`);
+  if (!el) throw new Error(`no tile for proposal ${id}`);
+  return el;
+};
+const tray = () => screen.getByRole('complementary', { name: 'Plan' });
+const row = (title: string) => within(tray()).getByRole('checkbox', { name: `Include ${title}` });
+const freed = () => plain(within(tray()).getByText('will be freed').previousElementSibling?.textContent);
+
+describe('proposals and the plan', () => {
+  it('lights reclaimable tiles, and shows how much the drive could get back', async () => {
+    const { container } = renderApp(windows());
+    await scanToMap();
+
+    const node = proposalTile(container, 'w-node');
+    expect(node).toHaveClass('is-reclaim');
+    expect(node).toHaveTextContent('node_modules in 61 idle projects');
+    expect(tile(container, 'Cyberpunk 2077')).not.toHaveClass('is-reclaim');
+    expect(plain(within(header()).getByText(/reclaimable/).textContent)).toBe('75.3 GB reclaimable');
+    expect(container.querySelector('.usage--head > b')).not.toBeNull();
+    expect(screen.getByLabelText('Map key')).toHaveTextContent('Reclaimable');
+  });
+
+  it('says what a reclaimable tile is on hover', async () => {
+    const { container } = renderApp(windows());
+    await scanToMap();
+
+    fireEvent.pointerMove(proposalTile(container, 'w-installers'), { clientX: 50, clientY: 50 });
+    const card = screen.getByRole('tooltip');
+    expect(card).toHaveTextContent('Old installers in Downloads');
+    expect(card).toHaveTextContent('Review');
+    expect(card).toHaveTextContent('Built-in rule');
+    expect(card).toHaveTextContent('47 .exe and .msi files older than 30 days.');
+    expect(card).toHaveTextContent('Click to zoom in.');
+  });
+
+  it('opens the plan tray with each proposal’s risk, source, why and sample paths', async () => {
+    renderApp(windows());
+    await scanToMap();
+    await userEvent.click(within(header()).getByRole('button', { name: 'Build a plan' }));
+
+    expect(within(tray()).getByRole('heading', { name: 'Delete 8 of 8' })).toBeInTheDocument();
+    expect(row('Old installers in Downloads')).toHaveAttribute('aria-checked', 'true');
+    expect(within(header()).queryByRole('button', { name: 'Build a plan' })).toBeNull();
+
+    const title = within(tray()).getByRole('button', { name: 'Old installers in Downloads' });
+    expect(title).toHaveAttribute('aria-expanded', 'false');
+    await userEvent.click(title);
+    expect(title).toHaveAttribute('aria-expanded', 'true');
+    expect(tray()).toHaveTextContent('These programs are already installed or can be downloaded again.');
+    const paths = within(tray()).getByRole('list', { name: 'Sample paths' });
+    expect(paths).toHaveTextContent('C:\\Users\\alex\\Downloads\\SteamSetup.exe');
+    expect(tray()).not.toHaveTextContent('Comes back on its own if you need it.');
+
+    const installers = row('Old installers in Downloads').closest('.tray-row') as HTMLElement;
+    expect(within(installers).getByText('Review')).toHaveClass('risk', 'risk--review');
+    expect(within(installers).getByText('Built-in rule')).toBeInTheDocument();
+
+    expect(freed()).toBe('75.3 GB');
+    expect(tray()).toHaveTextContent('712,567 items in 8 places, deleted permanently');
+    const free = within(tray()).getByRole('button', { name: /^Free 75\.3\sGB$/ });
+    expect(free).toBeDisabled();
+    expect(free).toHaveAccessibleDescription('Vacancy can’t run plans yet. This version only proposes.');
+
+    await userEvent.click(within(tray()).getByRole('button', { name: 'Hide the plan' }));
+    expect(screen.queryByRole('complementary', { name: 'Plan' })).toBeNull();
+    expect(within(header()).getByRole('button', { name: 'Build a plan' })).toBeInTheDocument();
+  });
+
+  it('takes a proposal out and puts it back, from its row or its tile', async () => {
+    const { container } = renderApp(windows());
+    await scanToMap();
+    await userEvent.click(within(header()).getByRole('button', { name: 'Build a plan' }));
+
+    expect(proposalTile(container, 'w-node')).toHaveClass('is-reclaim', 'is-selected');
+    await userEvent.click(row('node_modules in 61 idle projects'));
+    expect(row('node_modules in 61 idle projects')).toHaveAttribute('aria-checked', 'false');
+    expect(freed()).toBe('54.3 GB');
+    expect(proposalTile(container, 'w-node')).toHaveClass('is-available');
+    expect(proposalTile(container, 'w-node')).not.toHaveClass('is-reclaim');
+
+    fireEvent.pointerMove(proposalTile(container, 'w-node'), { clientX: 50, clientY: 50 });
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Click to add it to the plan.');
+    await userEvent.click(proposalTile(container, 'w-node'));
+    expect(row('node_modules in 61 idle projects')).toHaveAttribute('aria-checked', 'true');
+    expect(freed()).toBe('75.3 GB');
+
+    // Everything out: nothing to free.
+    for (const p of fixtures.windows.proposals) await userEvent.click(row(p.title));
+    expect(within(tray()).getByRole('button', { name: 'Nothing selected yet' })).toBeDisabled();
+    expect(freed()).toBe('0 B');
+  });
+
+  it('lights a proposal’s row and tile together', async () => {
+    const { container } = renderApp(windows());
+    await scanToMap();
+    await userEvent.click(within(header()).getByRole('button', { name: 'Build a plan' }));
+
+    const temp = row('Temp folders').closest('.tray-row') as HTMLElement;
+    fireEvent.mouseEnter(temp);
+    expect(proposalTile(container, 'w-temp')).toHaveClass('is-hot');
+    fireEvent.mouseLeave(temp);
+    expect(proposalTile(container, 'w-temp')).not.toHaveClass('is-hot');
+    fireEvent.pointerMove(proposalTile(container, 'w-browser'), { clientX: 50, clientY: 50 });
+    expect(row('Browser caches').closest('.tray-row')).toHaveClass('is-hot');
+  });
+
+  it('adds a proposal from a zoomed-in category and opens the tray', async () => {
+    const { container } = renderApp(createMockBridge(fixtures.macos, { scanMs: 0 }));
+    await scanToMap('Macintosh HD');
+
+    await userEvent.click(proposalTile(container, 'm-archives'));
+    const crumbs = screen.getByRole('navigation', { name: 'Map location' });
+    expect(within(crumbs).getByText('Developer')).toHaveAttribute('aria-current', 'location');
+    expect(screen.queryByRole('complementary', { name: 'Plan' })).toBeNull();
+
+    fireEvent.pointerMove(proposalTile(container, 'm-archives'), { clientX: 50, clientY: 50 });
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Click to add it to the plan.');
+    await userEvent.click(proposalTile(container, 'm-archives'));
+    expect(row('Xcode archives older than a year')).toHaveAttribute('aria-checked', 'true');
+    expect(within(tray()).getByRole('heading', { name: 'Delete 10 of 10' })).toBeInTheDocument();
+  });
+
+  it('starts the plan with review proposals off unless their rule turns them on', async () => {
+    renderApp(createMockBridge(fixtures.macos, { scanMs: 0 }));
+    await scanToMap('Macintosh HD');
+    await userEvent.click(within(header()).getByRole('button', { name: 'Build a plan' }));
+
+    expect(row('Xcode archives older than a year')).toHaveAttribute('aria-checked', 'false');
+    expect(row('Old disk images in Downloads')).toHaveAttribute('aria-checked', 'true');
+    expect(row('Xcode DerivedData')).toHaveAttribute('aria-checked', 'true');
+    expect(within(tray()).getByRole('heading', { name: 'Delete 9 of 10' })).toBeInTheDocument();
   });
 });

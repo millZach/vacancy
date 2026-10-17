@@ -40,6 +40,8 @@ export interface ReadyDrives {
   scan: () => void;
   /** Stops the scan of the drive on screen. */
   cancelScan: () => void;
+  /** Puts a proposal in the plan of the drive on screen, or takes it out. */
+  setInPlan: (id: string, on: boolean) => void;
   /** For the run (ticket 04): while a plan runs, switching drives is disabled. */
   setRunning: (running: boolean) => void;
   dismissGone: () => void;

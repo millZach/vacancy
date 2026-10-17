@@ -1,7 +1,7 @@
 import { HardDrive, Usb } from 'lucide-react';
 import type { DriveKind, VolumeInfo } from '../bridge';
-import { timeAgo } from '../format';
-import type { DriveScan } from './session';
+import { formatBytes, timeAgo } from '../format';
+import { reclaimableOf, type DriveScan } from './session';
 import './drives.css';
 
 /** Why the drive menu is shut while a plan runs. */
@@ -29,25 +29,43 @@ export function DriveTags({ volume, system = true, id }: { volume: VolumeInfo; s
   );
 }
 
-/** Used space as a bar, warm once the drive is 90% full. The numbers beside it say the same for screen readers. */
-export function UsageBar({ volume, className }: { volume: VolumeInfo; className?: string }) {
-  const share = volume.totalBytes > 0 ? Math.min(1, volume.usedBytes / volume.totalBytes) : 0;
+/**
+ * Used space as a bar, warm once the drive is 90% full, with the share a scan found to reclaim lit at its end. The
+ * numbers beside it say the same for screen readers.
+ */
+export function UsageBar({
+  volume,
+  reclaim = 0,
+  className,
+}: {
+  volume: VolumeInfo;
+  reclaim?: number;
+  className?: string;
+}) {
+  const total = volume.totalBytes;
+  const share = total > 0 ? Math.min(1, volume.usedBytes / total) : 0;
+  const lit = total > 0 ? Math.min(reclaim, volume.usedBytes) / total : 0;
   const classes = ['usage', share >= NEARLY_FULL ? 'is-full' : '', className ?? ''].filter(Boolean).join(' ');
   return (
     <span className={classes} aria-hidden>
       <i style={{ width: `${share * 100}%` }} />
+      {lit > 0 && <b style={{ left: `${(share - lit) * 100}%`, width: `${lit * 100}%` }} />}
     </span>
   );
 }
 
-/** "Not scanned yet", "Scanning now" or "Scanned 4 min ago", with a dot that lights once the drive has a scan. */
+/**
+ * "Not scanned yet", "Scanning now" or "Scanned 4 min ago, 120 GB to reclaim", with a dot that lights once the drive
+ * has a scan.
+ */
 export function DriveStatus({ scan, now, id }: { scan: DriveScan; now: number; id?: string }) {
   const lit = scan.phase === 'done' ? ' is-scanned' : scan.phase === 'scanning' ? ' is-scanning' : '';
+  const reclaim = reclaimableOf(scan);
   return (
     <span className={`drive-status${lit}`} id={id}>
       <i aria-hidden />
       {scan.phase === 'done'
-        ? `Scanned ${timeAgo(scan.at, now)}`
+        ? `Scanned ${timeAgo(scan.at, now)}${reclaim > 0 ? `, ${formatBytes(reclaim, 0)} to reclaim` : ''}`
         : scan.phase === 'scanning'
           ? 'Scanning now'
           : 'Not scanned yet'}

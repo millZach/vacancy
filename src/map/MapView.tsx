@@ -1,5 +1,13 @@
 import { Lock } from 'lucide-react';
-import { useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from 'react';
+import {
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+  type PointerEvent,
+  type ReactNode,
+} from 'react';
 import { ago, formatBytes, percentOf } from '../format';
 import { layoutAtlas, regionKey, type AtlasModel, type Leaf, type Rect, type Region } from './model';
 import './map.css';
@@ -23,6 +31,18 @@ export interface MapViewProps {
   leafAction?: (leaf: Leaf) => string | null;
   /** The last line of a region header's hover card, if any. */
   regionAction?: (region: Region) => string | null;
+  /** How a tile looks beyond its kind: extra classes (reclaimable, selected) and a badge in its corner. */
+  look?: (leaf: Leaf) => TileLook;
+  /** What a tile's hover card says under its numbers, in place of `leafAction` (a proposal's risk and summary). */
+  leafStatus?: (leaf: Leaf) => ReactNode;
+  /** The plan tray is open: reclaimable tiles are being picked. */
+  planning?: boolean;
+}
+
+/** A tile's extra look. */
+export interface TileLook {
+  cls?: string;
+  badge?: ReactNode;
 }
 
 const LOCKED = 'Protected. Vacancy never changes anything here.';
@@ -65,7 +85,7 @@ export function MapView(p: MapViewProps) {
   };
 
   return (
-    <div ref={ref} className="map" onPointerMove={onMove} onPointerLeave={onLeave}>
+    <div ref={ref} className={p.planning ? 'map is-planning' : 'map'} onPointerMove={onMove} onPointerLeave={onLeave}>
       {p.model.regions.map((r) => {
         const rect = rects.get(regionKey(r.id));
         if (!rect || r.pending) return null;
@@ -98,8 +118,12 @@ export function MapView(p: MapViewProps) {
         if (!rect || !r || r.pending) return null;
         const shown = !p.focus || p.focus === l.regionId;
         const canClick = p.interactive && shown && (p.clickable?.(l) ?? false);
+        const look = p.look?.(l) ?? {};
+        // A badge needs room; a narrow tile with one has room for its size only, its name is in the hover card.
+        const badge = rect.w >= 40 && rect.h >= 26 ? look.badge : undefined;
+        const compact = !!badge && rect.w < 92;
         const showName = rect.w >= 50 && rect.h >= 22 && l.kind !== 'scanned';
-        const showSize = rect.w >= 50 && rect.h >= 40 && l.kind !== 'scanned';
+        const showSize = (compact ? rect.w >= 78 : rect.w >= 50 && rect.h >= 40) && l.kind !== 'scanned';
         const oneLine = rect.w < 96 || rect.h < 58;
         const cls = [
           'map-tile',
@@ -107,6 +131,8 @@ export function MapView(p: MapViewProps) {
           r.protected && 'is-locked',
           p.hot === l.id && 'is-hot',
           canClick && 'is-clickable',
+          badge && 'has-badge',
+          look.cls,
         ]
           .filter(Boolean)
           .join(' ');
@@ -127,10 +153,11 @@ export function MapView(p: MapViewProps) {
             {l.kind !== 'free' && <div className="map-fill" />}
             {showName && (
               <div className={oneLine ? 'map-label is-1line' : 'map-label'}>
-                <span className="map-name">{l.name}</span>
+                {!compact && <span className="map-name">{l.name}</span>}
                 {showSize && <span className="map-size">{formatBytes(l.bytes)}</span>}
               </div>
             )}
+            {badge}
           </div>
         );
       })}
@@ -145,6 +172,7 @@ export function MapView(p: MapViewProps) {
           h={p.height}
           leafAction={p.leafAction}
           regionAction={p.regionAction}
+          leafStatus={p.leafStatus}
         />
       )}
     </div>
@@ -164,13 +192,14 @@ interface TipProps {
   h: number;
   leafAction?: ((leaf: Leaf) => string | null) | undefined;
   regionAction?: ((region: Region) => string | null) | undefined;
+  leafStatus?: ((leaf: Leaf) => ReactNode) | undefined;
 }
 
 const TIP_W = 300;
 const TIP_H = 170;
 
 /** The hover card: what a tile or region is, how big, when it was last used, and what clicking does. */
-function Tip({ model, id, x, y, w, h, leafAction, regionAction }: TipProps) {
+function Tip({ model, id, x, y, w, h, leafAction, regionAction, leafStatus }: TipProps) {
   const left = x + 18 + TIP_W > w ? Math.max(4, x - TIP_W - 14) : x + 18;
   const top = y + 18 + TIP_H > h ? Math.max(4, y - TIP_H) : y + 18;
   const style = { left, top, width: TIP_W };
@@ -200,8 +229,10 @@ function Tip({ model, id, x, y, w, h, leafAction, regionAction }: TipProps) {
   const l = model.leafById.get(id);
   const r = l && model.regionById.get(l.regionId);
   if (!l || !r) return null;
+  const custom = !r.protected ? leafStatus?.(l) : null;
   const action = leafAction?.(l);
-  const status = l.kind === 'free' ? 'Space you already have.' : r.protected ? null : (l.note ?? action);
+  const status =
+    l.kind === 'free' ? 'Space you already have.' : r.protected || custom ? null : (l.note ?? action);
   return (
     <div className="map-tip" style={style} role="tooltip">
       <div className="map-tip-name">{l.name}</div>
@@ -218,6 +249,7 @@ function Tip({ model, id, x, y, w, h, leafAction, regionAction }: TipProps) {
         </div>
       )}
       {status && <div className="map-tip-status">{status}</div>}
+      {custom && <div className="map-tip-status">{custom}</div>}
       {!r.free && (
         <div className="map-tip-region" data-cat={r.category ?? undefined}>
           <i aria-hidden />

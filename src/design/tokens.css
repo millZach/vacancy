@@ -84,6 +84,35 @@
   /* Tiles glide to their new places when the map zooms or fills in. */
   --map-move: 0.52s cubic-bezier(0.22, 0.8, 0.26, 1);
 
+  /* ---------- reclaimable tiles: the only tiles that glow ---------- */
+  --glow-reclaim: 0 0 16px -3px rgba(var(--neon-rgb), 0.6);
+  --edge-reclaim: inset 0 0 0 1.5px var(--color-neon), inset 0 0 18px rgba(var(--neon-rgb), 0.3);
+  --edge-selected: inset 0 0 0 2px var(--color-neon), inset 0 0 22px rgba(var(--neon-rgb), 0.35);
+  --edge-reclaim-hot: inset 0 0 0 2px var(--color-tile-hot), inset 0 0 0 4px var(--color-neon),
+    inset 0 0 24px rgba(var(--neon-rgb), 0.45);
+  --color-selected-fill: rgba(var(--neon-rgb), 0.13);
+  --color-available-edge: rgba(var(--neon-rgb), 0.6); /* in the plan's view, a tile not in the plan yet */
+  --color-pin: rgba(15, 19, 24, 0.75); /* the round + or tick on a tile */
+  --color-pin-edge: rgba(var(--neon-rgb), 0.75);
+  --glow-pin: 0 0 8px rgba(var(--neon-rgb), 0.8);
+  --key-reclaim-fill: rgba(var(--neon-rgb), 0.14);
+  --glow-key-reclaim: inset 0 0 0 1.5px var(--color-neon), 0 0 7px rgba(var(--neon-rgb), 0.7);
+  --glow-reclaim-text: 0 0 12px rgba(var(--neon-rgb), 0.7);
+
+  /* ---------- the plan tray ---------- */
+  --tray-w: 388px;
+  --color-row-on: rgba(255, 255, 255, 0.035); /* a row under the pointer */
+  --color-check: #4b5462; /* an empty tick box */
+  --color-check-hover: #6c7686;
+  --glow-check: 0 0 9px rgba(var(--neon-rgb), 0.55);
+  --safe-rgb: 124, 201, 166; /* --color-safe as channels, for a risk chip's fill and edge */
+  --review-rgb: 230, 184, 92;
+  --careful-rgb: 240, 138, 108;
+  --tray-foot-glow: linear-gradient(180deg, rgba(var(--neon-rgb), 0) 0%, rgba(var(--neon-rgb), 0.045) 100%);
+  --glow-total: 0 0 18px rgba(var(--neon-rgb), 0.5);
+  --text-total: 34px; /* the plan's total */
+  --tray-in: 0.34s cubic-bezier(0.2, 0.7, 0.2, 1);
+
   /* ---------- surfaces ---------- */
   --ground: radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.085) 1px, transparent 1.5px) 0 0 / 9px 9px,
     var(--color-head);

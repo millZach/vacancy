@@ -2,11 +2,30 @@ import { scaleSquare } from './scale';
 
 const unit = (gb: number) => (gb < 1 ? `${Math.round(gb * 1000)} MB` : `${gb} GB`);
 
-/** The map key: locked and free tiles, and a square showing how much space a small area holds. */
-export function Legend({ bytesInView, w, h }: { bytesInView: number; w: number; h: number }) {
+/**
+ * The map key: reclaimable tiles (when the map has proposals), locked and free tiles, and a square showing how much
+ * space a small area holds.
+ */
+export function Legend({
+  bytesInView,
+  w,
+  h,
+  reclaimable = false,
+}: {
+  bytesInView: number;
+  w: number;
+  h: number;
+  reclaimable?: boolean;
+}) {
   const s = scaleSquare(bytesInView, w * h);
   return (
     <div className="legend" aria-label="Map key">
+      {reclaimable && (
+        <span className="key">
+          <i className="key-reclaim" />
+          Reclaimable
+        </span>
+      )}
       <span className="key">
         <i className="key-locked" />
         Protected

@@ -1,5 +1,5 @@
 import type { Fixture } from './fixtures';
-import type { Bridge, CategoryTotal, MapFolder, ScanOutcome, ScanUpdate, VolumeInfo } from './types';
+import type { Bridge, CategoryTotal, MapFolder, Proposal, ScanOutcome, ScanUpdate, VolumeInfo } from './types';
 
 export interface MockOptions {
   /** Answer after this many milliseconds, to see loading states. Default: next tick. */
@@ -26,8 +26,9 @@ const ease = (t: number) => 1 - Math.pow(1 - t, 2.4);
 /**
  * A bridge that answers from fixture data. Used in a plain browser (`npm run dev`), in tests and in screenshots.
  * Its scan replays the fixture's map over `scanMs`: counts climb, the path ticker moves, and categories are found
- * one after another, the way the prototype's scan reveals them. Another drive gets the system drive's map scaled to
- * its size, with its paths moved onto it. Like the app, it keeps a map per drive and runs one scan at a time.
+ * one after another, the way the prototype's scan reveals them, then it answers with the map and the proposals.
+ * Another drive gets the system drive's map and proposals scaled to its size, with their paths moved onto it. Like
+ * the app, it keeps a map per drive and runs one scan at a time.
  */
 export function createMockBridge(fixture: Fixture, options: MockOptions = {}): MockBridge {
   const answer = <T>(value: T) =>
@@ -69,6 +70,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
       const volume = volumes.find((v) => v.mountPoint === mountPoint);
       if (!volume) return Promise.reject(new Error(`could not scan ${mountPoint}: the drive is not connected`));
       const map = onDrive(structuredClone(fixture.overview), system, volume);
+      const proposals = proposalsOnDrive(structuredClone(fixture.proposals), system, volume);
       const paths = map.categories.flatMap((c) => c.items.map((i) => i.path)).filter(Boolean);
       // Interleaved, so the ticker jumps around the disk the way a real walk does.
       const ticker = paths.map((p, i) => paths[(i * 7) % paths.length] ?? p);
@@ -84,7 +86,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
         const tick = () => {
           const t = total <= 0 ? 1 : Math.min(1, (Date.now() - started) / total);
           onUpdate(update(map, ticker, t, Date.now() - started));
-          if (t >= 1) finish({ status: 'done', overview: map });
+          if (t >= 1) finish({ status: 'done', overview: map, proposals });
         };
         running = { mountPoint, timer: window.setInterval(tick, total <= 0 ? 0 : 100), finish };
       });
@@ -117,6 +119,17 @@ function onDrive(map: ScanOutcomeMap, system: VolumeInfo, volume: VolumeInfo): S
     }
   }
   return map;
+}
+
+/** The system drive's proposals as another drive's: scaled like its map, their sample paths moved onto it. */
+function proposalsOnDrive(proposals: Proposal[], system: VolumeInfo, volume: VolumeInfo): Proposal[] {
+  if (volume.mountPoint === system.mountPoint) return proposals;
+  const scale = volume.usedBytes / system.usedBytes;
+  for (const p of proposals) {
+    p.bytes *= scale;
+    p.samplePaths = p.samplePaths.map((s) => moved(s, system, volume));
+  }
+  return proposals;
 }
 
 function folderOnDrive(folder: MapFolder, system: VolumeInfo, volume: VolumeInfo): MapFolder {

@@ -26,6 +26,8 @@ export interface Leaf {
   /** A folder that can be opened. */
   browsable: boolean;
   note: string | null;
+  /** The cleanup proposal the tile is, if it is one. */
+  proposal: string | null;
   /** 0..2: varies lightness between neighbouring tiles. */
   shade: number;
 }
@@ -81,6 +83,7 @@ function leaf(item: MapItem, regionId: string): Leaf {
     lastUsed: item.lastUsed,
     browsable: item.browsable,
     note: item.note,
+    proposal: item.proposal,
     shade: 0,
   };
 }
@@ -138,7 +141,19 @@ function categoryRegion(c: CategoryTotal, blurb: string, leaves: Leaf[]): Region
 
 /** A region's only tile: free space, or (while scanning) a category's bytes so far or the space not reached. */
 function soleLeaf(id: string, regionId: string, kind: 'free' | 'scanned', name: string, bytes: number): Leaf {
-  return { id, regionId, kind, name, path: '', bytes, lastUsed: null, browsable: false, note: null, shade: 0 };
+  return {
+    id,
+    regionId,
+    kind,
+    name,
+    path: '',
+    bytes,
+    lastUsed: null,
+    browsable: false,
+    note: null,
+    proposal: null,
+    shade: 0,
+  };
 }
 
 /** The overview: one region per category, biggest first, then free space. */
