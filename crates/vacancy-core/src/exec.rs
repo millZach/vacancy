@@ -395,6 +395,7 @@ struct Run<'a, 'h> {
     cancel: &'a CancelToken,
     hooks: &'a Hooks<'h>,
     threshold: i128,
+    /// Freed by the steps that have finished.
     total_freed: u64,
     last_progress: Instant,
 }
@@ -523,6 +524,7 @@ impl Run<'_, '_> {
             }
             self.progress(index, &tally, &action.path, true);
         }
+        self.total_freed += tally.step.freed;
         step_report(step, tally)
     }
 

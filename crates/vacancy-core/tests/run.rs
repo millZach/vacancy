@@ -393,6 +393,16 @@ fn a_run_deletes_exactly_what_was_approved() {
         .count();
     assert_eq!(started, plan.summary().steps.len());
     assert!(events.iter().any(|e| matches!(e, RunEvent::Skipped(_))));
+    // The run's freed counter only grows, and ends at the report's total.
+    let totals: Vec<u64> = events
+        .iter()
+        .filter_map(|e| match e {
+            RunEvent::Progress(p) => Some(p.total_freed_bytes),
+            _ => None,
+        })
+        .collect();
+    assert!(totals.windows(2).all(|w| w[0] <= w[1]), "{totals:?}");
+    assert_eq!(totals.last().copied(), Some(report.freed_bytes));
 }
 
 /// The step whose cache folder holds the file to hold open, for tests that run part of the plan.
