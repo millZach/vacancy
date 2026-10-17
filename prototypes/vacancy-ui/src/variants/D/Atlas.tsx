@@ -9,7 +9,7 @@ import type { VariantProps } from '../../shared/types';
 import { RiskChip, SourceTag, Wordmark } from './bits';
 import { Legend, type MapMode } from './Legend';
 import { MapView, useSize, type TileLook } from './MapView';
-import { buildModel, gb, toggled, type Leaf, type Rect, type Region } from './model';
+import { buildModel, gb, toggled, type AtlasModel, type Leaf, type Rect, type Region } from './model';
 import { ConfirmDialog, PlanTray, ReorgDrawer, planTotals } from './PlanTray';
 import { RunPanel, usePlayback } from './RunPanel';
 import { ScanHud, ScanPlate } from './Scan';
@@ -21,13 +21,55 @@ import './vd.css';
 
 const SCAN_MS = 4000;
 
+/** What a drive-picker design gets to draw in the header. */
+export interface HeadCtx {
+  model: AtlasModel;
+  mode: MapMode;
+  focusRegion?: Region;
+  clearFocus: () => void;
+  scanning: boolean;
+}
+
+/**
+ * PROTOTYPE drive picker: places each ?picker= design plugs into. Without them Atlas looks exactly as before.
+ * headDrive replaces the header's drive plate, plate replaces the scan screen's plate (it gets the function that
+ * starts the scan), rail sits left of the map on every step, hideCrumbs drops the map's own breadcrumb (design 3
+ * moves it into the header), restSummary opens the summary at rest instead of replaying the highlights.
+ */
+export interface AtlasSlots {
+  headDrive?: (ctx: HeadCtx) => ReactNode;
+  plate?: (scan: (button: HTMLButtonElement) => void) => ReactNode;
+  rail?: ReactNode;
+  hideCrumbs?: boolean;
+  restSummary?: boolean;
+  /** Told when a scan starts and stops, so a drive switch mid-scan can cancel it. */
+  onScanning?: (scanning: boolean) => void;
+}
+
+/** The header's used-space meter, with the reclaimable share lit on the map steps. `used` overrides the scan's figure. */
+export function HeadMeter({ model, mode, used = model.usedBytes }: { model: AtlasModel; mode: MapMode; used?: number }) {
+  return (
+    <span className="va-meter va-meter--head" aria-hidden>
+      <i style={{ width: `${(used / model.totalBytes) * 100}%` }} />
+      {(mode === 'overview' || mode === 'plan') && (
+        <b
+          style={{
+            left: `${((model.usedBytes - model.reclaimableBytes) / model.totalBytes) * 100}%`,
+            width: `${(model.reclaimableBytes / model.totalBytes) * 100}%`,
+          }}
+        />
+      )}
+    </span>
+  );
+}
+
 /**
  * The summary's stages. slides: highlights only. fly / skip: the slides make way while the map summary fades up
  * (fly also sends the receipt's numbers into the panel). rest: the map summary. replay: slides fading back in over it.
  */
 type Phase = 'slides' | 'fly' | 'skip' | 'rest' | 'replay';
 
-export function Atlas(props: VariantProps) {
+export function Atlas(props: VariantProps & AtlasSlots) {
   const { data, step, proposals, setProposals, reorgs, setReorgs } = props;
   const onStep = useRef(props.onStep);
   onStep.current = props.onStep;
@@ -44,7 +86,7 @@ export function Atlas(props: VariantProps) {
   const [scanStart, setScanStart] = useState<number | null>(null);
   const field = useRef<DotFieldHandle>(null);
   const rootRef = useRef<HTMLDivElement>(null);
-  const [phase, setPhase] = useState<Phase>('slides');
+  const [phase, setPhase] = useState<Phase>(props.restSummary && step === 'summary' ? 'rest' : 'slides');
   const [handed, setHanded] = useState(false);
   const [undo, setUndo] = useState<UndoState>({});
   const [seenStep, setSeenStep] = useState(step);
@@ -75,6 +117,10 @@ export function Atlas(props: VariantProps) {
       setConfirm(false);
     }
   }, [step]);
+
+  const onScanning = useRef(props.onScanning);
+  onScanning.current = props.onScanning;
+  useEffect(() => onScanning.current?.(scanning), [scanning]);
 
   useEffect(() => {
     if (!scanning) return;
@@ -231,6 +277,12 @@ export function Atlas(props: VariantProps) {
     setFocus(null);
     go('scan');
   };
+  const startScan = (btn: HTMLButtonElement) => {
+    const b = btn.getBoundingClientRect();
+    field.current?.drop(b.left + b.width / 2, b.top + b.height / 2, true);
+    setScanStart(performance.now());
+    setScanning(true);
+  };
   const slidesUp = mode === 'summary' && phase !== 'rest';
   const mapUp = mode === 'summary' && phase !== 'slides';
 
@@ -241,24 +293,18 @@ export function Atlas(props: VariantProps) {
     >
       <header className="va-head">
         <Wordmark lit={lit} />
-        <div className="va-head-disk">
-          <HardDrive size={14} strokeWidth={1.8} />
-          <span className="va-head-name">{data.disk.name}</span>
-          <span className="va-meter va-meter--head" aria-hidden>
-            <i style={{ width: `${(model.usedBytes / model.totalBytes) * 100}%` }} />
-            {(mode === 'overview' || mode === 'plan') && (
-              <b
-                style={{
-                  left: `${((model.usedBytes - model.reclaimableBytes) / model.totalBytes) * 100}%`,
-                  width: `${(model.reclaimableBytes / model.totalBytes) * 100}%`,
-                }}
-              />
-            )}
-          </span>
-          <span className="va-head-nums">
-            {gb(model.usedBytes, 0)} of {gb(model.totalBytes, 0)} used
-          </span>
-        </div>
+        {props.headDrive ? (
+          props.headDrive({ model, mode, focusRegion, clearFocus: () => setFocus(null), scanning })
+        ) : (
+          <div className="va-head-disk">
+            <HardDrive size={14} strokeWidth={1.8} />
+            <span className="va-head-name">{data.disk.name}</span>
+            <HeadMeter model={model} mode={mode} />
+            <span className="va-head-nums">
+              {gb(model.usedBytes, 0)} of {gb(model.totalBytes, 0)} used
+            </span>
+          </div>
+        )}
         <div className="va-head-right">
           {(mode === 'overview' || mode === 'plan') && (
             <span className="va-head-reclaim">
@@ -278,6 +324,7 @@ export function Atlas(props: VariantProps) {
       </header>
 
       <div className="va-body">
+        {props.rail}
         <main className="va-main">
           {mode === 'scan' && <DotField ref={field} scanStart={scanStart} scanMs={SCAN_MS} out={scanT > 0.84} />}
           {mode === 'summary' ? (
@@ -285,7 +332,7 @@ export function Atlas(props: VariantProps) {
           ) : (
             <>
               <div className="va-toolbar">
-                <nav className="va-crumbs" aria-label="Map location">
+                {props.hideCrumbs ? null : <nav className="va-crumbs" aria-label="Map location">
                   <button type="button" className={focusRegion ? '' : 'is-here'} onClick={() => setFocus(null)} disabled={!focusRegion}>
                     {data.disk.name}
                   </button>
@@ -297,7 +344,7 @@ export function Atlas(props: VariantProps) {
                     </>
                   )}
                   {mode === 'scan' && scanning && <span className="va-crumb-blurb">Mapping as it scans</span>}
-                </nav>
+                </nav>}
                 {mode !== 'scan' && <Legend mode={mode} bytesInView={focusRegion?.bytes ?? model.totalBytes} w={size.w} h={size.h} />}
               </div>
               <div className={`va-stage ${mode === 'scan' && !scanning ? 'is-empty' : ''}`} ref={stageRef}>
@@ -318,17 +365,7 @@ export function Atlas(props: VariantProps) {
                   freeLabel={freeLabel}
                   interactive={mode !== 'scan'}
                 />
-                {mode === 'scan' && !scanning && (
-                  <ScanPlate
-                    data={data}
-                    onScan={(btn) => {
-                      const b = btn.getBoundingClientRect();
-                      field.current?.drop(b.left + b.width / 2, b.top + b.height / 2, true);
-                      setScanStart(performance.now());
-                      setScanning(true);
-                    }}
-                  />
-                )}
+                {mode === 'scan' && !scanning && (props.plate ? props.plate(startScan) : <ScanPlate data={data} onScan={startScan} />)}
                 {mode === 'scan' && scanning && <ScanHud data={data} t={scanT} />}
                 <AnimatePresence>
                   {drawer &&

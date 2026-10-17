@@ -34,8 +34,8 @@ interface Ripple {
   soft?: boolean;
 }
 
-/** Clicks on these never ripple: controls, the note and the scan readout. (The map ignores pointers while scanning.) */
-const IGNORE = 'button, a, input, [role="button"], .va-agent-note, .va-hud';
+/** Clicks on these never ripple: controls, the note, the scan readout and drive pickers. (The map ignores pointers while scanning.) */
+const IGNORE = 'button, a, input, [role="button"], .va-agent-note, .va-hud, [data-pick]';
 const MAX_DOTS = 4200;
 const MIN_SPACING = 15;
 const MAX_RIPPLES = 12;

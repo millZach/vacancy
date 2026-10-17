@@ -1,0 +1,882 @@
+/* PROTOTYPE drive picker (variant D, ?picker=1|2|3). Everything is scoped under .vd-root and uses D's tokens.
+   Shared bits first, then one section per design. */
+
+.vd-picker {
+  display: contents;
+}
+/* Popovers from the header float over the map. */
+.vd-root .va-head {
+  position: relative;
+  z-index: 55;
+}
+/* The scan plate lets clicks through to the dot field; picker controls and the rescan button take them. */
+.vd-root.va-mode-scan .va-plate [data-pick],
+.vd-root.va-mode-scan .va-plate .va-btn {
+  pointer-events: auto;
+}
+
+/* ---------- shared ---------- */
+.vd-root .vd-kind {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px 1px;
+  border: 1px solid var(--va-line-2);
+  border-radius: 4px;
+  font: 700 9.5px/1.35 var(--va-font);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--va-text-2);
+  white-space: nowrap;
+}
+.vd-root .vd-kind--usb,
+.vd-root .vd-kind--external {
+  color: #9cc8db;
+  border-color: rgba(156, 200, 219, 0.32);
+}
+.vd-root .vd-use {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  background: #232a35;
+  overflow: hidden;
+}
+.vd-root .vd-use i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  background: #7d8796;
+}
+.vd-root .vd-use.is-full i {
+  background: var(--va-careful);
+}
+.vd-root .vd-use b {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--va-neon);
+  box-shadow: 0 0 6px var(--va-neon);
+}
+.vd-root .vd-use--mini {
+  width: 34px;
+  height: 3px;
+}
+.vd-root .vd-use--chip {
+  width: 40px;
+  height: 5px;
+}
+.vd-root .vd-warm {
+  color: var(--va-careful);
+  font-weight: 600;
+}
+.vd-root .vd-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--va-text-3);
+  white-space: nowrap;
+}
+.vd-root .vd-status i {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid #5b6574;
+}
+.vd-root .vd-status.is-scanned {
+  color: var(--va-text-2);
+}
+.vd-root .vd-status.is-scanned i {
+  border: 0;
+  background: var(--va-neon);
+  box-shadow: 0 0 6px var(--va-neon);
+}
+.vd-root .vd-status.is-cleaned i {
+  background: var(--va-safe);
+  box-shadow: 0 0 6px rgba(124, 201, 166, 0.6);
+}
+.vd-root .vd-chev {
+  flex: none;
+  color: var(--va-text-3);
+  transition: transform 0.15s;
+}
+.vd-root .is-open .vd-chev {
+  transform: rotate(180deg);
+}
+.vd-root .vd-pop {
+  position: absolute;
+  z-index: 5;
+  border: 1px solid var(--va-line-2);
+  border-radius: 12px;
+  background: #171c24;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(0, 0, 0, 0.4);
+  animation: vd-pop-in 0.16s ease-out both;
+}
+.vd-root .vd-pop-head {
+  padding: 12px 16px 9px;
+  font: 700 10.5px/1 var(--va-font);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--va-text-3);
+}
+.vd-root .vd-pop-foot {
+  margin: 0;
+  padding: 10px 16px 12px;
+  border-top: 1px solid var(--va-line);
+  font-size: 11.5px;
+  color: var(--va-text-3);
+}
+.vd-root .vd-dm-go {
+  align-self: center;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--va-text-3);
+  white-space: nowrap;
+  transition: color 0.15s;
+}
+
+/* the plate's actions (scan, or back to the map) */
+.vd-root .vd-plate-acts {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.vd-root .vd-rescan {
+  padding: 12px 16px 11px;
+  border-radius: 9px;
+  font-size: 13.5px;
+}
+.vd-root .vd-flip-status {
+  margin: 0;
+}
+
+/* ---------- design 1: drive cards ---------- */
+.vd-root .va-plate h1.vd-ask {
+  font-size: 38px;
+}
+.vd-root .vd-cards-plate .va-plate-cap {
+  margin-bottom: 24px;
+}
+.vd-root .vd-cards {
+  display: flex;
+  justify-content: center;
+  gap: 14px;
+  margin: 0 0 30px;
+}
+.vd-root .vd-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 9px;
+  width: 238px;
+  padding: 14px 16px 14px;
+  border: 1px solid var(--va-line-2);
+  border-radius: 12px;
+  background: rgba(20, 25, 32, 0.92);
+  backdrop-filter: blur(6px);
+  text-align: left;
+  font: inherit;
+  color: var(--va-text);
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.2s, background 0.15s;
+}
+.vd-root .vd-card:hover {
+  border-color: #3e4858;
+  background: rgba(27, 33, 42, 0.96);
+}
+.vd-root .vd-card.is-on {
+  border-color: var(--va-neon);
+  background: rgba(34, 22, 32, 0.94);
+  box-shadow: 0 0 0 1px var(--va-neon), 0 0 26px -3px rgba(var(--va-neon-rgb), 0.6), inset 0 0 26px rgba(var(--va-neon-rgb), 0.1);
+}
+.vd-root .vd-card:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 3px;
+}
+.vd-root .vd-card-top {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 20px;
+}
+.vd-root .vd-card-icon {
+  color: var(--va-text-3);
+}
+.vd-root .vd-card.is-on .vd-card-icon {
+  color: var(--va-neon-ink);
+  filter: drop-shadow(0 0 4px var(--va-neon));
+}
+.vd-root .vd-card-tags {
+  display: flex;
+  gap: 5px;
+}
+.vd-root .vd-card-tick {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--va-neon);
+  color: #2a0619;
+  box-shadow: 0 0 10px var(--va-neon);
+}
+.vd-root .vd-card-name {
+  margin-top: 4px;
+  font: 600 16px/1.2 var(--va-font);
+  letter-spacing: -0.01em;
+}
+.vd-root .vd-card-nums {
+  font-size: 12px;
+  color: var(--va-text-3);
+  font-variant-numeric: tabular-nums;
+}
+.vd-root .vd-card-nums b {
+  color: var(--va-text);
+  font-weight: 600;
+}
+.vd-root .vd-card .vd-status {
+  padding-top: 8px;
+  border-top: 1px solid var(--va-line);
+  font-size: 11.5px;
+}
+
+/* header dropdown */
+.vd-root .vd-dm {
+  position: relative;
+  min-width: 0;
+}
+.vd-root .vd-dm-btn {
+  margin-left: -10px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.vd-root .vd-dm-btn:hover:not(:disabled),
+.vd-root .vd-dm-btn.is-open {
+  border-color: var(--va-line-2);
+  background: var(--va-raise);
+}
+.vd-root .vd-dm-btn:disabled {
+  cursor: default;
+}
+.vd-root .vd-lock {
+  flex: none;
+  color: var(--va-text-3);
+}
+.vd-root .vd-dm-pop {
+  top: calc(100% + 8px);
+  left: -10px;
+  width: 410px;
+}
+.vd-root .vd-dm-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 62px;
+  gap: 12px;
+  align-items: start;
+  width: 100%;
+  padding: 12px 16px 13px;
+  border: 0;
+  border-top: 1px solid var(--va-line);
+  background: none;
+  text-align: left;
+  font: inherit;
+  color: var(--va-text-2);
+  cursor: pointer;
+}
+.vd-root .vd-dm-row:hover {
+  background: rgba(255, 255, 255, 0.035);
+}
+.vd-root .vd-dm-row:hover .vd-dm-go {
+  color: var(--va-neon-ink);
+}
+.vd-root .vd-dm-row.is-on {
+  background: rgba(var(--va-neon-rgb), 0.06);
+  box-shadow: inset 2px 0 0 var(--va-neon);
+}
+.vd-root .vd-dm-row.is-on .vd-dm-go {
+  color: var(--va-neon);
+}
+.vd-root .vd-dm-row:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: -2px;
+}
+.vd-root .vd-dm-row .vd-dm-go {
+  justify-self: end;
+}
+.vd-root .vd-dm-icon {
+  margin-top: 1px;
+  color: var(--va-text-2);
+}
+.vd-root .vd-dm-main {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+.vd-root .vd-dm-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.vd-root .vd-dm-name b {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--va-text);
+}
+.vd-root .vd-dm-nums {
+  font-size: 12px;
+  color: var(--va-text-3);
+  font-variant-numeric: tabular-nums;
+}
+.vd-root .vd-dm-nums b {
+  color: var(--va-text-2);
+  font-weight: 600;
+}
+
+/* ---------- design 2: the plate is the picker ---------- */
+.vd-root .vd-flip .va-plate-cap {
+  margin-bottom: 16px;
+}
+.vd-root .vd-flip .va-plate-cap b {
+  font-weight: 600;
+}
+.vd-root .vd-flip-bar {
+  width: 360px;
+}
+.vd-root .vd-flip .vd-flip-status {
+  margin-top: 14px;
+}
+.vd-root .vd-flip-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 24px 0 26px;
+  padding: 4px;
+  border: 1px solid var(--va-line);
+  border-radius: 12px;
+  background: rgba(20, 25, 32, 0.88);
+  backdrop-filter: blur(6px);
+}
+.vd-root .vd-flip-tab {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  min-width: 66px;
+  padding: 9px 18px 9px;
+  border: 0;
+  border-radius: 9px;
+  background: none;
+  color: var(--va-text-2);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, box-shadow 0.2s;
+}
+.vd-root .vd-flip-tab:hover {
+  background: var(--va-raise);
+  color: var(--va-text);
+}
+.vd-root .vd-flip-tab.is-on {
+  background: #242b36;
+  color: var(--va-text);
+  box-shadow: inset 0 0 0 1px rgba(var(--va-neon-rgb), 0.85), 0 0 16px -3px rgba(var(--va-neon-rgb), 0.75);
+}
+.vd-root .vd-flip-letter {
+  font: 700 14px/1 var(--va-font);
+  white-space: nowrap;
+}
+.vd-root .vd-flip-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1.2px solid #5b6574;
+}
+.vd-root .vd-flip-tab.is-scanned .vd-flip-dot {
+  border: 0;
+  background: var(--va-neon);
+  box-shadow: 0 0 5px var(--va-neon);
+}
+.vd-root .vd-flip-in {
+  animation: vd-flip-in 0.34s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+.vd-root .vd-flip-in.from-left {
+  --vd-from: -40px;
+}
+.vd-root .vd-flip-in.from-right {
+  --vd-from: 40px;
+}
+
+/* header chips */
+.vd-root .vd-chips {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--va-line);
+  border-radius: 10px;
+  background: #171c23;
+}
+.vd-root .vd-chip-wrap {
+  position: relative;
+}
+.vd-root .vd-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 7px;
+  background: none;
+  font: 500 12px var(--va-font);
+  color: var(--va-text-3);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, box-shadow 0.2s;
+}
+.vd-root .vd-chip b {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--va-text-2);
+}
+.vd-root .vd-chip:hover:not(:disabled) {
+  background: var(--va-raise);
+}
+.vd-root .vd-chip.is-on {
+  background: #262e3a;
+  box-shadow: inset 0 0 0 1px rgba(var(--va-neon-rgb), 0.8), 0 0 16px -4px rgba(var(--va-neon-rgb), 0.85);
+}
+.vd-root .vd-chip.is-on b {
+  color: var(--va-text);
+}
+.vd-root .vd-chip.is-on .vd-chip-free {
+  color: var(--va-text-2);
+}
+.vd-root .vd-chip:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.vd-root .vd-chip-free {
+  font-variant-numeric: tabular-nums;
+}
+.vd-root .vd-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1.2px solid #5b6574;
+}
+.vd-root .vd-chip.is-scanned .vd-chip-dot {
+  border: 0;
+  background: var(--va-neon);
+  box-shadow: 0 0 5px var(--va-neon);
+}
+.vd-root .vd-chip-card {
+  top: calc(100% + 10px);
+  left: 0;
+  display: none;
+  flex-direction: column;
+  gap: 11px;
+  width: 280px;
+  padding: 14px 16px 12px;
+  pointer-events: none;
+}
+.vd-root .vd-chip-wrap:hover .vd-chip-card,
+.vd-root .vd-chip-wrap:has(:focus-visible) .vd-chip-card {
+  display: flex;
+}
+.vd-root .vd-chip-card-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--va-text-2);
+}
+.vd-root .vd-chip-card-name b {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--va-text);
+}
+.vd-root .vd-chip-card-nums {
+  display: flex;
+  gap: 22px;
+  margin: 0;
+}
+.vd-root .vd-chip-card-nums div {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 2px;
+}
+.vd-root .vd-chip-card-nums dt {
+  font-size: 11px;
+  color: var(--va-text-3);
+}
+.vd-root .vd-chip-card-nums dd {
+  margin: 0;
+  font: 600 15px/1.2 var(--va-font);
+  color: var(--va-text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.vd-root .vd-chip-card-nums em {
+  margin-left: 3px;
+  font-style: normal;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--va-text-3);
+}
+.vd-root .vd-chip-card-go {
+  margin: 0;
+  padding-top: 9px;
+  border-top: 1px solid var(--va-line);
+  font-size: 11.5px;
+  color: var(--va-text-3);
+}
+
+/* ---------- design 3: drives as a shelf ---------- */
+.vd-root .vd-shelf {
+  flex: none;
+  width: 238px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--va-panel);
+  border-right: 1px solid var(--va-line);
+}
+.vd-root .vd-shelf-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 15px 14px 6px 18px;
+}
+.vd-root .vd-shelf-head h2 {
+  margin: 0;
+  font: 700 15px/1.2 var(--va-font);
+  letter-spacing: -0.01em;
+}
+.vd-root .vd-shelf-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--va-text-3);
+}
+.vd-root .vd-shelf-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 4px 10px 12px;
+  list-style: none;
+  overflow-y: auto;
+}
+.vd-root .vd-shelf-pointer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  margin: 4px 8px 5px 0;
+  font: 700 11.5px/1 var(--va-font);
+  color: var(--va-neon-ink);
+  text-shadow: 0 0 10px rgba(var(--va-neon-rgb), 0.85);
+}
+.vd-root .vd-shelf-pointer svg {
+  margin-top: 6px;
+  color: var(--va-neon);
+  filter: drop-shadow(0 0 4px var(--va-neon));
+}
+.vd-root .vd-shelf-item {
+  display: flex;
+  gap: 12px;
+  width: 100%;
+  padding: 11px 12px 12px 11px;
+  border: 1px solid var(--va-line-2);
+  border-radius: 10px;
+  background: #181d25;
+  text-align: left;
+  font: inherit;
+  color: var(--va-text-2);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.2s;
+}
+.vd-root .vd-shelf-item:hover:not(:disabled) {
+  border-color: #3e4858;
+  background: #1d232c;
+}
+.vd-root .vd-shelf-item.is-on {
+  border-color: var(--va-neon);
+  background: #1e1a23;
+  box-shadow: 0 0 0 1px var(--va-neon), 0 0 20px -5px rgba(var(--va-neon-rgb), 0.75);
+}
+.vd-root .vd-shelf-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.vd-root .vd-shelf-item:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+.vd-root .vd-tank {
+  position: relative;
+  flex: none;
+  align-self: stretch;
+  width: 16px;
+  min-height: 78px;
+  border-radius: 4px;
+  background: #10141a;
+  box-shadow: inset 0 0 0 1px var(--va-line-2);
+  overflow: hidden;
+}
+.vd-root .vd-tank i {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #7d8796;
+}
+.vd-root .vd-shelf-item.is-full .vd-tank i {
+  background: var(--va-careful);
+}
+.vd-root .vd-tank b {
+  position: absolute;
+  left: 0;
+  right: 0;
+  background: var(--va-neon);
+  box-shadow: 0 0 8px var(--va-neon);
+}
+.vd-root .vd-shelf-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.vd-root .vd-shelf-pct {
+  font-size: 11.5px;
+  color: var(--va-text-3);
+}
+.vd-root .vd-shelf-pct b {
+  margin-right: 2px;
+  font: 300 26px/1 var(--va-font);
+  letter-spacing: -0.02em;
+  color: var(--va-text);
+}
+.vd-root .vd-shelf-item.is-full .vd-shelf-pct b {
+  color: #ffb39c;
+}
+.vd-root .vd-shelf-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font: 600 13px/1.25 var(--va-font);
+  color: var(--va-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vd-root .vd-shelf-name svg {
+  flex: none;
+  color: var(--va-text-3);
+}
+.vd-root .vd-shelf-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  font-size: 11.5px;
+  color: var(--va-text-3);
+}
+.vd-root .vd-shelf .vd-status {
+  align-items: flex-start;
+  margin-top: 2px;
+  font-size: 11.5px;
+  white-space: normal;
+}
+.vd-root .vd-shelf .vd-status i {
+  margin-top: 3px;
+}
+.vd-root .vd-shelf-foot {
+  display: flex;
+  gap: 6px;
+  margin: 0;
+  padding: 12px 16px 14px 18px;
+  border-top: 1px solid var(--va-line);
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--va-text-3);
+}
+.vd-root .vd-shelf-foot svg {
+  flex: none;
+  margin-top: 2px;
+}
+.vd-root .vd-splate .vd-flip-status {
+  margin: -14px 0 24px;
+}
+.vd-root .vd-splate .va-plate-cap b {
+  font-weight: 600;
+}
+
+/* header breadcrumb: drive ▸ folder */
+.vd-root .vd-crumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--va-text-3);
+}
+.vd-root .vd-crumb-drive-wrap {
+  position: relative;
+  flex: none;
+}
+.vd-root .vd-crumb-drive {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px 6px 10px;
+  border: 1px solid var(--va-line-2);
+  border-radius: 8px;
+  background: var(--va-raise);
+  font: 500 13px var(--va-font);
+  color: var(--va-text-2);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.vd-root .vd-crumb-drive b {
+  font-weight: 600;
+  color: var(--va-text);
+}
+.vd-root .vd-crumb-drive:hover:not(:disabled),
+.vd-root .vd-crumb-drive.is-open {
+  border-color: #4a5463;
+  background: #232a35;
+}
+.vd-root .vd-crumb-drive:disabled {
+  cursor: default;
+}
+.vd-root .vd-crumb-sep {
+  flex: none;
+  color: var(--va-text-3);
+}
+.vd-root .vd-crumb-here {
+  font-weight: 600;
+  color: var(--va-text);
+  white-space: nowrap;
+}
+.vd-root .vd-crumb-here.is-muted {
+  font-weight: 500;
+  color: var(--va-text-3);
+}
+.vd-root .vd-crumb-up {
+  padding: 3px 0;
+  border: 0;
+  background: none;
+  font: 600 13px var(--va-font);
+  color: var(--va-text-2);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.vd-root .vd-crumb-up:hover {
+  color: var(--va-text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.vd-root .vd-crumb-blurb {
+  min-width: 0;
+  margin-left: 4px;
+  font-size: 12.5px;
+  color: var(--va-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.vd-root .vd-crumb-pop {
+  top: calc(100% + 8px);
+  left: 0;
+  width: 470px;
+  padding: 6px;
+}
+.vd-root .vd-crumb-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) 34px 40px 58px;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  text-align: left;
+  font: inherit;
+  color: var(--va-text-2);
+  cursor: pointer;
+}
+.vd-root .vd-crumb-row:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.vd-root .vd-crumb-row:hover .vd-dm-go {
+  color: var(--va-neon-ink);
+}
+.vd-root .vd-crumb-row.is-on {
+  background: rgba(var(--va-neon-rgb), 0.07);
+}
+.vd-root .vd-crumb-row.is-on .vd-dm-go {
+  color: var(--va-neon);
+}
+.vd-root .vd-crumb-row:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: -2px;
+}
+.vd-root .vd-crumb-row-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.vd-root .vd-crumb-row-main b {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--va-text);
+}
+.vd-root .vd-crumb-row-main .vd-status {
+  font-size: 11.5px;
+}
+.vd-root .vd-crumb-row-pct {
+  text-align: right;
+  font: 600 13px var(--va-font);
+  color: var(--va-text);
+  font-variant-numeric: tabular-nums;
+}
+.vd-root .vd-crumb-row .vd-dm-go {
+  justify-self: end;
+}
+
+/* ---------- motion ---------- */
+@keyframes vd-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+@keyframes vd-flip-in {
+  from {
+    opacity: 0;
+    transform: translateX(var(--vd-from, 0));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .vd-root .vd-pop,
+  .vd-root .vd-flip-in {
+    animation: none;
+  }
+}

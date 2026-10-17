@@ -5,8 +5,12 @@ import type { Dataset } from './data';
 export type Step = 'scan' | 'overview' | 'plan' | 'run' | 'summary';
 export const STEPS: Step[] = ['scan', 'overview', 'plan', 'run', 'summary'];
 
+/** Variant D's drive-picker designs (?picker=1|2|3). Other variants ignore it. */
+export type Picker = 1 | 2 | 3;
+
 export interface VariantProps {
   data: Dataset;
+  picker?: Picker;
   step: Step;
   onStep: (s: Step) => void;
   /** Selection lives in the shell so jumping straight to ?step=summary shows the default plan's result. */

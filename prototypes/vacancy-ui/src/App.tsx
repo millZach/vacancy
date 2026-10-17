@@ -1,7 +1,8 @@
 // PROTOTYPE: variants of the whole Vacancy flow (D is the picked direction), switchable via ?variant=D|A|B|C, ?os=win|mac, ?step=scan|overview|plan|run|summary.
+// Inside D, ?picker=1|2|3 picks one of three drive-picker designs; the floating switcher cycles those while D is shown.
 import { useEffect, useState } from 'react';
 import { datasets, defaultSelection, type OS } from './shared/data';
-import { STEPS, type Step, type VariantModule } from './shared/types';
+import { STEPS, type Picker, type Step, type VariantModule } from './shared/types';
 import { WindowFrame } from './shared/WindowFrame';
 import { PrototypeSwitcher } from './shared/PrototypeSwitcher';
 import { variant as A } from './variants/A';
@@ -10,13 +11,20 @@ import { variant as C } from './variants/C';
 import { variant as D } from './variants/D';
 
 const VARIANTS: VariantModule[] = [D, A, B, C];
+const PICKERS: { key: string; name: string }[] = [
+  { key: '1', name: 'Drive cards' },
+  { key: '2', name: 'The plate is the picker' },
+  { key: '3', name: 'Drives as a shelf' },
+];
 
 function readParams() {
   const q = new URLSearchParams(location.search);
   const v = q.get('variant') ?? 'D';
   const os = (q.get('os') === 'mac' ? 'mac' : 'win') as OS;
   const s = q.get('step') as Step | null;
-  return { v: VARIANTS.some((x) => x.key === v) ? v : 'D', os, step: s && STEPS.includes(s) ? s : 'scan' };
+  const pk = Number(q.get('picker'));
+  const picker = (pk === 2 || pk === 3 ? pk : 1) as Picker;
+  return { v: VARIANTS.some((x) => x.key === v) ? v : 'D', os, step: s && STEPS.includes(s) ? s : 'scan', picker };
 }
 
 export function App() {
@@ -25,7 +33,7 @@ export function App() {
   const [sel, setSel] = useState(() => defaultSelection(data));
 
   useEffect(() => {
-    const q = new URLSearchParams({ variant: p.v, os: p.os, step: p.step });
+    const q = new URLSearchParams({ variant: p.v, ...(p.v === 'D' ? { picker: String(p.picker) } : {}), os: p.os, step: p.step });
     history.replaceState(null, '', `?${q}`);
   }, [p]);
 
@@ -42,6 +50,7 @@ export function App() {
           <mod.Component
             key={`${p.v}-${p.os}`}
             data={data}
+            picker={p.picker}
             step={p.step}
             onStep={(step) => setP((cur) => ({ ...cur, step }))}
             proposals={sel.proposals}
@@ -52,11 +61,11 @@ export function App() {
         </WindowFrame>
       </div>
       <PrototypeSwitcher
-        variants={VARIANTS.map(({ key, name }) => ({ key, name }))}
-        current={p.v}
+        variants={p.v === 'D' ? PICKERS : VARIANTS.map(({ key, name }) => ({ key, name }))}
+        current={p.v === 'D' ? String(p.picker) : p.v}
         os={p.os}
         step={p.step}
-        onVariant={(v) => setP({ ...p, v })}
+        onVariant={(k) => (p.v === 'D' ? setP({ ...p, picker: Number(k) as Picker }) : setP({ ...p, v: k }))}
         onOs={setOs}
         onStep={(step) => setP({ ...p, step })}
       />
