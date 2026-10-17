@@ -399,9 +399,11 @@ impl<'a> Guarded<'a> {
         let Some(step) = chain.len().checked_sub(from_end).and_then(|i| chain.get(i)) else {
             return false;
         };
-        self.snap
-            .identity(scanned)
-            .is_none_or(|id| step.id.matches_scan(id))
+        // The whole identity, volume included: another disk at the same letter has the same file ids.
+        match self.snap.identity(scanned) {
+            None => true,
+            Some(_) => self.snap.dir_identity(scanned) == Some(step.id),
+        }
     }
 
     /// Whether `at` may be deleted: the Guard allows its path, and nothing the scan saw in or around it is

@@ -61,6 +61,13 @@ pub(crate) struct Volume {
     serial: Option<u64>,
 }
 
+impl Volume {
+    /// The volume's serial number, which with a file id names a file: `None` where the volume has no file ids.
+    pub(crate) fn id(&self) -> Option<u64> {
+        self.serial
+    }
+}
+
 pub(crate) fn roots(path: &Path) -> io::Result<Vec<RootSpec>> {
     let real = plain(path);
     if !std::fs::symlink_metadata(&real)?.is_dir() {

@@ -14,6 +14,8 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use crate::fsid::Identity;
+
 /// A folder in a [`Snapshot`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DirId(pub(crate) u32);
@@ -211,6 +213,10 @@ pub struct Root {
     pub shown: PathBuf,
     /// What it is.
     pub kind: RootKind,
+    /// The volume it is on: Windows' volume serial number, the Unix device number. `None` where the file system
+    /// gives none. With the file ids the scan records, it names what the scan saw: a different disk mounted at the
+    /// same letter has another.
+    pub volume: Option<u64>,
 }
 
 /// The scan's own numbers.
@@ -272,6 +278,19 @@ struct DirRec {
 pub(crate) struct Digests {
     pub(crate) all: u64,
     pub(crate) files: u64,
+}
+
+/// An identity from what the scanner records: on Windows the file id, named on the root's volume; on Unix the device
+/// and inode, which the key holds both of.
+fn full_identity(root: &Root, key: u128) -> Option<Identity> {
+    if cfg!(windows) {
+        Some(Identity::new(root.volume?, key))
+    } else {
+        Some(Identity::new(
+            (key >> 64) as u64,
+            key & u128::from(u64::MAX),
+        ))
+    }
 }
 
 /// One entry's part of a folder's [`Digests`]: its identity (Windows file id; Unix device and inode), mixed so that
@@ -407,6 +426,26 @@ impl Snapshot {
     /// has one. A folder found with another identity now is not the folder the scan saw.
     pub(crate) fn identity(&self, dir: DirId) -> Option<u128> {
         self.ids.get(dir.0 as usize).copied().filter(|&id| id != 0)
+    }
+
+    /// A folder's identity as the scan recorded it, the volume included: on Windows its root's volume serial and
+    /// its file id, on Unix its device and inode. `None` where the scan has no identity for it.
+    pub(crate) fn dir_identity(&self, dir: DirId) -> Option<Identity> {
+        full_identity(self.root_of(dir), self.identity(dir)?)
+    }
+
+    /// A kept file's identity as the scan recorded it, the volume included, as [`dir_identity`](Self::dir_identity).
+    pub(crate) fn file_full_identity(&self, file: FileId) -> Option<Identity> {
+        let f = self.file(file);
+        full_identity(self.root_of(f.parent), self.file_identity(file)?)
+    }
+
+    /// Test hook: the scan as if it had read another volume with the same file ids (another disk at the same letter).
+    #[cfg(test)]
+    pub(crate) fn set_volume_for_test(&mut self, volume: Option<u64>) {
+        for root in &mut self.roots {
+            root.volume = volume;
+        }
     }
 
     /// The digests of what the folder listed when the scan read it (zero for a folder it didn't).
@@ -644,7 +683,13 @@ impl Builder {
         &self.snap
     }
 
-    pub(crate) fn add_root(&mut self, real: PathBuf, shown: PathBuf, kind: RootKind) -> DirId {
+    pub(crate) fn add_root(
+        &mut self,
+        real: PathBuf,
+        shown: PathBuf,
+        kind: RootKind,
+        volume: Option<u64>,
+    ) -> DirId {
         let id = DirId(self.snap.dirs.len() as u32);
         self.snap.dirs.push(DirRec {
             parent: NO_PARENT,
@@ -669,6 +714,7 @@ impl Builder {
             real,
             shown,
             kind,
+            volume,
         });
         self.snap.stats.folders += 1;
         id

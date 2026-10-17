@@ -32,6 +32,11 @@ pub(crate) struct Volume {
 }
 
 impl Volume {
+    /// The device number, the volume part of an identity.
+    pub(crate) fn id(&self) -> Option<u64> {
+        Some(self.dev)
+    }
+
     fn of(path: &Path) -> io::Result<Self> {
         let meta = std::fs::symlink_metadata(path)?;
         if !meta.is_dir() {

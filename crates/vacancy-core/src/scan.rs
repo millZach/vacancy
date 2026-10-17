@@ -188,7 +188,7 @@ pub(crate) fn scan_inner(
     let tasks: Vec<Task> = roots
         .into_iter()
         .map(|root| Task {
-            dir: builder.add_root(root.real.clone(), root.shown, root.kind),
+            dir: builder.add_root(root.real.clone(), root.shown, root.kind, root.volume.id()),
             path: root.real,
             expect: None,
             volume: root.volume,

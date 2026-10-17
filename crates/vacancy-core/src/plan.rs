@@ -249,17 +249,17 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
             let (path, scanned_id, bytes, files) = match at {
                 ItemRef::Dir(d) => {
                     let t = snap.tree(d);
-                    (snap.path(d), snap.identity(d), t.bytes, t.files)
+                    (snap.path(d), snap.dir_identity(d), t.bytes, t.files)
                 }
                 ItemRef::File(f) => (
                     snap.file_path(f),
-                    snap.file_identity(f),
+                    snap.file_full_identity(f),
                     snap.file(f).bytes,
                     1,
                 ),
                 ItemRef::FilesIn(d) => {
                     let (bytes, files) = loose(snap, d);
-                    (snap.path(d), snap.identity(d), bytes, files)
+                    (snap.path(d), snap.dir_identity(d), bytes, files)
                 }
                 ItemRef::Proposal(_) => continue,
             };
@@ -288,7 +288,14 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
                 continue;
             };
             match scanned_id {
-                Some(id) if now.matches_scan(id) => {}
+                Some(id) if now == id => {}
+                Some(id) if now.volume() != id.volume() => {
+                    step.refused.push(refuse(
+                        SkipKind::Changed,
+                        "It is on another drive than the one scanned",
+                    ));
+                    continue;
+                }
                 Some(_) => {
                     step.refused
                         .push(refuse(SkipKind::Changed, "It was replaced since the scan"));
@@ -428,4 +435,88 @@ pub(crate) fn next_id(prefix: &str) -> String {
         .map(|d| d.as_millis())
         .unwrap_or(0);
     format!("{prefix}-{ms}-{}", COUNTER.fetch_add(1, Ordering::Relaxed))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+    use crate::fixture;
+    use crate::map::scan_for_map_with;
+    use crate::rules::Moment;
+    use crate::scan::CancelToken;
+
+    /// A fixture profile and its scan, in fixture mode.
+    pub(crate) fn scanned_fixture() -> (tempfile::TempDir, PathBuf, Env, ScannedVolume) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = if cfg!(windows) {
+            dir.path().to_path_buf()
+        } else {
+            dir.path().canonicalize().unwrap()
+        }
+        .join("fixture");
+        fixture::build(&root).unwrap();
+        let env = fixture::env(&root);
+        let moment = Moment {
+            now: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+            running_apps: Some(Vec::new()),
+            installed_apps: Vec::new(),
+        };
+        let figures_root = root.clone();
+        let scanned = scan_for_map_with(
+            &root,
+            &env,
+            &moment,
+            &move |snap| Some(fixture::volume(&figures_root, 1 << 30, snap)),
+            &mut |_| {},
+            &CancelToken::new(),
+        )
+        .unwrap();
+        (dir, root, env, scanned)
+    }
+
+    fn all_ids(scanned: &ScannedVolume) -> Vec<String> {
+        scanned
+            .proposals
+            .list()
+            .iter()
+            .map(|p| p.id.clone())
+            .collect()
+    }
+
+    /// The scan's targets are the plan's, with their identities from the scan.
+    #[test]
+    fn a_plan_holds_every_target_the_scan_saw() {
+        let (_dir, _root, env, scanned) = scanned_fixture();
+        let summary = plan(&scanned, &env, &all_ids(&scanned)).unwrap().summary();
+        assert!(summary.refused.is_empty(), "{:#?}", summary.refused);
+        assert!(summary.places > 5);
+    }
+
+    /// The same file ids on another volume are other files: a plan made from a scan of one disk refuses everything
+    /// when another disk is at the same letter. (On Unix the device is part of every identity the scan records.)
+    #[cfg(windows)]
+    #[test]
+    fn another_volume_at_the_same_place_matches_nothing() {
+        let (_dir, _root, env, mut scanned) = scanned_fixture();
+        let serial = scanned.snapshot.roots()[0]
+            .volume
+            .expect("NTFS has a serial");
+        scanned.snapshot.set_volume_for_test(Some(serial ^ 0x5A5A));
+        let summary = plan(&scanned, &env, &all_ids(&scanned)).unwrap().summary();
+        assert_eq!(summary.places, 0, "nothing on another volume runs");
+        assert!(!summary.refused.is_empty());
+        assert!(
+            summary
+                .refused
+                .iter()
+                .all(|k| k.reason == "It is on another drive than the one scanned"),
+            "{:#?}",
+            summary.refused
+        );
+    }
 }
