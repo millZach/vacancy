@@ -47,7 +47,7 @@ use crate::volume::VolumeInfo;
 mod sys;
 #[cfg(windows)]
 #[path = "exec/windows.rs"]
-mod sys;
+pub(crate) mod sys;
 #[cfg(not(any(unix, windows)))]
 #[path = "exec/unsupported.rs"]
 mod sys;

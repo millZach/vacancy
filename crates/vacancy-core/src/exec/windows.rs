@@ -44,6 +44,9 @@ use windows_sys::Win32::System::WindowsProgramming::DRIVE_REMOTE;
 use super::{Entry, Fail, Kind, Open};
 use crate::fsid::{Identity, Step};
 
+#[path = "windows/reorg.rs"]
+pub(crate) mod reorg;
+
 /// Reparse points that name somewhere else (symlinks, junctions, mount points) have this bit.
 const NAME_SURROGATE: u32 = 0x2000_0000;
 /// Junctions and volume mount points.
@@ -593,6 +596,12 @@ fn nt_open(
     share: u32,
     options: u32,
 ) -> Result<Handle, i32> {
+    nt_open_flags(dir, name, access, share, options, 0)
+}
+
+/// Reorganization may request conservative case-insensitive collision/lease lookup. Existing deletion opens
+/// retain their exact listed-name semantics through the zero-flags wrapper above.
+fn nt_open_flags(dir: &Handle, name: &[u16], access: u32, share: u32, options: u32, object_flags: u32) -> Result<Handle, i32> {
     let bytes = u16::try_from(name.len() * 2).map_err(|_| STATUS_OBJECT_NAME_NOT_FOUND)?;
     let object_name = UNICODE_STRING {
         Length: bytes,
@@ -603,7 +612,7 @@ fn nt_open(
         Length: mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
         RootDirectory: dir.0,
         ObjectName: &object_name,
-        Attributes: 0,
+        Attributes: object_flags,
         SecurityDescriptor: ptr::null(),
         SecurityQualityOfService: ptr::null(),
     };

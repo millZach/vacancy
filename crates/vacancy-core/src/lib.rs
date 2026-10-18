@@ -16,6 +16,7 @@ mod pathkey;
 pub mod permissions;
 mod plan;
 pub mod report;
+pub mod reorg;
 mod rules;
 mod scan;
 mod snapshot;
