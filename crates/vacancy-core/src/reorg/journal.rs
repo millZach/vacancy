@@ -21,12 +21,26 @@ use windows_sys::Win32::Security::Cryptography::{
     BCryptOpenAlgorithmProvider,
 };
 
-const MAGIC: &[u8; 4] = b"VJR1";
+const MAGIC: &[u8; 4] = b"VJR2";
+const HEADER: usize = 48;
 const COMMIT: &[u8; 8] = b"COMMIT1!";
 const MAX_RECORD: usize = 1024 * 1024;
 const MAX_TOTAL: usize = 32 * 1024 * 1024;
 const MAX_SEGMENTS: usize = 32;
 const LEASE: &[u8] = b"VACANCY-REORG-LEASE-1\n";
+
+/// Bound serialized work without first allocating an oversized JSON buffer.
+pub(super) fn check_record(event: &impl Serialize) -> Result<(), Error> {
+    struct Limit(usize);
+    impl Write for Limit {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > MAX_RECORD - self.0 { return Err(std::io::Error::other("record bound")); }
+            self.0 += bytes.len(); Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    serde_json::to_writer(Limit(0), event).map_err(|_| Error::Bounds)
+}
 
 #[derive(Debug)]
 struct Hash(BCRYPT_ALG_HANDLE);
@@ -304,10 +318,13 @@ impl Store {
             return Err(Error::Bounds);
         }
         let next = self.sequence.checked_add(1).ok_or(Error::Bounds)?;
-        let mut frame = Vec::with_capacity(56 + payload.len());
+        let mut frame = Vec::with_capacity(HEADER + 40 + payload.len());
         frame.extend_from_slice(MAGIC);
         frame.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         frame.extend_from_slice(&next.to_le_bytes());
+        // Check the fixed header before trusting its variable length. A corrupted interior length must
+        // never hide later committed receipts by masquerading as an incomplete final record.
+        frame.extend_from_slice(&self.hash.of(&frame)?);
         frame.extend(payload);
         frame.extend_from_slice(&self.hash.of(&frame)?);
         frame.extend_from_slice(COMMIT);
@@ -322,6 +339,11 @@ impl Store {
             native::journal_check(&segment.file, segment.id).map_err(native_error)?;
         }
         let last = self.segments.last_mut().ok_or(Error::CorruptJournal)?;
+        // Flush access includes WRITE_DATA. This private writer enforces append-only behavior with
+        // exclusive ownership and an exact EOF check; it exposes no truncate/overwrite operation.
+        if last.file.seek(SeekFrom::End(0)).map_err(io)? != last.bytes.len() as u64 {
+            return Err(Error::CorruptJournal);
+        }
         #[cfg(test)]
         if let Some(fault) = tests::fault(next) {
             match fault {
@@ -413,7 +435,9 @@ fn decode(bytes: &[u8], mut sequence: u64, hash: &Hash) -> Result<(Vec<Value>, u
         if length > MAX_RECORD || next != sequence + 1 {
             return Err(Error::CorruptJournal);
         }
-        let end = 16 + length;
+        if remaining.len() < HEADER { return Ok((records, sequence, true)); }
+        if remaining[16..HEADER] != hash.of(&remaining[..16])? { return Err(Error::CorruptJournal); }
+        let end = HEADER + length;
         if remaining.len() < end + 40 {
             return Ok((records, sequence, true));
         }
@@ -423,7 +447,7 @@ fn decode(bytes: &[u8], mut sequence: u64, hash: &Hash) -> Result<(Vec<Value>, u
             return Err(Error::CorruptJournal);
         }
         records
-            .push(serde_json::from_slice(&remaining[16..end]).map_err(|_| Error::CorruptJournal)?);
+            .push(serde_json::from_slice(&remaining[HEADER..end]).map_err(|_| Error::CorruptJournal)?);
         sequence = next;
         at += end + 40;
     }

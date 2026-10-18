@@ -19,6 +19,7 @@ unicode-normalization = "0.1"
 windows-sys = { version = "0.61", features = [
   "Wdk_Foundation",
   "Wdk_Storage_FileSystem",
+  "Wdk_System_SystemServices",
   "Win32_Foundation",
   "Win32_Security",
   "Win32_Security_Cryptography",

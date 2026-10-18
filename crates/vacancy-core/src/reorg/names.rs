@@ -39,11 +39,12 @@ impl Name {
     }
 
     pub(crate) fn text(text: &str) -> Result<Self, Error> {
-        Self::checked(text.encode_utf16().collect())
+        if text.len() > 4 * 255 { return Err(Error::InvalidName); }
+        Self::checked(text.encode_utf16().take(256).collect())
     }
 
     pub(crate) fn display(&self) -> String {
-        String::from_utf16_lossy(&self.0)
+        display(self.0.iter().copied())
     }
 
     #[cfg(windows)]
@@ -51,6 +52,19 @@ impl Name {
         use std::os::windows::ffi::OsStringExt;
         std::ffi::OsString::from_wide(&self.0)
     }
+}
+
+/// Lossless review text. Backslashes are escaped too, so literal escape-looking text is distinct.
+pub(super) fn display(units: impl IntoIterator<Item = u16>) -> String {
+    let mut out = String::new();
+    for unit in char::decode_utf16(units) {
+        match unit {
+            Ok('\\') => out.push_str("\\\\"),
+            Ok(character) => out.push(character),
+            Err(error) => out.push_str(&format!("\\u{{{:04X}}}", error.unpaired_surrogate())),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -84,6 +98,10 @@ mod tests {
         let stored = serde_json::to_vec(&name).unwrap();
         let loaded: Name = serde_json::from_slice(&stored).unwrap();
         assert_eq!(loaded, name);
-        assert_ne!(Name::text(&name.display()).unwrap(), name);
+        assert_eq!(name.display(), "\\u{D800}A.t");
+        assert!(Name::text(&name.display()).is_err());
+        assert_ne!(name.display(), Name::text("\u{FFFD}A.t").unwrap().display());
+        assert_ne!(display([92, 117, 123, 68, 56, 48, 48, 125]), display([0xd800]));
+        assert!(Name::text(&"a".repeat(1024 * 1024)).is_err());
     }
 }

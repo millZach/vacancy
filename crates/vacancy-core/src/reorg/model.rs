@@ -91,9 +91,10 @@ impl Plan {
             }
         }
         let mut dirs = HashSet::new();
+        let mut directory_aliases = HashSet::new();
         for dir in &self.directories {
             dir.at.checked(true)?;
-            if !dirs.insert(dir.at.clone())
+            if !dirs.insert(dir.at.clone()) || !directory_aliases.insert((dir.at.folder, dir.at.names.iter().map(crate::exec::sys::reorg::case_key).collect::<Vec<_>>()))
                 || dir.expected.is_some_and(|id| id.volume != self.root.volume)
             {
                 return Err(Error::CorruptJournal);
@@ -128,6 +129,13 @@ impl Plan {
         }
         Ok(())
     }
+}
+
+pub(super) fn check_approval(plan: &Plan) -> Result<(), Error> {
+    #[derive(Serialize)]
+    #[serde(tag = "kind", rename_all = "camelCase")]
+    enum Approval<'a> { Approved { version: u32, plan: &'a Plan } }
+    super::journal::check_record(&Approval::Approved { version: 1, plan })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

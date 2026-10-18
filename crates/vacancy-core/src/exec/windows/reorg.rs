@@ -8,7 +8,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use windows_sys::Wdk::Storage::FileSystem::{
     FILE_CREATE, FILE_OPEN, FILE_OPEN_IF, FileRenameInformation, NtCreateFile, NtSetInformationFile,
 };
-use windows_sys::Win32::Storage::FileSystem::{FILE_APPEND_DATA, FILE_READ_DATA, FILE_RENAME_INFO};
+use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_WRITE, FILE_READ_DATA, FILE_RENAME_INFO};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -130,6 +130,15 @@ pub(crate) fn exists(parent: &Dir, name: &Name) -> Result<bool, Fail> {
         Err(STATUS_OBJECT_NAME_NOT_FOUND) => Ok(false),
         Err(error) => Err(open_fail(error)),
     }
+}
+
+/// A rejection-only reservation key. Native names are never rewritten or used through this key as authority.
+/// Use Windows' single-unit uppercase mapping instead of lossy display strings or Unicode expansion.
+pub(crate) fn case_key(name: &Name) -> Vec<u16> {
+    name.0.iter().map(|&unit| {
+        // SAFETY: pure scalar mapping, no pointer/handle or allocation contract.
+        unsafe { windows_sys::Wdk::System::SystemServices::RtlUpcaseUnicodeChar(unit) }
+    }).collect()
 }
 
 /// Metadata work is capped at the listing seam, including ignored entries, not just at the accepted-file count.
@@ -378,7 +387,9 @@ pub(crate) fn journal_file(
     let handle = create(
         &parent.handle,
         name,
-        FILE_READ_DATA | FILE_APPEND_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        // FlushFileBuffers documents GENERIC_WRITE; this is its mapped file access set.
+        // The owning journal enforces exclusive append-at-EOF and exposes no overwrite operation.
+        FILE_READ_DATA | FILE_GENERIC_WRITE | FILE_READ_ATTRIBUTES,
         0,
         match mode {
             JournalOpen::Create => FILE_CREATE,

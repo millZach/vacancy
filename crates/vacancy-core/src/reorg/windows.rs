@@ -239,6 +239,7 @@ impl Inventory {
         }
         let guard = Guard::new(&self.env, &self.env.root);
         let mut directories = BTreeMap::<Place, Option<native::Id>>::new();
+        let mut directory_aliases = BTreeMap::new();
         let mut moves = Vec::new();
         let mut review = Vec::new();
         let mut sources = HashSet::new();
@@ -312,6 +313,9 @@ impl Inventory {
                     missing_names.push(names[count - 1].os());
                     None
                 };
+                if let Some(previous) = directory_aliases.insert(reservation(&at), at.clone()) && previous != at {
+                    return Err(Error::InvalidName);
+                }
                 if let Some(previous) = directories.insert(at, identity)
                     && previous != identity
                 {
@@ -358,8 +362,8 @@ impl Inventory {
             targets.insert(reservation(&to));
             review.push(ReviewedMove {
                 entry_id: draft.entry_id.clone(),
-                from: path(&self.env, source).to_string_lossy().into_owned(),
-                to: path(&self.env, &to).to_string_lossy().into_owned(),
+                from: super::names::display(path(&self.env, source).as_os_str().encode_wide()),
+                to: super::names::display(path(&self.env, &to).as_os_str().encode_wide()),
             });
             moves.push(Move {
                 entry: draft.entry_id.clone(),
@@ -386,6 +390,7 @@ impl Inventory {
             moves,
         };
         data.checked()?;
+        super::model::check_approval(&data)?;
         Ok(ValidatedPlan { data, review })
     }
     fn root_parent(&self, folder_id: Folder) -> Result<Parent, Error> {
@@ -402,12 +407,12 @@ impl Inventory {
     }
 }
 
-fn reservation(at: &Place) -> (Folder, Vec<String>) {
+fn reservation(at: &Place) -> (Folder, Vec<Vec<u16>>) {
     (
         at.folder,
         at.names
             .iter()
-            .map(|name| name.display().to_uppercase())
+            .map(native::case_key)
             .collect(),
     )
 }
@@ -435,6 +440,7 @@ impl Engine {
     pub fn begin(env: &Env, journal: &Path, approved: ValidatedPlan) -> Result<Self, Error> {
         trust(env)?;
         approved.data.checked()?;
+        super::model::check_approval(&approved.data)?;
         let expected = journal_parent(env, journal)?;
         let mut store = Store::open(journal, true, &expected)?;
         store.append(&Event::Approved {

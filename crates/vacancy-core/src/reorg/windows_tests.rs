@@ -695,3 +695,209 @@ fn stable_lease_excludes_a_second_process_for_the_whole_engine_session() {
     engine.run(&CancelToken::new()).unwrap();
     engine.undo(&CancelToken::new()).unwrap();
 }
+
+// Preparation only while focused attempt2 source is frozen. Not compiled/imported yet.
+
+#[test]
+fn native_unpaired_utf16_filename_roundtrips_without_display_string_authority() {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    let (_dir, env) = fixture();
+    let name = OsString::from_wide(&[0xD800, 46, 98, 105, 110]);
+    let source = env.known.downloads.join(&name);
+    fs::write(&source, b"native name payload").unwrap();
+    let inventory = Inventory::capture(&env, &CancelToken::new()).unwrap();
+    assert_eq!(inventory.entries().len(), 1);
+    let draft = Draft { entry_id: inventory.entries()[0].id.clone(), destination: Folder::Documents, directories: vec![], filename: None };
+    let plan = inventory.validate(&[draft], &CancelToken::new()).unwrap();
+    let mut engine = Engine::begin(&env, &journal(&env), plan).unwrap();
+    assert_eq!(engine.run(&CancelToken::new()).unwrap().applied, 1);
+    assert_eq!(fs::read(env.known.documents.join(&name)).unwrap(), b"native name payload");
+    drop(engine);
+    let mut engine = Engine::open(&env, &journal(&env)).unwrap();
+    assert_eq!(engine.undo(&CancelToken::new()).unwrap().undone, 1);
+    assert_eq!(fs::read(&source).unwrap(), b"native name payload");
+}
+
+#[test]
+fn replacing_a_reviewed_source_or_known_folder_never_moves_the_replacement() {
+    let (_dir, env) = fixture(); let source = put(&env, "a.txt");
+    let plan = approved(&env, &["a.txt"], &[]);
+    fs::rename(&source, env.known.downloads.join("preserved-original.txt")).unwrap();
+    fs::write(&source, b"replacement identity").unwrap();
+    let mut engine = Engine::begin(&env, &journal(&env), plan).unwrap();
+    assert_eq!(engine.run(&CancelToken::new()).unwrap().applied, 0);
+    assert_eq!(fs::read(&source).unwrap(), b"replacement identity"); drop(engine);
+
+    let plan = approved(&env, &["a.txt"], &[]);
+    let old_parent = env.known.documents.with_file_name("preserved-documents");
+    fs::rename(&env.known.documents, &old_parent).unwrap();
+    fs::create_dir(&env.known.documents).unwrap();
+    let mut engine = Engine::begin(&env, &env.app_data.join("parent.vjr"), plan).unwrap();
+    assert_eq!(engine.run(&CancelToken::new()).unwrap().applied, 0);
+    assert!(source.exists()); assert!(!env.known.documents.join("a.txt").exists());
+}
+
+#[test]
+fn cloud_roots_unknown_sync_and_junctions_do_not_become_move_authority() {
+    let (_dir, mut env) = fixture(); put(&env, "a.txt");
+    env.cloud.push(crate::CloudRoot { provider: "fixture-sync".into(), path: env.known.downloads.clone() });
+    assert!(Inventory::capture(&env, &CancelToken::new()).unwrap().entries().is_empty());
+    env.cloud.clear(); env.unknown_clouds.push("fixture-unknown-sync".into());
+    assert!(Inventory::capture(&env, &CancelToken::new()).unwrap().entries().is_empty());
+    env.unknown_clouds.clear();
+    let target = env.known.documents.join("Sorted"); fs::create_dir(&target).unwrap();
+    let protected = env.system_root.join("protected"); fs::create_dir(&protected).unwrap();
+    fs::write(protected.join("sentinel"), b"unchanged").unwrap();
+    retag_in_place(&target, &protected).unwrap();
+    assert_eq!(fs::read(target.join("sentinel")).unwrap(), b"unchanged");
+    let inventory = Inventory::capture(&env, &CancelToken::new()).unwrap();
+    let draft = Draft { entry_id: inventory.entries()[0].id.clone(), destination: Folder::Documents, directories: vec!["Sorted".into()], filename: None };
+    assert!(inventory.validate(&[draft], &CancelToken::new()).is_err());
+    assert!(!protected.join("a.txt").exists());
+}
+
+#[test]
+fn an_extra_hardlink_after_review_or_move_is_preserved_as_uncertain_authority() {
+    let (_dir, env) = fixture(); let source = put(&env, "a.txt");
+    let plan = approved(&env, &["a.txt"], &[]);
+    let alias = env.known.desktop.join("extra-link.txt"); fs::hard_link(&source, &alias).unwrap();
+    let mut engine = Engine::begin(&env, &journal(&env), plan).unwrap();
+    assert_eq!(engine.run(&CancelToken::new()).unwrap().applied, 0); drop(engine);
+    fs::remove_file(&alias).unwrap();
+    let mut engine = Engine::begin(&env, &env.app_data.join("second.vjr"), approved(&env, &["a.txt"], &[])).unwrap();
+    assert_eq!(engine.run(&CancelToken::new()).unwrap().applied, 1);
+    let moved = env.known.documents.join("a.txt"); fs::hard_link(&moved, &alias).unwrap();
+    assert_eq!(engine.undo(&CancelToken::new()).unwrap().undone, 0);
+    assert!(!source.exists()); assert!(moved.exists()); assert!(alias.exists());
+}
+
+#[test]
+fn undo_never_adopts_replacement_files_or_removes_nonempty_owned_directories() {
+    let (_dir, env) = fixture(); let source = put(&env, "a.txt");
+    let mut engine = Engine::begin(&env, &journal(&env), approved(&env, &["a.txt"], &["Sorted"])).unwrap();
+    engine.run(&CancelToken::new()).unwrap();
+    let moved = env.known.documents.join("Sorted/a.txt");
+    let retained = env.known.desktop.join("retained-original.txt");
+    fs::rename(&moved, &retained).unwrap(); fs::write(&moved, b"replacement preserved").unwrap();
+    let user_added = env.known.documents.join("Sorted/user-added.txt"); fs::write(&user_added, b"user addition").unwrap();
+    assert_eq!(engine.undo(&CancelToken::new()).unwrap().undone, 0);
+    assert!(!source.exists()); assert_eq!(fs::read(&moved).unwrap(), b"replacement preserved");
+    assert_eq!(fs::read(&user_added).unwrap(), b"user addition"); assert!(retained.exists());
+}
+
+#[test]
+fn case_alias_after_approval_never_overwrites_or_chooses_an_unreviewed_suffix() {
+    let (_dir, env) = fixture(); let source = put(&env, "report.txt");
+    let plan = approved(&env, &["report.txt"], &[]);
+    let alias = env.known.documents.join("REPORT.TXT"); fs::write(&alias, b"case alias sentinel").unwrap();
+    let mut engine = Engine::begin(&env, &journal(&env), plan).unwrap();
+    assert_eq!(engine.run(&CancelToken::new()).unwrap().applied, 0);
+    assert!(source.exists()); assert_eq!(fs::read(&alias).unwrap(), b"case alias sentinel");
+    assert!(!env.known.documents.join("report (1).txt").exists());
+}
+
+#[test]
+fn a_case_alias_journal_name_cannot_split_the_exclusive_lease() {
+    let (_dir, env) = fixture(); put(&env, "a.txt");
+    let _engine = Engine::begin(&env, &journal(&env), approved(&env, &["a.txt"], &[])).unwrap();
+    assert!(matches!(Engine::open(&env, &env.app_data.join("RUN.VJR")), Err(Error::Busy)));
+}
+
+// Preparation only; not imported/compiled while attempt2 source remains frozen.
+
+#[test]
+fn complete_checksummed_unknown_schema_or_illegal_transition_refuses_before_mutation() {
+    for invalid in [
+        serde_json::json!({"kind":"started", "extra":"not ignored"}),
+        serde_json::json!({"kind":"unknownFutureEvent"}),
+        serde_json::json!({"kind":"finished", "cancelled":false}),
+        serde_json::json!({"kind":"intent", "operation":"move", "index":0, "identity":null}),
+    ] {
+        let (_dir, env) = fixture(); let source = put(&env, "a.txt");
+        let location = journal(&env);
+        drop(Engine::begin(&env, &location, approved(&env, &["a.txt"], &[])).unwrap());
+        // This test intentionally bypasses Engine's state validator to represent a complete, correctly
+        // checksummed but semantically invalid file on disk. No user-data primitive is called here.
+        let mut store = Store::open(&location, false, &journal_parent(&env, &location).unwrap()).unwrap();
+        store.append(&invalid).unwrap(); drop(store);
+        assert!(matches!(Engine::open(&env, &location), Err(Error::CorruptJournal)));
+        assert!(source.exists()); assert!(!env.known.documents.join("a.txt").exists());
+    }
+}
+
+#[test]
+fn journal_link_aliases_and_unavailable_storage_never_authorize_first_move() {
+    let (_dir, env) = fixture(); let source = put(&env, "a.txt");
+    let location = journal(&env);
+    drop(Engine::begin(&env, &location, approved(&env, &["a.txt"], &[])).unwrap());
+    fs::hard_link(&location, env.known.desktop.join("journal-alias")).unwrap();
+    assert!(Engine::open(&env, &location).is_err());
+    assert!(source.exists()); assert!(!env.known.documents.join("a.txt").exists());
+    let held = fs::OpenOptions::new().read(true).share_mode(0).open(location).unwrap();
+    assert!(Engine::begin(&env, &journal(&env), approved(&env, &["a.txt"], &[])).is_err());
+    assert!(source.exists()); drop(held);
+}
+
+#[test]
+fn metadata_reconciliation_preserves_same_identity_at_both_names_as_ambiguous() {
+    let (_dir, env) = fixture(); let source = put(&env, "a.txt"); let location = journal(&env);
+    let mut engine = Engine::begin(&env, &location, approved(&env, &["a.txt"], &[])).unwrap();
+    faults::set(4, Fault::Partial(25)); assert!(engine.run(&CancelToken::new()).is_err()); drop(engine);
+    let moved = env.known.documents.join("a.txt"); fs::hard_link(&moved, &source).unwrap();
+    let mut engine = Engine::open(&env, &location).unwrap();
+    let status = engine.reconcile(&CancelToken::new()).unwrap();
+    assert_eq!(status.applied, 0); assert_eq!(status.unresolved, 1);
+    assert!(matches!(engine.undo(&CancelToken::new()), Err(Error::Unresolved)));
+    assert!(source.exists()); assert!(moved.exists());
+    let status2 = engine.reconcile(&CancelToken::new()).unwrap(); assert_eq!(status2, status);
+}
+
+#[test]
+fn corrupted_interior_length_cannot_hide_a_completed_move_from_recovery() {
+    let (_dir, env) = fixture(); let source = put(&env, "a.txt"); let location = journal(&env);
+    let mut engine = Engine::begin(&env, &location, approved(&env, &["a.txt"], &[])).unwrap();
+    assert_eq!(engine.run(&CancelToken::new()).unwrap().applied, 1); drop(engine);
+    let moved = env.known.documents.join("a.txt"); let original = fs::read(&moved).unwrap();
+    let mut bytes = fs::read(&location).unwrap();
+    let intent = bytes.windows(b"\"kind\":\"intent\"".len()).position(|part| part == b"\"kind\":\"intent\"").unwrap();
+    let header = bytes[..intent].windows(4).rposition(|part| part == b"VJR2").unwrap();
+    assert!(bytes.len() - header < 1024 * 1024);
+    bytes[header + 4..header + 8].copy_from_slice(&(1024u32 * 1024).to_le_bytes());
+    fs::write(&location, bytes).unwrap();
+    assert!(matches!(Engine::open(&env, &location), Err(Error::CorruptJournal)));
+    assert!(!source.exists()); assert_eq!(fs::read(&moved).unwrap(), original);
+}
+
+#[test]
+fn proposed_case_alias_directories_are_rejected_before_any_journal_or_mkdir() {
+    let (_dir, env) = fixture(); put(&env, "a.txt"); put(&env, "b.txt");
+    // Prove the alias under this actual fixture filesystem, rather than assuming case behavior.
+    let control = env.known.desktop.join("CaseControl"); fs::create_dir(&control).unwrap();
+    fs::write(env.known.desktop.join("casecontrol/sentinel"), b"actual native alias").unwrap();
+    assert_eq!(fs::read(control.join("sentinel")).unwrap(), b"actual native alias");
+    let inventory = Inventory::capture(&env, &CancelToken::new()).unwrap();
+    let drafts = ["Sorted", "sorted"].iter().enumerate().map(|(index, dir)| Draft {
+        entry_id: inventory.entries()[index].id.clone(), destination: Folder::Documents,
+        directories: vec![(*dir).into()], filename: None,
+    }).collect::<Vec<_>>();
+    assert!(matches!(inventory.validate(&drafts, &CancelToken::new()), Err(Error::InvalidName)));
+    assert!(!env.known.documents.join("Sorted").exists()); assert!(!journal(&env).exists());
+    assert_eq!(fs::read_dir(&env.app_data).unwrap().count(), 0);
+}
+
+#[test]
+fn oversized_draft_names_and_complete_approved_manifest_refuse_before_store_creation() {
+    let (_dir, env) = fixture();
+    for index in 0..MAX_ENTRIES { put(&env, &format!("file-{index:03}.txt")); }
+    let inventory = Inventory::capture(&env, &CancelToken::new()).unwrap();
+    assert_eq!(inventory.entries().len(), MAX_ENTRIES);
+    let huge = Draft { entry_id: inventory.entries()[0].id.clone(), destination: Folder::Documents,
+        directories: vec!["x".repeat(8 * 1024 * 1024)], filename: None };
+    assert!(matches!(inventory.validate(&[huge], &CancelToken::new()), Err(Error::InvalidName)));
+    let drafts = inventory.entries().iter().map(|entry| Draft { entry_id: entry.id.clone(),
+        destination: Folder::Documents, directories: (0..11).map(|index| format!("{index}{}", "x".repeat(199))).collect(), filename: None }).collect::<Vec<_>>();
+    assert!(matches!(inventory.validate(&drafts, &CancelToken::new()), Err(Error::Bounds)));
+    assert_eq!(fs::read_dir(&env.app_data).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&env.known.documents).unwrap().count(), 0);
+}
