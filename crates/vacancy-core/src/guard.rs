@@ -1031,8 +1031,8 @@ mod tests {
         }
     }
 
-    /// Windows can make one folder case-sensitive (`fsutil file setCaseSensitiveInfo`, as WSL does): `alex` and
-    /// `Alex` in it are two users' homes. Skipped where the system doesn't allow it.
+    /// Windows can make one folder case-sensitive: `alex` and `Alex` in it are two users' homes.
+    /// Explicitly unavailable where the system doesn't allow the native per-directory flag.
     #[cfg(windows)]
     #[test]
     fn a_case_sensitive_folder_on_windows_keeps_homes_apart() {
@@ -1050,27 +1050,143 @@ mod tests {
         let g = fx.guard(&Env::windows(&fx.root, "alex"));
         assert_eq!(g.check(&mine), Ok(()));
         assert_eq!(g.check(&other), Err(Denied::OutsideAllowedRoots));
+        eprintln!(
+            "EXERCISED: case-sensitive Guard scenario, native flag verified and two distinct homes checked"
+        );
     }
 
-    /// Makes the empty folder `dir` case-sensitive, or says why not and returns false.
+    /// Verifies the native flag on this test-owned directory, without a shell or global policy changes.
+    /// Ancestors belong to the fresh Fx fixture and are not raced; this is not an adversarial path sandbox.
     #[cfg(windows)]
     pub(crate) fn make_case_sensitive(dir: &Path) -> bool {
-        let out = std::process::Command::new("fsutil")
-            .args(["file", "setCaseSensitiveInfo"])
-            .arg(dir)
-            .arg("enable")
-            .output();
-        match out {
-            Ok(out) if out.status.success() => true,
-            Ok(out) => {
-                eprintln!(
-                    "skipped: this system doesn't allow case-sensitive folders: {}",
-                    String::from_utf8_lossy(&out.stdout).trim()
-                );
-                false
+        use std::fs::{File, OpenOptions};
+        use std::io;
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+            FILE_CASE_SENSITIVE_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES, FileAttributeTagInfo,
+            FileCaseSensitiveInfo, FileIdInfo, GetFileInformationByHandleEx,
+            SetFileInformationByHandle,
+        };
+        // FILE_CS_FLAG_CASE_SENSITIVE_DIR, defined by the Windows SDK for FILE_CASE_SENSITIVE_INFO.
+        const CASE_SENSITIVE: u32 = 1;
+
+        fn flags(file: &File) -> io::Result<u32> {
+            let mut info = FILE_CASE_SENSITIVE_INFO::default();
+            // SAFETY: the live handle and matching writable information buffer outlive the call.
+            if unsafe {
+                GetFileInformationByHandleEx(
+                    file.as_raw_handle(),
+                    FileCaseSensitiveInfo,
+                    (&raw mut info).cast(),
+                    std::mem::size_of_val(&info) as u32,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
             }
-            Err(e) => {
-                eprintln!("skipped: fsutil didn't run: {e}");
+            Ok(info.Flags)
+        }
+        let enable = || -> io::Result<()> {
+            let chain = crate::fsid::chain(dir)
+                .ok_or_else(|| io::Error::other("fixture ancestry is missing or linked"))?;
+            let expected = chain
+                .last()
+                .ok_or_else(|| io::Error::other("empty fixture ancestry"))?
+                .id;
+            let file = OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(dir)?;
+            let mut tag = FILE_ATTRIBUTE_TAG_INFO::default();
+            // SAFETY: the live handle and correctly sized writable native buffer outlive the query.
+            if unsafe {
+                GetFileInformationByHandleEx(
+                    file.as_raw_handle(),
+                    FileAttributeTagInfo,
+                    (&raw mut tag).cast(),
+                    std::mem::size_of_val(&tag) as u32,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0
+                || tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            {
+                return Err(io::Error::other(
+                    "fixture leaf is not an ordinary directory",
+                ));
+            }
+            let mut identity = FILE_ID_INFO::default();
+            // SAFETY: the live handle and correctly sized writable native buffer outlive the query.
+            if unsafe {
+                GetFileInformationByHandleEx(
+                    file.as_raw_handle(),
+                    FileIdInfo,
+                    (&raw mut identity).cast(),
+                    std::mem::size_of_val(&identity) as u32,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            if crate::fsid::Identity::new(
+                identity.VolumeSerialNumber,
+                u128::from_le_bytes(identity.FileId.Identifier),
+            ) != expected
+            {
+                return Err(io::Error::other(
+                    "opened fixture directory identity changed",
+                ));
+            }
+            let before = flags(&file)?;
+            if before & CASE_SENSITIVE != 0 {
+                eprintln!(
+                    "VERIFIED: native case-sensitive directory flag already enabled ({before:#x})"
+                );
+                return Ok(());
+            }
+            let info = FILE_CASE_SENSITIVE_INFO {
+                Flags: before | CASE_SENSITIVE,
+            };
+            // SAFETY: this ordinary fixture handle has WRITE_ATTRIBUTES; the matching buffer is live.
+            let set = unsafe {
+                SetFileInformationByHandle(
+                    file.as_raw_handle(),
+                    FileCaseSensitiveInfo,
+                    (&raw const info).cast(),
+                    std::mem::size_of_val(&info) as u32,
+                )
+            };
+            let failure = if set == 0 {
+                Some(io::Error::last_os_error())
+            } else {
+                None
+            };
+            let after = flags(&file);
+            if let Some(error) = failure {
+                return Err(io::Error::other(format!(
+                    "native set failed: {error}; before={before:#x}; after={after:?}"
+                )));
+            }
+            let after = after?;
+            if after & CASE_SENSITIVE == 0 {
+                return Err(io::Error::other(format!(
+                    "native set reported success but flag is absent: before={before:#x}; after={after:#x}"
+                )));
+            }
+            eprintln!(
+                "VERIFIED: native case-sensitive directory flag before={before:#x}, after={after:#x}"
+            );
+            Ok(())
+        };
+        match enable() {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("UNAVAILABLE: optional Windows case-sensitive Guard scenario: {error}");
                 false
             }
         }
