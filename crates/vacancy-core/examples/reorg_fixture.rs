@@ -1,5 +1,5 @@
-//! PREPARED ONLY: not executed, compiled, or approved for admission.
-//! Root may copy this to examples/reorg_fixture.rs only after final source review.
+//! Manual Windows core proof: requires --run, exact VACANCY_FIXTURE_ROOT, and fresh empty directories.
+//! Admission and evidence limits are independent of a successful build; this is not installed-app proof.
 #[cfg(not(windows))]
 fn main() -> std::process::ExitCode {
     eprintln!("Unsupported: this fixture proof is Windows-only");
@@ -87,7 +87,7 @@ mod proof {
             .to_str()
             .ok_or_else(|| io::Error::other("ASCII proof directory required"))?;
         let bytes = text.as_bytes();
-        // build_with inherits cmd /C mklink: admit no shell syntax, whitespace, Unicode or alternate prefixes.
+        // Keep the reviewed proof admission conservative: no whitespace, Unicode or alternate prefixes.
         require(
             bytes.len() > 3
                 && bytes.len() < 2048
