@@ -797,6 +797,9 @@ impl Engine {
                 index,
                 format!("rename left source in place: {result:?}"),
             )?,
+            Reconciliation::Kept(reason) => {
+                self.skip(op, index, format!("{reason}: {result:?}"))?
+            }
             Reconciliation::Unresolved => {
                 self.record(Event::Unresolved {
                     operation: op,
@@ -813,16 +816,27 @@ impl Engine {
         Ok(())
     }
     fn classify_move(&self, mv: &Move, undo: bool) -> Reconciliation {
-        let (source, target) = if undo {
+        let (from, to) = if undo {
             (&mv.to, &mv.from)
         } else {
             (&mv.from, &mv.to)
         };
-        let (Ok(source), Ok(target)) = (self.inspect(source), self.inspect(target)) else {
-            return Reconciliation::Unresolved;
-        };
         let expected = |info: native::Fingerprint| {
             info.id == mv.fingerprint.id && info.links == mv.fingerprint.links
+        };
+        let Ok(source) = self.inspect(from) else {
+            return Reconciliation::Unresolved;
+        };
+        let target = match self.inspect(to) {
+            Ok(target) => target,
+            // A directory is never this file. With the file still at its source under the same identity and link
+            // count, the refused rename provably did not happen.
+            Err(_) if source.is_some_and(expected) && self.plain_directory(to) => {
+                return Reconciliation::Kept(
+                    "a directory now holds the destination name; the file was left where it was",
+                );
+            }
+            Err(_) => return Reconciliation::Unresolved,
         };
         match (source, target) {
             (None, Some(info)) if expected(info) => Reconciliation::Applied,
@@ -833,6 +847,13 @@ impl Engine {
             }
             _ => Reconciliation::Unresolved,
         }
+    }
+    /// Whether a plain directory (not a link or junction) holds this name now.
+    fn plain_directory(&self, at: &Place) -> bool {
+        let (Ok(parent), Some(name)) = (self.parent(&at.parent()), at.names.last()) else {
+            return false;
+        };
+        native::child_dir(&parent.dir, name).is_ok()
     }
     /// Metadata/status reconciliation only. It never invokes rename, mkdir or directory removal.
     pub fn reconcile(&mut self, cancel: &CancelToken) -> Result<Status, Error> {
@@ -868,6 +889,7 @@ impl Engine {
                     index,
                     "reconciled: namespace action not currently applied",
                 )?,
+                Reconciliation::Kept(reason) => self.skip(op, index, reason)?,
                 Reconciliation::Unresolved
                     if self.state.receipts.get(&op.key(index)) != Some(&Receipt::Unresolved) =>
                 {
@@ -1026,6 +1048,11 @@ impl Engine {
                     Reconciliation::NotApplied => {
                         self.skip(Operation::RemoveDirectory, index, format!("{error:?}"))?
                     }
+                    Reconciliation::Kept(reason) => self.skip(
+                        Operation::RemoveDirectory,
+                        index,
+                        format!("{reason}: {error:?}"),
+                    )?,
                     Reconciliation::Unresolved => {
                         self.record(Event::Unresolved {
                             operation: Operation::RemoveDirectory,
@@ -1059,6 +1086,8 @@ mod tests;
 enum Reconciliation {
     Applied,
     NotApplied,
+    /// Provably not applied, and something else now holds the name: skipped with this reason, never adopted.
+    Kept(&'static str),
     Unresolved,
 }
 fn journal_parent(env: &Env, journal: &Path) -> Result<Vec<native::Id>, Error> {

@@ -731,6 +731,65 @@ fn stable_lease_excludes_a_second_process_for_the_whole_engine_session() {
 }
 
 #[test]
+fn late_destination_directory_is_skipped_not_unresolved_and_never_blocks_undo() {
+    for lost_result in [false, true] {
+        let (_dir, env) = fixture();
+        let a = put(&env, "a.txt");
+        let b = put(&env, "b.txt");
+        let location = journal(&env);
+        let mut engine =
+            Engine::begin(&env, &location, approved(&env, &["a.txt", "b.txt"], &[])).unwrap();
+        let blocker = env.known.documents.join("b.txt");
+        let arrived = blocker.clone();
+        let mut intents = 0;
+        set_hook(move |point| {
+            if point == "move-intent" {
+                intents += 1;
+                if intents == 2 {
+                    fs::create_dir(&arrived).unwrap();
+                    fs::write(arrived.join("sentinel"), b"late directory").unwrap();
+                }
+            }
+        });
+        if lost_result {
+            // Approved, Started, a's intent and result, b's intent; b's result (sequence 6) never lands.
+            faults::set(6, Fault::Before);
+        }
+        let result = engine.run(&CancelToken::new());
+        clear_hook();
+        let status = if lost_result {
+            assert!(matches!(result, Err(Error::StoppedUnresolved)));
+            drop(engine);
+            engine = Engine::open(&env, &location).unwrap();
+            assert_eq!(engine.status().unresolved, 1);
+            engine.reconcile(&CancelToken::new()).unwrap()
+        } else {
+            result.unwrap()
+        };
+        assert_eq!(status.applied, 1, "{lost_result}");
+        assert_eq!(status.unresolved, 0, "{lost_result}: {status:?}");
+        assert!(
+            status
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("directory")),
+            "{status:?}"
+        );
+        assert!(b.exists());
+        assert_eq!(
+            fs::read(blocker.join("sentinel")).unwrap(),
+            b"late directory"
+        );
+        assert_eq!(engine.undo(&CancelToken::new()).unwrap().undone, 1);
+        assert!(a.exists() && b.exists());
+        assert_eq!(
+            fs::read(blocker.join("sentinel")).unwrap(),
+            b"late directory"
+        );
+    }
+}
+
+#[test]
 fn a_same_size_edit_under_a_future_creation_time_is_still_a_changed_source() {
     use std::os::windows::fs::FileTimesExt;
     use std::time::{Duration, SystemTime};
