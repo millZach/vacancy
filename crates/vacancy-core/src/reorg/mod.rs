@@ -57,6 +57,7 @@ pub struct Status {
     pub run_id: String,
     pub applied: u32,
     pub undone: u32,
+    /// Current skipped operation receipts across moves, directories and Undo; this is not a file count.
     pub skipped: u32,
     pub unresolved: u32,
     pub cancelled: bool,

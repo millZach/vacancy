@@ -90,6 +90,11 @@ impl Plan {
                 return Err(Error::CorruptJournal);
             }
         }
+        for (index, root) in self.roots.iter().enumerate() {
+            if self.roots[..index].iter().any(|other| root.chain.starts_with(&other.chain) || other.chain.starts_with(&root.chain)) {
+                return Err(Error::CorruptJournal);
+            }
+        }
         let mut dirs = HashSet::new();
         let mut directory_aliases = HashSet::new();
         for dir in &self.directories {
@@ -247,6 +252,13 @@ impl State {
             Event::Finished { cancelled }
                 if self.started && !self.finished && self.pending.is_empty() =>
             {
+                if !cancelled {
+                    let terminal = |key| matches!(self.receipts.get(&key), Some(Receipt::Applied(_) | Receipt::Skipped));
+                    if (0..self.plan.moves.len()).any(|index| !terminal(Operation::Move.key(index)))
+                        || self.plan.directories.iter().enumerate().any(|(index, directory)| directory.expected.is_none() && !terminal(Operation::Mkdir.key(index))) {
+                        return Err(Error::CorruptJournal);
+                    }
+                }
                 self.finished = true;
                 self.cancelled = *cancelled;
             }
@@ -258,7 +270,7 @@ impl State {
             } => {
                 self.valid_index(*operation, *index)?;
                 let key = operation.key(*index);
-                if !self.started || self.pending.contains_key(&key) {
+                if !self.started || !self.pending.is_empty() {
                     return Err(Error::CorruptJournal);
                 }
                 if self.receipts.contains_key(&key)
@@ -346,7 +358,12 @@ impl State {
                 self.valid_index(*operation, *index)?;
                 let key = operation.key(*index);
                 if !self.started
-                    || self.pending.contains_key(&key)
+                    || !self.pending.is_empty()
+                    || (self.finished && matches!(operation, Operation::Move | Operation::Mkdir))
+                    || (*operation == Operation::Undo && !matches!(self.receipts.get(&Operation::Move.key(*index)), Some(Receipt::Applied(_))))
+                    || (*operation == Operation::RemoveDirectory && !matches!(self.receipts.get(&Operation::Mkdir.key(*index)), Some(Receipt::Applied(_))))
+                    || (*operation == Operation::Mkdir && self.plan.directories[*index].expected.is_some())
+                    || (self.receipts.contains_key(&key) && !(matches!(operation, Operation::Undo | Operation::RemoveDirectory) && self.receipts.get(&key) == Some(&Receipt::Skipped)))
                     || reason.len() > 1024
                     || matches!(
                         self.receipts.get(&key),

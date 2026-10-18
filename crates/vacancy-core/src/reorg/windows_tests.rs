@@ -827,16 +827,13 @@ fn complete_checksummed_unknown_schema_or_illegal_transition_refuses_before_muta
 }
 
 #[test]
-fn journal_link_aliases_and_unavailable_storage_never_authorize_first_move() {
+fn journal_hardlink_alias_never_authorizes_first_move() {
     let (_dir, env) = fixture(); let source = put(&env, "a.txt");
     let location = journal(&env);
     drop(Engine::begin(&env, &location, approved(&env, &["a.txt"], &[])).unwrap());
     fs::hard_link(&location, env.known.desktop.join("journal-alias")).unwrap();
     assert!(Engine::open(&env, &location).is_err());
     assert!(source.exists()); assert!(!env.known.documents.join("a.txt").exists());
-    let held = fs::OpenOptions::new().read(true).share_mode(0).open(location).unwrap();
-    assert!(Engine::begin(&env, &journal(&env), approved(&env, &["a.txt"], &[])).is_err());
-    assert!(source.exists()); drop(held);
 }
 
 #[test]
@@ -900,4 +897,170 @@ fn oversized_draft_names_and_complete_approved_manifest_refuse_before_store_crea
     assert!(matches!(inventory.validate(&drafts, &CancelToken::new()), Err(Error::Bounds)));
     assert_eq!(fs::read_dir(&env.app_data).unwrap().count(), 0);
     assert_eq!(fs::read_dir(&env.known.documents).unwrap().count(), 0);
+}
+
+// Not imported until the frozen attempt5 finishes. Requires typed native Collision receipt.
+#[test]
+fn directory_collision_after_durable_intent_skips_without_adoption_and_other_moves_stay_undoable() {
+    for after_intent in [false, true] {
+        let (_dir, env) = fixture(); put(&env, "a.txt"); put(&env, "b.txt");
+        let inventory = Inventory::capture(&env, &CancelToken::new()).unwrap();
+        let drafts = [("a.txt", "ZExternal"), ("b.txt", "AOwned")].into_iter().map(|(name, dir)| Draft {
+            entry_id: inventory.entries().iter().find(|entry| entry.name == name).unwrap().id.clone(),
+            destination: Folder::Documents, directories: vec![dir.into()], filename: None,
+        }).collect::<Vec<_>>();
+        let plan = inventory.validate(&drafts, &CancelToken::new()).unwrap();
+        let external = env.known.documents.join("ZExternal");
+        if !after_intent { fs::create_dir(&external).unwrap(); fs::write(external.join("sentinel"), b"external ownership").unwrap(); }
+        let mut engine = Engine::begin(&env, &journal(&env), plan).unwrap();
+        if after_intent {
+            let attacked = external.clone(); let mut attempts = 0;
+            set_hook(move |point| {
+                if point == "mkdir-intent" { attempts += 1; } if point == "mkdir-intent" && attempts == 2 {
+                    fs::create_dir(&attacked).unwrap();
+                    fs::write(attacked.join("sentinel"), b"external ownership").unwrap();
+                }
+            });
+        }
+        let result = engine.run(&CancelToken::new()); clear_hook(); let status = result.unwrap();
+        assert_eq!(status.applied, 1); assert_eq!(status.unresolved, 0);
+        assert!(env.known.downloads.join("a.txt").exists()); assert!(env.known.documents.join("AOwned/b.txt").exists());
+        assert_eq!(fs::read(external.join("sentinel")).unwrap(), b"external ownership");
+        assert_eq!(engine.undo(&CancelToken::new()).unwrap().undone, 1);
+        assert!(env.known.downloads.join("b.txt").exists()); assert!(!env.known.documents.join("AOwned").exists());
+        assert_eq!(fs::read(external.join("sentinel")).unwrap(), b"external ownership");
+    }
+}
+
+// Preparation only. Exercise the actual bounded continuation path, not a relaxed production budget.
+#[test]
+fn exhausted_continuation_capacity_cannot_commit_a_new_move_intent() {
+    let (_dir, env) = fixture(); let source = put(&env, "a.txt"); let location = journal(&env);
+    let mut engine = Engine::begin(&env, &location, approved(&env, &["a.txt"], &[])).unwrap();
+    // Stand at the same private loop boundary as run(), after its durable Started record and before an intent.
+    engine.record(Event::Started).unwrap(); drop(engine);
+    let preserved = fs::read(&location).unwrap();
+    // Empty preserved segments represent repeated process death immediately after no-replace segment create.
+    // They carry no approval/events. Opening them may inspect/bind evidence but must not grant move authority.
+    for index in 1..32 { fs::write(env.app_data.join(format!("run.vjr.part{index:04}")), b"").unwrap(); }
+    let mut engine = Engine::open(&env, &location).unwrap();
+    let status = engine.status();
+    assert!(matches!(engine.move_one(0, false), Err(Error::Bounds)));
+    assert_eq!(engine.status(), status); assert!(source.exists()); assert!(!env.known.documents.join("a.txt").exists());
+    assert!(matches!(engine.move_one(0, false), Err(Error::StoppedUnresolved)));
+    drop(engine); assert_eq!(fs::read(&location).unwrap(), preserved);
+}
+
+#[test]
+fn invalid_native_name_and_literal_replacement_character_have_distinct_inventory_and_review_text() {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    let (_dir, env) = fixture();
+    let invalid = OsString::from_wide(&[0xd800, 46, 116, 120, 116]);
+    let replacement = OsString::from_wide(&[0xfffd, 46, 116, 120, 116]);
+    fs::write(env.known.downloads.join(&invalid), b"invalid unit").unwrap();
+    fs::write(env.known.downloads.join(&replacement), b"replacement character").unwrap();
+    let inventory = Inventory::capture(&env, &CancelToken::new()).unwrap();
+    assert_eq!(inventory.entries().len(), 2);
+    let invalid_entry = inventory.entries().iter().find(|entry| entry.name == "\\u{D800}.txt").unwrap();
+    let replacement_entry = inventory.entries().iter().find(|entry| entry.name == "\u{fffd}.txt").unwrap();
+    assert_ne!(invalid_entry.id, replacement_entry.id);
+    let drafts = [invalid_entry, replacement_entry].iter().map(|entry| Draft { entry_id: entry.id.clone(), destination: Folder::Documents, directories: vec![], filename: None }).collect::<Vec<_>>();
+    let plan = inventory.validate(&drafts, &CancelToken::new()).unwrap();
+    assert_ne!(plan.review()[0].from, plan.review()[1].from); assert_ne!(plan.review()[0].to, plan.review()[1].to);
+    let mut engine = Engine::begin(&env, &journal(&env), plan).unwrap();
+    assert_eq!(engine.run(&CancelToken::new()).unwrap().applied, 2);
+    assert_eq!(fs::read(env.known.documents.join(&invalid)).unwrap(), b"invalid unit");
+    assert_eq!(fs::read(env.known.documents.join(&replacement)).unwrap(), b"replacement character");
+    assert_eq!(engine.undo(&CancelToken::new()).unwrap().undone, 2);
+}
+
+// Not imported while attempt5 is frozen. Requires terminal forward receipts for successful Finish.
+#[test]
+fn premature_successful_finish_is_corrupt_but_explicit_cancellation_can_leave_unattempted_moves() {
+    for cancelled in [false, true] {
+        let (_dir, env) = fixture(); let source = put(&env, "a.txt"); let location = journal(&env);
+        drop(Engine::begin(&env, &location, approved(&env, &["a.txt"], &[])).unwrap());
+        let mut store = Store::open(&location, false, &journal_parent(&env, &location).unwrap()).unwrap();
+        store.append(&Event::Started).unwrap(); store.append(&Event::Finished { cancelled }).unwrap(); drop(store);
+        let result = Engine::open(&env, &location);
+        if cancelled {
+            let engine = result.unwrap(); assert!(engine.status().finished); assert!(engine.status().cancelled);
+            assert_eq!(engine.status().applied, 0);
+        } else { assert!(matches!(result, Err(Error::CorruptJournal))); }
+        assert!(source.exists()); assert!(!env.known.documents.join("a.txt").exists());
+    }
+}
+
+#[test]
+fn exclusive_unavailable_lease_refuses_a_fresh_store_then_release_restores_writes() {
+    let (_dir, env) = fixture(); let source = put(&env, "a.txt"); let location = journal(&env);
+    let held = fs::OpenOptions::new().read(true).write(true).create_new(true).share_mode(0)
+        .open(env.app_data.join("run.vjr.lease")).unwrap();
+    assert!(matches!(Engine::begin(&env, &location, approved(&env, &["a.txt"], &[])), Err(Error::Busy)));
+    assert!(!location.exists()); assert!(source.exists()); assert!(!env.known.documents.join("a.txt").exists());
+    drop(held);
+    let mut engine = Engine::begin(&env, &location, approved(&env, &["a.txt"], &[])).unwrap();
+    assert_eq!(engine.run(&CancelToken::new()).unwrap().applied, 1);
+    assert_eq!(engine.undo(&CancelToken::new()).unwrap().undone, 1); assert!(source.exists());
+}
+
+#[test]
+fn authenticated_header_and_torn_payload_checksum_footer_preserve_intent_and_explicit_undo() {
+    for cut in 0..6 {
+        let (_dir, env) = fixture(); let source = put(&env, "a.txt"); let location = journal(&env);
+        let mut engine = Engine::begin(&env, &location, approved(&env, &["a.txt"], &[])).unwrap();
+        let applied = Event::Applied { operation: Operation::Move, index: 0, identity: engine.state.plan.moves[0].fingerprint.id };
+        let payload_length = serde_json::to_vec(&serde_json::to_value(applied).unwrap()).unwrap().len();
+        let counts = [48, 49, 48 + payload_length / 2, 48 + payload_length, 48 + payload_length + 31, 48 + payload_length + 32 + 7];
+        faults::set(4, Fault::Partial(counts[cut]));
+        assert!(matches!(engine.run(&CancelToken::new()), Err(Error::StoppedUnresolved))); drop(engine);
+        let preserved = fs::read(&location).unwrap(); let target = env.known.documents.join("a.txt");
+        assert!(!source.exists()); assert!(target.exists());
+        let mut engine = Engine::open(&env, &location).unwrap();
+        assert_eq!(engine.status().unresolved, 1); assert_eq!(engine.status().applied, 0);
+        assert!(!source.exists()); assert!(target.exists()); // load never resumes namespace actions
+        assert_eq!(engine.reconcile(&CancelToken::new()).unwrap().applied, 1); drop(engine);
+        assert_eq!(fs::read(&location).unwrap(), preserved);
+        let mut engine = Engine::open(&env, &location).unwrap();
+        assert_eq!(engine.reconcile(&CancelToken::new()).unwrap().applied, 1);
+        assert_eq!(engine.undo(&CancelToken::new()).unwrap().undone, 1);
+        assert!(source.exists()); assert!(!target.exists());
+    }
+}
+
+#[test]
+fn aliased_or_nested_known_folder_roots_refuse_before_approval_or_store() {
+    for nested in [false, true] {
+        let (_dir, mut env) = fixture(); put(&env, "a.txt");
+        env.known.desktop = if nested { let child = env.known.downloads.join("NestedDesktop"); fs::create_dir(&child).unwrap(); child }
+            else { env.known.downloads.clone() };
+        assert!(matches!(Inventory::capture(&env, &CancelToken::new()), Err(Error::Unsupported)));
+        assert!(!journal(&env).exists()); assert_eq!(fs::read_dir(&env.app_data).unwrap().count(), 0);
+    }
+    let (_dir, env) = fixture(); let source = put(&env, "a.txt");
+    let mut plan = approved(&env, &["a.txt"], &[]).data;
+    plan.roots[1].chain = plan.roots[0].chain.clone();
+    let location = journal(&env);
+    let mut store = Store::open(&location, true, &journal_parent(&env, &location).unwrap()).unwrap();
+    store.append(&Event::Approved { version: 1, plan }).unwrap(); drop(store);
+    assert!(matches!(Engine::open(&env, &location), Err(Error::CorruptJournal)));
+    assert!(source.exists());
+}
+
+#[test]
+fn correctly_framed_unreachable_not_attempted_transitions_refuse() {
+    for scenario in 0..5 {
+        let (_dir, env) = fixture(); let source = put(&env, "a.txt"); let location = journal(&env);
+        drop(Engine::begin(&env, &location, approved(&env, &["a.txt"], &["Sorted"])).unwrap());
+        let mut store = Store::open(&location, false, &journal_parent(&env, &location).unwrap()).unwrap();
+        store.append(&Event::Started).unwrap();
+        let operation = match scenario { 0 => Operation::Undo, 1 => Operation::RemoveDirectory, 2 | 4 => Operation::Move, _ => Operation::Mkdir };
+        let event = Event::NotAttempted { operation, index: 0, reason: "semantic regression".into() };
+        if scenario == 2 || scenario == 3 { store.append(&Event::Finished { cancelled: true }).unwrap(); }
+        if scenario == 4 { store.append(&event).unwrap(); }
+        store.append(&event).unwrap(); drop(store);
+        assert!(matches!(Engine::open(&env, &location), Err(Error::CorruptJournal)), "scenario {scenario}");
+        assert!(source.exists()); assert!(!env.known.documents.join("Sorted").exists());
+    }
 }

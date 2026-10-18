@@ -349,20 +349,25 @@ pub(crate) fn rename(file: &PinnedFile, destination: &Dir, name: &Name) -> Resul
 }
 
 /// Create only, relative to a retained real parent. Returns the actual owned identity, never a fabricated one.
-pub(crate) fn mkdir(parent: &Dir, name: &Name) -> Result<(Dir, Step), Fail> {
-    let handle = create(
+#[derive(Debug)]
+pub(crate) enum MkdirFailure { Collision, Uncertain(Fail) }
+
+pub(crate) fn mkdir(parent: &Dir, name: &Name) -> Result<(Dir, Step), MkdirFailure> {
+    let handle = create_status(
         &parent.handle,
         name,
         FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         FILE_CREATE,
         FILE_DIRECTORY_FILE,
-    )?;
-    let (attributes, _) = attribute_tag(&handle).ok_or(Fail::Unsupported)?;
+    ).map_err(|status| if status == windows_sys::Win32::Foundation::STATUS_OBJECT_NAME_COLLISION {
+        MkdirFailure::Collision
+    } else { MkdirFailure::Uncertain(open_fail(status)) })?;
+    let (attributes, _) = attribute_tag(&handle).ok_or(MkdirFailure::Uncertain(Fail::Unsupported))?;
     if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(Fail::Link);
+        return Err(MkdirFailure::Uncertain(Fail::Link));
     }
-    let (volume, file) = identity(&handle).ok_or(Fail::Unsupported)?;
+    let (volume, file) = identity(&handle).ok_or(MkdirFailure::Uncertain(Fail::Unsupported))?;
     Ok((
         Dir { handle },
         Step {
@@ -436,6 +441,12 @@ fn create(
     disposition: u32,
     options: u32,
 ) -> Result<Handle, Fail> {
+    create_status(parent, name, access, share, disposition, options).map_err(open_fail)
+}
+
+fn create_status(
+    parent: &Handle, name: &Name, access: u32, share: u32, disposition: u32, options: u32,
+) -> Result<Handle, i32> {
     let object_name = UNICODE_STRING {
         Length: (name.0.len() * 2) as u16,
         MaximumLength: (name.0.len() * 2) as u16,
@@ -474,6 +485,6 @@ fn create(
     if status >= 0 && !raw.is_null() {
         Ok(Handle(raw))
     } else {
-        Err(open_fail(status))
+        Err(status)
     }
 }

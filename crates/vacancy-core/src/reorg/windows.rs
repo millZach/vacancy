@@ -140,6 +140,9 @@ impl Inventory {
             if !ids.contains(&root) || ids.iter().any(|id| id.volume != root.volume) {
                 return Err(Error::Changed);
             }
+            if roots.iter().any(|other: &Root| ids.starts_with(&other.chain) || other.chain.starts_with(&ids)) {
+                return Err(Error::Unsupported);
+            }
             roots.push(Root {
                 folder: at,
                 chain: ids,
@@ -642,7 +645,10 @@ impl Engine {
                     boundary("mkdir-result");
                     drop(dir);
                 }
-                Err(error) => {
+                // FILE_CREATE returning NAME_COLLISION positively proves this call did not create it.
+                // Preserve the external directory, never adopt it, and leave its dependent moves skipped.
+                Err(native::MkdirFailure::Collision) => self.skip(Operation::Mkdir, index, "destination directory arrived after approval")?,
+                Err(native::MkdirFailure::Uncertain(error)) => {
                     if matches!(native::exists(&parent.dir, name), Ok(false)) {
                         self.skip(Operation::Mkdir, index, format!("{error:?}"))?;
                     } else {
