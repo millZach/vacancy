@@ -1,5 +1,6 @@
 use super::{
-    Draft, Error, Folder, InventoryEntry, MAX_COMPONENTS, MAX_ENTRIES, ReviewedMove, Status,
+    Draft, DroppedDraft, Error, Folder, InventoryEntry, MAX_COMPONENTS, MAX_ENTRIES, ReviewedMove,
+    Status,
     journal::Store,
     model::{Directory, Event, Move, Operation, Place, Plan, Receipt, Root, State},
     names::Name,
@@ -30,11 +31,44 @@ pub struct Inventory {
 pub struct ValidatedPlan {
     data: Plan,
     review: Vec<ReviewedMove>,
+    dropped: Vec<DroppedDraft>,
 }
 impl ValidatedPlan {
     pub fn review(&self) -> &[ReviewedMove] {
         &self.review
     }
+    /// Drafts validation left out, each with its reason. None of them is in the plan.
+    pub fn dropped(&self) -> &[DroppedDraft] {
+        &self.dropped
+    }
+}
+
+/// A draft that passed the checks needing no filesystem access.
+struct Parsed<'a> {
+    draft: &'a Draft,
+    source: &'a Place,
+    fingerprint: &'a native::Fingerprint,
+    names: Vec<Name>,
+    original: Name,
+}
+
+/// A destination's directories, outermost first, with the identity of each that already exists.
+type Chain = Vec<(Place, Option<native::Id>)>;
+
+/// Names already taken while a batch is validated. Keys are Windows case keys, so aliases collide too.
+#[derive(Default)]
+struct Reserved {
+    /// The exact source of every known draft; a draft may not ask for another draft's source by name.
+    selected: HashSet<Place>,
+    /// Every known draft's source, by case key. A collision suffix never lands on one.
+    sources: HashSet<(Folder, Vec<Vec<u16>>)>,
+    /// Every directory any parsed draft names, including prefixes. File destinations avoid all of them.
+    planned: HashSet<(Folder, Vec<Vec<u16>>)>,
+    /// Directories of kept drafts, with the identity they had if they already existed.
+    directories: BTreeMap<Place, Option<native::Id>>,
+    aliases: BTreeMap<(Folder, Vec<Vec<u16>>), Place>,
+    /// File destinations of kept drafts.
+    targets: HashSet<(Folder, Vec<Vec<u16>>)>,
 }
 
 #[derive(Debug)]
@@ -224,6 +258,12 @@ impl Inventory {
         self.truncated
     }
 
+    /// Validates untrusted drafts one at a time. An invalid draft (unknown or repeated source, a source changed since
+    /// capture, a bad or refused name, a directory that conflicts with another draft's, no free name) is dropped
+    /// with its reason, and the rest are kept. A source named by more than one draft is dropped from all of them:
+    /// the proposals conflict and neither is chosen. The batch fails only for batch-wide reasons (bounds,
+    /// cancellation, a replaced known folder, a manifest over the journal limit) or when no draft is left, and then
+    /// with the first dropped draft's error.
     pub fn validate(&self, drafts: &[Draft], cancel: &CancelToken) -> Result<ValidatedPlan, Error> {
         if drafts.is_empty() || drafts.len() > MAX_ENTRIES {
             return Err(Error::Bounds);
@@ -231,156 +271,81 @@ impl Inventory {
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        let selected = drafts
-            .iter()
-            .map(|draft| {
-                self.captured
-                    .get(&draft.entry_id)
-                    .map(|(place, _)| place.clone())
-                    .ok_or(Error::UnknownEntry)
-            })
-            .collect::<Result<HashSet<_>, _>>()?;
-        if selected.len() != drafts.len() {
-            return Err(Error::UnknownEntry);
+        // A replaced known folder makes the whole inventory stale, not one draft.
+        for at in FOLDERS {
+            self.root_parent(at)?;
+        }
+        let mut uses = BTreeMap::<&Place, usize>::new();
+        for draft in drafts {
+            if let Some((place, _)) = self.captured.get(&draft.entry_id) {
+                *uses.entry(place).or_default() += 1;
+            }
+        }
+        let mut reserved = Reserved {
+            selected: uses.keys().map(|place| (*place).clone()).collect(),
+            sources: uses.keys().map(|place| reservation(place)).collect(),
+            ..Reserved::default()
+        };
+        let mut dropped = Vec::new();
+        let mut first = None;
+        let mut reject = |draft: &Draft, error: Error| {
+            dropped.push(DroppedDraft {
+                entry_id: draft.entry_id.clone(),
+                reason: error.to_string(),
+            });
+            first.get_or_insert(error);
+        };
+        let mut parsed = Vec::new();
+        for draft in drafts {
+            match self.parse(draft, &uses) {
+                Ok(item) => {
+                    for count in 1..=item.names.len() {
+                        reserved.planned.insert(reservation(&Place {
+                            folder: draft.destination,
+                            names: item.names[..count].to_vec(),
+                        }));
+                    }
+                    parsed.push(item);
+                }
+                Err(error) => reject(draft, error),
+            }
         }
         let guard = Guard::new(&self.env, &self.env.root);
-        let mut directories = BTreeMap::<Place, Option<native::Id>>::new();
-        let mut directory_aliases = BTreeMap::new();
         let mut moves = Vec::new();
         let mut review = Vec::new();
-        let mut sources = HashSet::new();
-        let mut targets = HashSet::new();
-        for draft in drafts {
+        for item in parsed {
             if cancel.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            let (source, fingerprint) = self
-                .captured
-                .get(&draft.entry_id)
-                .ok_or(Error::UnknownEntry)?;
-            if !sources.insert(source.clone()) || draft.directories.len() >= MAX_COMPONENTS {
-                return Err(Error::UnknownEntry);
-            }
-            let source_parent = self.root_parent(source.folder)?;
-            let (_, current) =
-                native::file(&source_parent.dir, &source.names[0], false).map_err(changed)?;
-            if current != *fingerprint {
-                return Err(Error::Changed);
-            }
-            let mut source_steps = source_parent.steps.clone();
-            source_steps.push(crate::fsid::Step {
-                name: source.names[0].os(),
-                id: crate::fsid::Identity::new(current.id.volume, current.id.file),
-                mount: None,
-            });
-            guard
-                .judge_walked(&path(&self.env, source), &source_steps, false)
-                .map_err(denied)?;
-            let mut names = draft
-                .directories
-                .iter()
-                .map(|text| Name::text(text))
-                .collect::<Result<Vec<_>, _>>()?;
-            let base_parent = self.root_parent(draft.destination)?;
-            let mut existing = base_parent;
-            let mut existing_path = folder(&self.env, draft.destination).to_path_buf();
-            let mut missing = false;
-            let mut missing_names = PathBuf::new();
-            for count in 1..=names.len() {
-                let at = Place {
-                    folder: draft.destination,
-                    names: names[..count].to_vec(),
-                };
-                let identity = if !missing {
-                    match native::child_dir(&existing.dir, &names[count - 1]) {
-                        Ok((dir, step)) => {
-                            let id = native::Id::step(&step);
-                            drop(dir);
-                            existing_path.push(names[count - 1].os());
-                            existing = native::directory(&existing_path).map_err(changed)?;
-                            if native::Id::step(existing.steps.last().ok_or(Error::Changed)?) != id
-                                || id.volume != self.root.volume
-                            {
-                                return Err(Error::Changed);
-                            }
-                            guard
-                                .judge_walked(&existing_path, &existing.steps, true)
-                                .map_err(denied)?;
-                            Some(id)
-                        }
-                        Err(Fail::Gone) => {
-                            missing = true;
-                            missing_names.push(names[count - 1].os());
-                            None
-                        }
-                        Err(error) => return Err(changed(error)),
-                    }
-                } else {
-                    missing_names.push(names[count - 1].os());
-                    None
-                };
-                if let Some(previous) = directory_aliases.insert(reservation(&at), at.clone())
-                    && previous != at
-                {
-                    return Err(Error::InvalidName);
+            let (chain, to) = match self.resolve(&guard, &item, &reserved) {
+                Ok(value) => value,
+                Err(error) => {
+                    reject(item.draft, error);
+                    continue;
                 }
-                if let Some(previous) = directories.insert(at, identity)
-                    && previous != identity
-                {
-                    return Err(Error::Changed);
-                }
+            };
+            // Only a kept draft's directories enter the plan, so a dropped draft leaves no unused directory behind.
+            for (at, identity) in chain {
+                reserved.aliases.insert(reservation(&at), at.clone());
+                reserved.directories.insert(at, identity);
             }
-            let original = draft
-                .filename
-                .as_deref()
-                .map(Name::text)
-                .transpose()?
-                .unwrap_or_else(|| source.names[0].clone());
-            let mut requested = names.clone();
-            requested.push(original.clone());
-            if selected.contains(&Place {
-                folder: draft.destination,
-                names: requested,
-            }) {
-                return Err(Error::UnknownEntry);
-            }
-            let mut selected = None;
-            for suffix in 0..100 {
-                let name = collision_name(&original, suffix)?;
-                let mut candidate = names.clone();
-                candidate.push(name.clone());
-                let to = Place {
-                    folder: draft.destination,
-                    names: candidate,
-                };
-                let mut proposed = missing_names.clone();
-                proposed.push(name.os());
-                guard
-                    .judge_absent(&existing_path, &existing.steps, &proposed)
-                    .map_err(denied)?;
-                if to != *source
-                    && !targets.contains(&reservation(&to))
-                    && (missing || !native::exists(&existing.dir, &name).map_err(changed)?)
-                {
-                    selected = Some(to);
-                    break;
-                }
-            }
-            let to = selected.ok_or(Error::Bounds)?;
-            targets.insert(reservation(&to));
+            reserved.targets.insert(reservation(&to));
             review.push(ReviewedMove {
-                entry_id: draft.entry_id.clone(),
-                from: super::names::display(path(&self.env, source).as_os_str().encode_wide()),
+                entry_id: item.draft.entry_id.clone(),
+                from: super::names::display(path(&self.env, item.source).as_os_str().encode_wide()),
                 to: super::names::display(path(&self.env, &to).as_os_str().encode_wide()),
             });
             moves.push(Move {
-                entry: draft.entry_id.clone(),
-                from: source.clone(),
+                entry: item.draft.entry_id.clone(),
+                from: item.source.clone(),
                 to,
-                fingerprint: *fingerprint,
+                fingerprint: *item.fingerprint,
             });
-            names.clear();
         }
+        if moves.is_empty() {
+            return Err(first.unwrap_or(Error::UnknownEntry));
+        }
+        // Unreachable after the reservations above; kept as a last structural check.
         if moves
             .iter()
             .any(|mv| moves.iter().any(|other| mv.to == other.from))
@@ -391,7 +356,8 @@ impl Inventory {
             id: format!("run-{}", native::nonce().map_err(changed)?),
             root: self.root,
             roots: self.roots.clone(),
-            directories: directories
+            directories: reserved
+                .directories
                 .into_iter()
                 .map(|(at, expected)| Directory { at, expected })
                 .collect(),
@@ -399,7 +365,165 @@ impl Inventory {
         };
         data.checked()?;
         super::model::check_approval(&data)?;
-        Ok(ValidatedPlan { data, review })
+        Ok(ValidatedPlan {
+            data,
+            review,
+            dropped,
+        })
+    }
+    /// The checks a draft can fail without touching the filesystem.
+    fn parse<'a>(
+        &'a self,
+        draft: &'a Draft,
+        uses: &BTreeMap<&Place, usize>,
+    ) -> Result<Parsed<'a>, Error> {
+        let (source, fingerprint) = self
+            .captured
+            .get(&draft.entry_id)
+            .ok_or(Error::UnknownEntry)?;
+        if uses.get(source) != Some(&1) {
+            return Err(Error::UnknownEntry);
+        }
+        if draft.directories.len() >= MAX_COMPONENTS {
+            return Err(Error::Bounds);
+        }
+        let names = draft
+            .directories
+            .iter()
+            .map(|text| Name::text(text))
+            .collect::<Result<Vec<_>, _>>()?;
+        let original = draft
+            .filename
+            .as_deref()
+            .map(Name::text)
+            .transpose()?
+            .unwrap_or_else(|| source.names[0].clone());
+        Ok(Parsed {
+            draft,
+            source,
+            fingerprint,
+            names,
+            original,
+        })
+    }
+    /// Checks one parsed draft against the filesystem and the names kept drafts already hold. Gives its directory
+    /// chain (with identities of those that exist) and its final destination, collision suffix included.
+    fn resolve(
+        &self,
+        guard: &Guard,
+        item: &Parsed<'_>,
+        reserved: &Reserved,
+    ) -> Result<(Chain, Place), Error> {
+        let Parsed {
+            draft,
+            source,
+            fingerprint,
+            names,
+            original,
+        } = item;
+        let source_parent = self.root_parent(source.folder)?;
+        let (_, current) =
+            native::file(&source_parent.dir, &source.names[0], false).map_err(changed)?;
+        if current != **fingerprint {
+            return Err(Error::Changed);
+        }
+        let mut source_steps = source_parent.steps.clone();
+        source_steps.push(crate::fsid::Step {
+            name: source.names[0].os(),
+            id: crate::fsid::Identity::new(current.id.volume, current.id.file),
+            mount: None,
+        });
+        guard
+            .judge_walked(&path(&self.env, source), &source_steps, false)
+            .map_err(denied)?;
+        let mut existing = self.root_parent(draft.destination)?;
+        let mut existing_path = folder(&self.env, draft.destination).to_path_buf();
+        let mut missing = false;
+        let mut missing_names = PathBuf::new();
+        let mut chain = Vec::new();
+        for count in 1..=names.len() {
+            let at = Place {
+                folder: draft.destination,
+                names: names[..count].to_vec(),
+            };
+            let identity = if !missing {
+                match native::child_dir(&existing.dir, &names[count - 1]) {
+                    Ok((dir, step)) => {
+                        let id = native::Id::step(&step);
+                        drop(dir);
+                        existing_path.push(names[count - 1].os());
+                        existing = native::directory(&existing_path).map_err(changed)?;
+                        if native::Id::step(existing.steps.last().ok_or(Error::Changed)?) != id
+                            || id.volume != self.root.volume
+                        {
+                            return Err(Error::Changed);
+                        }
+                        guard
+                            .judge_walked(&existing_path, &existing.steps, true)
+                            .map_err(denied)?;
+                        Some(id)
+                    }
+                    Err(Fail::Gone) => {
+                        missing = true;
+                        missing_names.push(names[count - 1].os());
+                        None
+                    }
+                    Err(error) => return Err(changed(error)),
+                }
+            } else {
+                missing_names.push(names[count - 1].os());
+                None
+            };
+            if reserved
+                .aliases
+                .get(&reservation(&at))
+                .is_some_and(|previous| *previous != at)
+            {
+                return Err(Error::InvalidName);
+            }
+            if reserved
+                .directories
+                .get(&at)
+                .is_some_and(|previous| *previous != identity)
+            {
+                return Err(Error::Changed);
+            }
+            chain.push((at, identity));
+        }
+        let mut requested = names.clone();
+        requested.push(original.clone());
+        if reserved.selected.contains(&Place {
+            folder: draft.destination,
+            names: requested,
+        }) {
+            return Err(Error::UnknownEntry);
+        }
+        for suffix in 0..100 {
+            let name = collision_name(original, suffix)?;
+            let mut candidate = names.clone();
+            candidate.push(name.clone());
+            let to = Place {
+                folder: draft.destination,
+                names: candidate,
+            };
+            let mut proposed = missing_names.clone();
+            proposed.push(name.os());
+            guard
+                .judge_absent(&existing_path, &existing.steps, &proposed)
+                .map_err(denied)?;
+            let key = reservation(&to);
+            // A planned directory takes its name at validation time, so no file is reviewed into a name a
+            // directory will hold when the run creates it.
+            if to != **source
+                && !reserved.targets.contains(&key)
+                && !reserved.planned.contains(&key)
+                && !reserved.sources.contains(&key)
+                && (missing || !native::exists(&existing.dir, &name).map_err(changed)?)
+            {
+                return Ok((chain, to));
+            }
+        }
+        Err(Error::Bounds)
     }
     fn root_parent(&self, folder_id: Folder) -> Result<Parent, Error> {
         let parent = native::directory(folder(&self.env, folder_id)).map_err(changed)?;

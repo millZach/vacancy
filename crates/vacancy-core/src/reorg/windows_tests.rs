@@ -797,6 +797,62 @@ fn late_destination_directory_is_skipped_not_unresolved_and_never_blocks_undo() 
 }
 
 #[test]
+fn planned_directories_reserve_their_names_against_file_destinations() {
+    for directory_first in [false, true] {
+        let (_dir, env) = fixture();
+        let a = put(&env, "a.txt");
+        let b = put(&env, "b.txt");
+        let inventory = Inventory::capture(&env, &CancelToken::new()).unwrap();
+        let id = |name: &str| {
+            inventory
+                .entries()
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap()
+                .id
+                .clone()
+        };
+        let file = Draft {
+            entry_id: id("a.txt"),
+            destination: Folder::Documents,
+            directories: vec![],
+            filename: Some("Sorted".into()),
+        };
+        // A case alias of the file name: Windows sees the same name.
+        let nested = Draft {
+            entry_id: id("b.txt"),
+            destination: Folder::Documents,
+            directories: vec!["sorted".into()],
+            filename: None,
+        };
+        let drafts = if directory_first {
+            vec![nested, file]
+        } else {
+            vec![file, nested]
+        };
+        let plan = inventory.validate(&drafts, &CancelToken::new()).unwrap();
+        let review = plan
+            .review()
+            .iter()
+            .find(|mv| mv.entry_id == id("a.txt"))
+            .unwrap();
+        assert!(review.to.ends_with("Sorted (1)"), "{}", review.to);
+        let mut engine = Engine::begin(&env, &journal(&env), plan).unwrap();
+        assert_eq!(engine.run(&CancelToken::new()).unwrap().applied, 2);
+        assert_eq!(
+            fs::read(env.known.documents.join("Sorted (1)")).unwrap(),
+            b"payload:a.txt"
+        );
+        assert_eq!(
+            fs::read(env.known.documents.join("sorted").join("b.txt")).unwrap(),
+            b"payload:b.txt"
+        );
+        assert_eq!(engine.undo(&CancelToken::new()).unwrap().undone, 2);
+        assert!(a.exists() && b.exists());
+    }
+}
+
+#[test]
 fn a_same_size_edit_under_a_future_creation_time_is_still_a_changed_source() {
     use std::os::windows::fs::FileTimesExt;
     use std::time::{Duration, SystemTime};
@@ -818,6 +874,81 @@ fn a_same_size_edit_under_a_future_creation_time_is_still_a_changed_source() {
     assert_eq!(engine.run(&CancelToken::new()).unwrap().applied, 0);
     assert_eq!(fs::read(&source).unwrap(), b"PAYLOAD:A.TXT");
     assert!(!env.known.documents.join("a.txt").exists());
+}
+
+#[test]
+fn invalid_drafts_are_dropped_with_reasons_and_valid_ones_still_move() {
+    let (_dir, env) = fixture();
+    let kept = put(&env, "kept.txt");
+    let repeated = put(&env, "repeated.txt");
+    let changed = put(&env, "changed.txt");
+    let named = put(&env, "named.txt");
+    let inventory = Inventory::capture(&env, &CancelToken::new()).unwrap();
+    let draft = |name: &str, directory: &str| Draft {
+        entry_id: inventory
+            .entries()
+            .iter()
+            .find(|entry| entry.name == name)
+            .map_or_else(|| name.to_string(), |entry| entry.id.clone()),
+        destination: Folder::Documents,
+        directories: vec![directory.into()],
+        filename: None,
+    };
+    fs::write(&changed, b"changed after the inventory, longer").unwrap();
+    let drafts = vec![
+        draft("not-an-inventory-id", "Unknown"),
+        draft("repeated.txt", "First"),
+        draft("kept.txt", "Kept"),
+        draft("repeated.txt", "Second"),
+        draft("changed.txt", "Changed"),
+        draft("named.txt", "NUL"),
+    ];
+    let plan = inventory.validate(&drafts, &CancelToken::new()).unwrap();
+    assert_eq!(plan.review().len(), 1);
+    assert_eq!(plan.review()[0].entry_id, drafts[2].entry_id);
+    let reasons = |index: usize| {
+        plan.dropped()
+            .iter()
+            .filter(|dropped| dropped.entry_id == drafts[index].entry_id)
+            .map(|dropped| dropped.reason.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(plan.dropped().len(), 5);
+    assert_eq!(reasons(0), [Error::UnknownEntry.to_string()]);
+    // A source two drafts disagree about is dropped from both.
+    assert_eq!(reasons(1), vec![Error::UnknownEntry.to_string(); 2]);
+    assert_eq!(reasons(4), [Error::Changed.to_string()]);
+    assert_eq!(reasons(5), [Error::InvalidName.to_string()]);
+    // Only the kept draft's directory is planned.
+    assert_eq!(plan.data.directories.len(), 1);
+    let mut engine = Engine::begin(&env, &journal(&env), plan).unwrap();
+    assert_eq!(engine.run(&CancelToken::new()).unwrap().applied, 1);
+    assert!(env.known.documents.join("Kept").join("kept.txt").exists());
+    assert!(!kept.exists());
+    assert!(repeated.exists() && changed.exists() && named.exists());
+    assert_eq!(fs::read_dir(&env.known.documents).unwrap().count(), 1);
+    assert_eq!(engine.undo(&CancelToken::new()).unwrap().undone, 1);
+    assert!(kept.exists());
+    // With nothing valid left, the batch fails with the first dropped draft's error.
+    let inventory = Inventory::capture(&env, &CancelToken::new()).unwrap();
+    let drafts = [
+        Draft {
+            entry_id: "still-not-an-inventory-id".into(),
+            destination: Folder::Documents,
+            directories: vec![],
+            filename: None,
+        },
+        Draft {
+            entry_id: inventory.entries()[0].id.clone(),
+            destination: Folder::Documents,
+            directories: vec!["x:y".into()],
+            filename: None,
+        },
+    ];
+    assert!(matches!(
+        inventory.validate(&drafts, &CancelToken::new()),
+        Err(Error::UnknownEntry)
+    ));
 }
 
 #[test]
@@ -1141,10 +1272,19 @@ fn proposed_case_alias_directories_are_rejected_before_any_journal_or_mkdir() {
             filename: None,
         })
         .collect::<Vec<_>>();
-    assert!(matches!(
-        inventory.validate(&drafts, &CancelToken::new()),
-        Err(Error::InvalidName)
-    ));
+    // The second draft's directory aliases the first's: it is dropped, and the first is kept.
+    let plan = inventory.validate(&drafts, &CancelToken::new()).unwrap();
+    assert_eq!(plan.review().len(), 1);
+    assert_eq!(plan.review()[0].entry_id, drafts[0].entry_id);
+    assert_eq!(
+        plan.dropped(),
+        [crate::reorg::DroppedDraft {
+            entry_id: drafts[1].entry_id.clone(),
+            reason: Error::InvalidName.to_string(),
+        }]
+    );
+    assert_eq!(plan.data.directories.len(), 1);
+    // Validation alone creates nothing.
     assert!(!env.known.documents.join("Sorted").exists());
     assert!(!journal(&env).exists());
     assert_eq!(fs::read_dir(&env.app_data).unwrap().count(), 0);

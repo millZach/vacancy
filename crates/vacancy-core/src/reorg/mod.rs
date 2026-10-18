@@ -52,6 +52,13 @@ pub struct ReviewedMove {
     pub to: String,
 }
 
+/// A draft validation left out of the plan, and why. Other drafts are still validated and kept.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DroppedDraft {
+    pub entry_id: String,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Status {
     pub run_id: String,

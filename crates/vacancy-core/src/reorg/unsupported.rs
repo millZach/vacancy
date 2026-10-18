@@ -1,4 +1,4 @@
-use super::{Draft, Error, InventoryEntry, ReviewedMove, Status};
+use super::{Draft, DroppedDraft, Error, InventoryEntry, ReviewedMove, Status};
 use crate::{CancelToken, Env};
 use std::path::Path;
 
@@ -30,6 +30,9 @@ impl Inventory {
 }
 impl ValidatedPlan {
     pub fn review(&self) -> &[ReviewedMove] {
+        &[]
+    }
+    pub fn dropped(&self) -> &[DroppedDraft] {
         &[]
     }
 }
