@@ -6,13 +6,22 @@
 
 mod support;
 
+use vacancy_core::tidy;
+use vacancy_core::{CancelToken, Env};
+
+// Tidy up runs only on Windows; these helpers serve the Windows tests below.
+#[cfg(windows)]
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
 use std::time::{SystemTime, UNIX_EPOCH};
-
+#[cfg(windows)]
 use vacancy_core::fixture::{self, Profile};
-use vacancy_core::tidy::{self, TidyKind, TidyProposal};
-use vacancy_core::{CancelToken, Env, Moment, ScannedVolume, scan_for_map_with};
+#[cfg(windows)]
+use vacancy_core::tidy::{TidyKind, TidyProposal};
+#[cfg(windows)]
+use vacancy_core::{Moment, ScannedVolume, scan_for_map_with};
 
+#[cfg(windows)]
 fn moment() -> Moment {
     Moment {
         now: SystemTime::now()
@@ -24,6 +33,7 @@ fn moment() -> Moment {
     }
 }
 
+#[cfg(windows)]
 /// A fixture profile under the build's temp folder, changed by `setup`, then scanned in fixture mode.
 struct Fx {
     _dir: tempfile::TempDir,
@@ -33,6 +43,7 @@ struct Fx {
     scanned: ScannedVolume,
 }
 
+#[cfg(windows)]
 impl Fx {
     fn new() -> Self {
         Self::with(|_| {})
@@ -93,6 +104,7 @@ impl Fx {
     }
 }
 
+#[cfg(windows)]
 fn scan(root: &Path, env: &Env) -> ScannedVolume {
     let figures_root = root.to_path_buf();
     scan_for_map_with(
