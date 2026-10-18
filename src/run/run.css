@@ -241,3 +241,35 @@
   gap: var(--space-4);
   margin-top: 20px;
 }
+
+/* Duplicate files in the confirm dialog: only the extra copies go, one copy of each group stays. */
+.dialog.dup-dialog {
+  width: min(540px, calc(100% - 48px));
+}
+.dup-confirm {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 11px;
+  margin: 4px 0 2px;
+  padding: 13px 14px 4px;
+  border: 1px solid rgba(var(--safe-rgb), 0.35);
+  border-radius: var(--radius-card);
+  background: rgba(var(--safe-rgb), 0.05);
+}
+.dup-confirm > svg {
+  margin-top: 2px;
+  color: var(--color-safe);
+}
+.dup-confirm b {
+  display: block;
+  margin-bottom: 5px;
+  font-size: var(--text-dialog-body);
+  color: var(--color-text);
+}
+.dup-confirm strong {
+  color: var(--color-text);
+  font-weight: 600;
+}
+.dup-confirm p {
+  margin: 0 0 9px;
+}

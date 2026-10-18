@@ -299,3 +299,255 @@
   flex: none;
   animation: spin 0.9s linear infinite;
 }
+
+/* ---------- duplicate files (ticket 09, variant B "Map links"): the tray's row and the duplicates panel ---------- */
+.dup-row .tray-row-title span {
+  font-weight: 600;
+}
+.dup-review-link {
+  font-size: var(--text-xs);
+  color: var(--color-text-2);
+}
+.dup-review-link:hover {
+  color: var(--color-text);
+}
+.keep-reason {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 1px 7px 0 5px;
+  border: 1px solid rgba(var(--safe-rgb), 0.32);
+  border-radius: var(--radius-pill);
+  background: rgba(var(--safe-rgb), 0.06);
+  color: var(--color-safe);
+  font: 600 var(--text-2xs) / 1.45 var(--font-sans);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tray.dup-panel {
+  width: max(var(--tray-w), 452px);
+}
+.dup-filters {
+  padding: 10px var(--space-6) 8px;
+  border-bottom: 1px solid var(--color-line);
+}
+.dup-filters .seg button span {
+  margin-left: 4px;
+  color: var(--color-text-3);
+  font-weight: 500;
+}
+.dup-list {
+  padding: 6px 10px 12px;
+}
+.dup-list > ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.dup-card {
+  display: grid;
+  grid-template-columns: 16px auto minmax(0, 1fr) auto;
+  gap: 11px;
+  align-items: center;
+  padding: 10px 8px;
+  border-radius: var(--radius-card);
+  cursor: pointer;
+}
+.dup-card + .dup-card {
+  box-shadow: inset 0 1px 0 var(--color-line);
+}
+.dup-card:hover {
+  background: var(--color-row-on);
+  box-shadow: none;
+}
+.dup-card.is-picked {
+  background: rgba(var(--neon-rgb), 0.06);
+  box-shadow: inset 0 0 0 1px rgba(var(--neon-rgb), 0.35);
+}
+.dup-card.is-left {
+  opacity: 0.6;
+}
+.dup-copies {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+}
+.dup-copy {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  width: 44px;
+}
+.dup-copy small {
+  max-width: 52px;
+  font-size: 9.5px;
+  color: var(--color-text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* A copy as its file type's icon: Vacancy never makes thumbnails of what is in a file. */
+.dup-icon {
+  position: relative;
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(180deg, #2a313c, #222832);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+  color: var(--color-text-2);
+}
+.dup-icon svg {
+  margin-bottom: 9px;
+}
+.dup-icon.is-gone {
+  color: var(--color-text-3);
+}
+.dup-icon.is-gone::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: repeating-linear-gradient(135deg, rgba(var(--neon-rgb), 0.2) 0 2px, transparent 2px 8px);
+}
+.dup-icon.is-small {
+  width: 30px;
+  height: 30px;
+}
+.dup-icon.is-small svg {
+  margin: 0;
+}
+.dup-icon-tag {
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  bottom: 3px;
+  z-index: 1;
+  padding: 1px 0 0;
+  border-radius: 3px;
+  background: rgba(10, 12, 16, 0.78);
+  font: 700 8.5px / 1.4 var(--font-sans);
+  font-style: normal;
+  letter-spacing: 0.03em;
+  text-align: center;
+  color: var(--color-text);
+  text-transform: uppercase;
+}
+.dup-icon.is-gone .dup-icon-tag {
+  color: var(--color-neon-ink);
+}
+.dup-arrow {
+  margin-top: 16px;
+  color: var(--color-text-3);
+}
+.dup-more {
+  align-self: center;
+  margin: 0 0 14px 2px;
+  font: 600 var(--text-2xs) var(--font-sans);
+  color: var(--color-text-3);
+}
+.dup-text {
+  display: grid;
+  gap: 3px;
+  justify-items: start;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.dup-text:focus-visible {
+  outline: 2px solid var(--color-swipe);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+.dup-text b {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 600 var(--text-ui) var(--font-sans);
+  color: var(--color-text);
+}
+.dup-text b svg {
+  flex: none;
+  color: var(--color-text-3);
+}
+.dup-meta {
+  font-size: var(--text-2xs);
+  color: var(--color-text-3);
+}
+.dup-paths {
+  display: none;
+  width: 100%;
+  min-width: 0;
+}
+.dup-card.is-picked .dup-paths {
+  display: grid;
+  gap: 1px;
+  margin-top: 3px;
+}
+.dup-paths > span {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  gap: 4px;
+  font-size: var(--text-2xs);
+}
+.dup-paths em {
+  font-style: normal;
+  font-weight: 700;
+  color: var(--color-safe);
+}
+.dup-paths em.is-gone {
+  color: var(--color-neon-ink);
+}
+.dup-card.is-left .dup-paths em.is-gone {
+  color: var(--color-text-3);
+}
+.dup-paths code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 400 var(--text-2xs) / 1.45 var(--font-mono);
+  color: var(--color-text-3);
+}
+.dup-size {
+  font: 700 var(--text-sm) var(--font-sans);
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.dup-notes {
+  list-style: none;
+  display: grid;
+  gap: 6px;
+  margin: 12px 8px 2px;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--color-line);
+}
+.dup-notes li {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 6px;
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  color: var(--color-text-3);
+}
+.dup-notes svg {
+  margin-top: 2px;
+}
+@media (max-width: 1180px) {
+  .tray.dup-panel {
+    width: 410px;
+  }
+}

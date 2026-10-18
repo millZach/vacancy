@@ -313,3 +313,55 @@ describe('each drive’s run and summary', () => {
     expect(run(s, ended(E)).locked).toBe(false);
   });
 });
+
+describe('the duplicate search after a scan', () => {
+  const found = {
+    status: 'done' as const,
+    overview: { ...mapOf(C), freeBytes: 1 },
+    proposals: [
+      ...fixtures.windows.proposals,
+      { ...fixtures.windows.proposals[0]!, id: 'duplicates', title: 'Duplicate files', defaultOn: false },
+    ],
+    duplicates: { proposal: 'duplicates', groups: [], folders: ['Pictures'], compared: 2, hardLinked: 0, changed: 0 },
+  };
+
+  it('starts checking when the scan is done, and redraws the map when it ends, keeping the plan', () => {
+    const s = run(start, ...scanned(C, 1));
+    const scan = scanOf(s, C.mountPoint);
+    expect(scan.phase === 'done' && scan.duplicates).toEqual({ phase: 'checking', progress: null });
+    const plan = scan.phase === 'done' ? scan.plan : [];
+
+    const progress = { stage: 'starts' as const, files: 10, done: 3, percent: 4 };
+    const going = run(s, { type: 'dupsProgress', mountPoint: C.mountPoint, run: 1, progress });
+    const g = scanOf(going, C.mountPoint);
+    expect(g.phase === 'done' && g.duplicates).toEqual({ phase: 'checking', progress });
+
+    const ended = run(going, { type: 'dupsEnded', mountPoint: C.mountPoint, run: 1, outcome: found });
+    const e = scanOf(ended, C.mountPoint);
+    expect(e.phase === 'done' && e.overview.freeBytes).toBe(1);
+    expect(e.phase === 'done' && e.proposals.some((p) => p.id === 'duplicates')).toBe(true);
+    expect(e.phase === 'done' && e.plan).toEqual(plan);
+    expect(e.phase === 'done' && e.duplicates.phase).toBe('done');
+  });
+
+  it('ignores a search of an earlier scan, and one that ended after its plan ran', () => {
+    const s = run(start, ...scanned(C, 1), ...scanned(C, 2));
+    expect(run(s, { type: 'dupsEnded', mountPoint: C.mountPoint, run: 1, outcome: found })).toBe(s);
+
+    const ran = run(s, { type: 'runStarted', mountPoint: C.mountPoint, plan: samplePlan });
+    const r = scanOf(ran, C.mountPoint);
+    expect(r.phase === 'done' && r.duplicates.phase).toBe('stopped');
+    expect(run(ran, { type: 'dupsEnded', mountPoint: C.mountPoint, run: 2, outcome: found })).toBe(ran);
+  });
+
+  it('keeps the groups the user unticks, and lets them be ticked again', () => {
+    const s = run(start, ...scanned(C, 1));
+    const off = run(s, { type: 'skipGroup', mountPoint: C.mountPoint, id: 'g3', skipped: true });
+    const o = scanOf(off, C.mountPoint);
+    expect(o.phase === 'done' && o.skippedGroups).toEqual(['g3']);
+    expect(run(off, { type: 'skipGroup', mountPoint: C.mountPoint, id: 'g3', skipped: true })).toBe(off);
+    const on = run(off, { type: 'skipGroup', mountPoint: C.mountPoint, id: 'g3', skipped: false });
+    const n = scanOf(on, C.mountPoint);
+    expect(n.phase === 'done' && n.skippedGroups).toEqual([]);
+  });
+});

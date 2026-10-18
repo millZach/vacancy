@@ -1,11 +1,13 @@
 import { FolderInput, Info, Play, RotateCcw, Signpost, TriangleAlert, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
-import type { RunReport, Skip, StepReport } from '../bridge';
+import type { DuplicatesDone, RunReport, Skip, StepReport } from '../bridge';
 import { formatBytes, formatCount, formatDuration } from '../format';
 import { Legend } from '../map/Legend';
 import { MapView, type TileLook } from '../map/MapView';
 import { layoutAtlas, type AtlasModel, type Leaf, type Rect } from '../map/model';
 import { useSize } from '../map/useSize';
+import { DUPLICATES } from '../plan/duplicates';
+import { KindIcon } from '../plan/KindIcon';
 import { tileOf } from '../plan/totals';
 import { HintActionButton } from '../plan/HintActionButton';
 import { AdviceText } from '../plan/AdviceText';
@@ -44,11 +46,7 @@ export function SummaryMap({ model, report, hot, onHot }: MapProps) {
   const [side, setSide] = useState<'before' | 'after'>('before');
 
   /** What each cleared tile freed, by tile id. */
-  const freed = useMemo(() => {
-    const m = new Map<string, StepReport>();
-    for (const s of report.steps) if (s.freedBytes > 0) m.set(tileOf(s.id), s);
-    return m;
-  }, [report]);
+  const freed = useMemo(() => freedTiles(report), [report]);
   const rects = useMemo(() => layoutAtlas(model, size.w, size.h, null), [model, size.w, size.h]);
 
   const apply = useCallback(
@@ -102,27 +100,27 @@ export function SummaryMap({ model, report, hot, onHot }: MapProps) {
 
   const litSet = useMemo(() => new Set(lit ? lit.split(',') : []), [lit]);
   const afterLook = (l: Leaf, rect: Rect): TileLook => {
-    const s = freed.get(l.id);
-    if (!s) return {};
+    const bytes = freed.get(l.id);
+    if (bytes === undefined) return {};
     const big = rect.w >= 92 && rect.h >= 58;
     const fits = rect.w >= 58 && rect.h >= 30;
     return {
       cls: litSet.has(l.id) ? 'is-vacant is-lit' : 'is-vacant',
-      fill: l.bytes > 0 ? 1 - s.freedBytes / l.bytes : 0,
+      fill: l.bytes > 0 ? 1 - bytes / l.bytes : 0,
       label: fits ? (
         <div className="vacant">
           {big && <span className="vacant-word">Vacant</span>}
-          <span className="vacant-num">{formatBytes(s.freedBytes)}</span>
+          <span className="vacant-num">{formatBytes(bytes)}</span>
           {big && <span className="vacant-was">{l.name}</span>}
         </div>
       ) : undefined,
     };
   };
   const afterStatus = (l: Leaf) => {
-    const s = freed.get(l.id);
-    if (!s) return null;
-    const stayed = Math.max(0, l.bytes - s.freedBytes);
-    return `Vacant now. ${formatBytes(s.freedBytes)} freed${stayed >= 1e6 ? `, ${formatBytes(stayed)} stayed` : ''}.`;
+    const bytes = freed.get(l.id);
+    if (bytes === undefined) return null;
+    const stayed = Math.max(0, l.bytes - bytes);
+    return `Vacant now. ${formatBytes(bytes)} freed${stayed >= 1e6 ? `, ${formatBytes(stayed)} stayed` : ''}.`;
   };
 
   const drag = (e: PointerEvent<HTMLButtonElement>) => {
@@ -204,6 +202,21 @@ export function SummaryMap({ model, report, hot, onHot }: MapProps) {
       </div>
     </>
   );
+}
+
+/**
+ * What each tile the run cleared freed, by tile id: a step's tile, or for duplicate files, each of the folders' tiles
+ * they were deleted from.
+ */
+function freedTiles(r: RunReport): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const s of r.steps) {
+    if (s.freedBytes <= 0) continue;
+    const tiles = s.id === DUPLICATES ? (r.duplicates?.tiles ?? []) : [];
+    if (tiles.length === 0) m.set(tileOf(s.id), s.freedBytes);
+    for (const t of tiles) if (t.freedBytes > 0) m.set(t.id, t.freedBytes);
+  }
+  return m;
 }
 
 interface PanelProps {
@@ -323,6 +336,8 @@ export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onCl
             </div>
           </section>
         )}
+
+        {r.duplicates && <DuplicatesSection d={r.duplicates} onHot={onHot} />}
 
         {cats.length > 0 && (
           <section className="summary-sec">
@@ -461,6 +476,61 @@ export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onCl
         )}
       </div>
     </aside>
+  );
+}
+
+/**
+ * Duplicate files: the extra copies deleted, that one copy of each group stayed where it was, a few groups as they
+ * ended (file-type icons, never thumbnails), and the groups that kept every copy.
+ */
+function DuplicatesSection({ d, onHot }: { d: DuplicatesDone; onHot: (id: string | null) => void }) {
+  const groups = `${formatCount(d.groups)} ${d.groups === 1 ? 'group' : 'groups'}`;
+  return (
+    <section className="summary-sec dup-recap" aria-label="Duplicate files">
+      <h3>Duplicate files</h3>
+      <div className="win" onMouseEnter={() => onHot(tileOf(DUPLICATES))} onMouseLeave={() => onHot(null)}>
+        <span className="win-num">{formatBytes(d.freedBytes)}</span>
+        <span className="win-text">
+          <b>
+            {formatCount(d.copiesDeleted)} extra {d.copiesDeleted === 1 ? 'copy' : 'copies'} deleted
+          </b>
+          <span>One copy of each of the {groups} stays where it was.</span>
+        </span>
+      </div>
+      {d.samples.length > 0 && (
+        <ul className="dup-recap-pairs" aria-label="Sample pairs">
+          {d.samples.map((pair) => (
+            <li key={pair.kept}>
+              <span className="dup-icon is-small" aria-hidden>
+                <KindIcon kind={pair.kind} size={15} />
+              </span>
+              <span>
+                <b title={pair.kept}>{pair.name}</b>
+                <small>
+                  Kept <code title={pair.kept}>{pair.kept}</code>
+                </small>
+                <small>
+                  Deleted {pair.copies > 1 ? `${formatCount(pair.copies)} copies, such as` : ''}{' '}
+                  <code title={pair.removed}>{pair.removed}</code>
+                </small>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {d.keptWhole > 0 && (
+        <p className="summary-note">
+          {d.keptWhole === 1 ? '1 group kept every copy' : `${formatCount(d.keptWhole)} groups kept every copy`}: the
+          copy Vacancy keeps had changed since the scan, so nothing of {d.keptWhole === 1 ? 'it' : 'them'} was deleted.
+        </p>
+      )}
+      {d.skippedGroups > 0 && (
+        <p className="summary-note">
+          You left {d.skippedGroups === 1 ? '1 group' : `${formatCount(d.skippedGroups)} groups`} alone, every copy
+          kept.
+        </p>
+      )}
+    </section>
   );
 }
 

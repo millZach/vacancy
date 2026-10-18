@@ -121,7 +121,18 @@ export function DrivesProvider({ children }: { children: ReactNode }) {
       const run = ++lastRun;
       dispatch({ type: 'scanStarted', mountPoint, run });
       bridge.scan(mountPoint, (update) => dispatch({ type: 'scanUpdate', mountPoint, run, update })).then(
-        (outcome) => dispatch({ type: 'scanEnded', mountPoint, run, outcome, at: Date.now() }),
+        (outcome) => {
+          dispatch({ type: 'scanEnded', mountPoint, run, outcome, at: Date.now() });
+          // The duplicate search starts as soon as the map is up, and never holds it up.
+          if (outcome.status === 'done') {
+            bridge
+              .findDuplicates(mountPoint, (progress) => dispatch({ type: 'dupsProgress', mountPoint, run, progress }))
+              .then(
+                (found) => dispatch({ type: 'dupsEnded', mountPoint, run, outcome: found }),
+                (error: unknown) => dispatch({ type: 'dupsFailed', mountPoint, run, message: errorMessage(error) }),
+              );
+          }
+        },
         (error: unknown) => dispatch({ type: 'scanFailed', mountPoint, run, message: errorMessage(error) }),
       );
     },
@@ -224,6 +235,7 @@ function drivesValue(
       void bridge.cancelScan();
     },
     setInPlan: (id, on) => dispatch({ type: 'plan', mountPoint: session.current, id, on }),
+    setGroupSkipped: (id, skipped) => dispatch({ type: 'skipGroup', mountPoint: session.current, id, skipped }),
     setRunning: (running) => dispatch({ type: 'lock', locked: running }),
     runPlan,
     cancelRun: () => {

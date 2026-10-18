@@ -1,5 +1,8 @@
 import type {
   CategoryTotal,
+  DuplicateProgress,
+  Duplicates,
+  DuplicatesOutcome,
   Overview,
   PlanSummary,
   Proposal,
@@ -45,6 +48,8 @@ export type DriveScan =
     }
   | {
       phase: 'done';
+      /** Which scan this is (see `scanStarted`): the duplicate search of an earlier scan never lands on it. */
+      run: number;
       overview: Overview;
       /** The cleanups proposed for this drive, biggest first. */
       proposals: Proposal[];
@@ -54,7 +59,21 @@ export type DriveScan =
       at: number;
       /** The plan this scan ran, if it ran one. A drive keeps it, and its summary, until it is scanned again. */
       planRun: PlanRun | null;
+      /** The duplicate search that runs after the scan, in the background. */
+      duplicates: DuplicateSearch;
+      /** Duplicate groups the user unticked, by id: every copy of them stays. */
+      skippedGroups: string[];
     }
+  | { phase: 'failed'; message: string };
+
+/**
+ * The duplicate search after a scan: checking (with how far it has got, once it says), done (with the groups it
+ * found, maybe none), stopped (a run started, or the drive went), or failed.
+ */
+export type DuplicateSearch =
+  | { phase: 'checking'; progress: DuplicateProgress | null }
+  | { phase: 'done'; found: Duplicates }
+  | { phase: 'stopped' }
   | { phase: 'failed'; message: string };
 
 /**
@@ -93,6 +112,13 @@ export type Action =
   | { type: 'scanCancelled'; mountPoint: string }
   /** Puts a proposal in this drive's plan, or takes it out. */
   | { type: 'plan'; mountPoint: string; id: string; on: boolean }
+  /** How far the duplicate search of the scan `run` has got. */
+  | { type: 'dupsProgress'; mountPoint: string; run: number; progress: DuplicateProgress }
+  /** The duplicate search of the scan `run` ended: the map and proposals again, with what it found. */
+  | { type: 'dupsEnded'; mountPoint: string; run: number; outcome: DuplicatesOutcome }
+  | { type: 'dupsFailed'; mountPoint: string; run: number; message: string }
+  /** Unticks a duplicate group (every copy stays), or ticks it again. */
+  | { type: 'skipGroup'; mountPoint: string; id: string; skipped: boolean }
   /** The user confirmed the plan and it started: drive switching and scanning wait until it ends. */
   | { type: 'runStarted'; mountPoint: string; plan: PlanSummary }
   /** What the run did since the last batch, in order. */
@@ -188,6 +214,18 @@ function onPlanRun(s: Session, mountPoint: string, change: (run: PlanRun | null)
   return { ...s, scans: { ...s.scans, [mountPoint]: { ...scan, planRun: next } } };
 }
 
+/** Applies `change` to the duplicate search of the drive's scan `run`, while its plan hasn't run. */
+function onSearch(
+  s: Session,
+  mountPoint: string,
+  run: number,
+  change: (scan: Extract<DriveScan, { phase: 'done' }>) => Extract<DriveScan, { phase: 'done' }>,
+): Session {
+  const scan = scanOf(s, mountPoint);
+  if (scan.phase !== 'done' || scan.run !== run || scan.duplicates.phase !== 'checking') return s;
+  return { ...s, scans: { ...s.scans, [mountPoint]: change(scan) } };
+}
+
 /** Applies `change` to the drive's scan only if it is the scan `run` (a later scan, or none, ignores it). */
 function onRun(
   s: Session,
@@ -229,11 +267,14 @@ export function reduce(s: Session, a: Action): Session {
         a.outcome.status === 'done'
           ? {
               phase: 'done',
+              run: a.run,
               overview: a.outcome.overview,
               proposals: a.outcome.proposals,
               plan: a.outcome.proposals.filter((p) => p.defaultOn).map((p) => p.id),
               at: a.at,
               planRun: null,
+              duplicates: { phase: 'checking', progress: null },
+              skippedGroups: [],
             }
           : IDLE,
       );
@@ -254,6 +295,35 @@ export function reduce(s: Session, a: Action): Session {
       const plan = a.on ? [...scan.plan, a.id] : scan.plan.filter((id) => id !== a.id);
       return { ...s, scans: { ...s.scans, [a.mountPoint]: { ...scan, plan } } };
     }
+    case 'dupsProgress':
+      return onSearch(s, a.mountPoint, a.run, (scan) => ({
+        ...scan,
+        duplicates: { phase: 'checking', progress: a.progress },
+      }));
+    case 'dupsEnded':
+      return onSearch(s, a.mountPoint, a.run, (scan) => {
+        // Once its plan has run, a scan's map stays the one the run started from.
+        if (a.outcome.status === 'cancelled' || ranPlan(scan)) return { ...scan, duplicates: { phase: 'stopped' } };
+        const ids = new Set(a.outcome.proposals.map((p) => p.id));
+        return {
+          ...scan,
+          overview: a.outcome.overview,
+          proposals: a.outcome.proposals,
+          plan: scan.plan.filter((id) => ids.has(id)),
+          duplicates: { phase: 'done', found: a.outcome.duplicates },
+        };
+      });
+    case 'dupsFailed':
+      return onSearch(s, a.mountPoint, a.run, (scan) => ({
+        ...scan,
+        duplicates: { phase: 'failed', message: a.message },
+      }));
+    case 'skipGroup': {
+      const scan = scanOf(s, a.mountPoint);
+      if (scan.phase !== 'done' || ranPlan(scan) || scan.skippedGroups.includes(a.id) === a.skipped) return s;
+      const skippedGroups = a.skipped ? [...scan.skippedGroups, a.id] : scan.skippedGroups.filter((g) => g !== a.id);
+      return { ...s, scans: { ...s.scans, [a.mountPoint]: { ...scan, skippedGroups } } };
+    }
     case 'runStarted': {
       if (s.locked || a.plan.mountPoint !== a.mountPoint) return s;
       const next = onPlanRun(s, a.mountPoint, (run) =>
@@ -261,7 +331,14 @@ export function reduce(s: Session, a: Action): Session {
           ? { phase: 'running', plan: a.plan, view: startRun(a.plan), stopping: false }
           : run,
       );
-      return next === s ? s : { ...next, locked: true };
+      if (next === s) return s;
+      // A run stops a duplicate search still reading the drive: the core stops it too.
+      const ran = scanOf(next, a.mountPoint);
+      const scans =
+        ran.phase === 'done' && ran.duplicates.phase === 'checking'
+          ? { ...next.scans, [a.mountPoint]: { ...ran, duplicates: { phase: 'stopped' as const } } }
+          : next.scans;
+      return { ...next, scans, locked: true };
     }
     case 'runEvents':
       return onPlanRun(s, a.mountPoint, (run) =>

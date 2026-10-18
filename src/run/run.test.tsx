@@ -108,7 +108,7 @@ describe('freeing space', () => {
 
     // The tray adds up the proposals; the dialog says what the core planned.
     await userEvent.click(within(tray()).getByRole('button', { name: /^Free 75\.3\sGB$/ }));
-    expect(run.build).toHaveBeenCalledWith('C:\\', fixtures.windows.proposals.filter((p) => p.defaultOn).map((p) => p.id));
+    expect(run.build).toHaveBeenCalledWith('C:\\', fixtures.windows.proposals.filter((p) => p.defaultOn).map((p) => p.id), []);
     const dialog = await screen.findByRole('alertdialog');
     expect(dialog).toHaveAccessibleName(/^Permanently delete 27\.3\sGB\?$/);
     expect(plain(dialog.textContent)).toContain('460,428 items in 67 places will be deleted for good.');

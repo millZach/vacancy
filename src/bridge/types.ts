@@ -30,6 +30,18 @@ import type { SkipKind } from '../bindings/SkipKind';
 import type { StepReport } from '../bindings/StepReport';
 import type { VolumeInfo } from '../bindings/VolumeInfo';
 import type { GuideId } from '../bindings/GuideId';
+import type { DuplicateCopy } from '../bindings/DuplicateCopy';
+import type { DuplicateGroup } from '../bindings/DuplicateGroup';
+import type { DuplicatePair } from '../bindings/DuplicatePair';
+import type { DuplicateProgress } from '../bindings/DuplicateProgress';
+import type { DuplicateStage } from '../bindings/DuplicateStage';
+import type { Duplicates } from '../bindings/Duplicates';
+import type { DuplicatesDone } from '../bindings/DuplicatesDone';
+import type { DuplicatesOutcome } from '../bindings/DuplicatesOutcome';
+import type { FileKind } from '../bindings/FileKind';
+import type { PlannedDuplicates } from '../bindings/PlannedDuplicates';
+import type { PlannedTile } from '../bindings/PlannedTile';
+import type { TileFreed } from '../bindings/TileFreed';
 
 export type {
   AdvisorStatus,
@@ -37,6 +49,15 @@ export type {
   CategoryId,
   CategoryTotal,
   DriveKind,
+  DuplicateCopy,
+  DuplicateGroup,
+  DuplicatePair,
+  DuplicateProgress,
+  DuplicateStage,
+  Duplicates,
+  DuplicatesDone,
+  DuplicatesOutcome,
+  FileKind,
   FullDiskAccess,
   ItemKind,
   LeftForYou,
@@ -47,6 +68,8 @@ export type {
   Overview,
   PlanStep,
   PlanSummary,
+  PlannedDuplicates,
+  PlannedTile,
   Proposal,
   ProposalAction,
   ProposalSource,
@@ -62,6 +85,7 @@ export type {
   Skip,
   SkipKind,
   StepReport,
+  TileFreed,
   VolumeInfo,
 };
 
@@ -103,12 +127,20 @@ export interface Bridge {
   /** Opens a folder tile of a drive's map. */
   browse(mountPoint: string, id: string): Promise<MapFolder>;
   /**
+   * Looks for duplicate files in a drive's last scan, in the background, while the map is in use: reads only the
+   * files that might be copies (to hash them, never to show them), `onProgress` hearing how far it has got about ten
+   * times a second. Resolves with the map and proposals again, now with the "Duplicate files" proposal and its tiles
+   * (one per personal folder holding extra copies) and the groups found; or `{ status: 'cancelled' }` if a new scan,
+   * a run or the drive going away stopped it.
+   */
+  findDuplicates(mountPoint: string, onProgress: (progress: DuplicateProgress) => void): Promise<DuplicatesOutcome>;
+  /**
    * Turns the proposals `ids` of a drive's last scan into a plan, for the confirm dialog: what it deletes, from how
    * many places, step by step. Every place passes the Guard again; the ones it refuses (or finds changed since the
    * scan) are left out of the numbers and listed in `refused`. Rejects if the drive has no scan to plan from (or
    * its scan already ran a plan: scan again first).
    */
-  buildPlan(mountPoint: string, ids: string[]): Promise<PlanSummary>;
+  buildPlan(mountPoint: string, ids: string[], skippedGroups?: string[]): Promise<PlanSummary>;
   /**
    * Runs the plan `planId` of a drive: deletes permanently what it holds, re-checking every place right before it
    * goes. `onEvent` gets the run as it happens: steps starting and finishing, progress about ten times a second,

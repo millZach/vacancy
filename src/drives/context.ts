@@ -42,6 +42,8 @@ export interface ReadyDrives {
   cancelScan: () => void;
   /** Puts a proposal in the plan of the drive on screen, or takes it out. */
   setInPlan: (id: string, on: boolean) => void;
+  /** Unticks a duplicate group of the drive on screen (every copy of it stays), or ticks it again. */
+  setGroupSkipped: (id: string, skipped: boolean) => void;
   /** While a plan runs, switching drives is disabled. `runPlan` sets it; this is for anything else that must hold. */
   setRunning: (running: boolean) => void;
   /**
