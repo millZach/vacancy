@@ -1046,7 +1046,8 @@ mod tests {
 
     #[test]
     fn tidy_journals_live_in_the_app_data_folder_and_in_fixture_mode_the_fixtures() {
-        let root = PathBuf::from(r"D:\tmp\fixture");
+        // Platform-neutral paths: this runs on macOS too, where `join` uses '/'.
+        let root = PathBuf::from("fixture-root");
         let fixture = Mode::Fixture {
             root: root.clone(),
             capacity: 1,
@@ -1058,10 +1059,9 @@ mod tests {
             journals.dir.starts_with(&root),
             "inside the fixture, never the real app data"
         );
-        let real =
-            journals_in(Mode::Real.app_data_with(|| Some(PathBuf::from(r"C:\AppData\Vacancy"))))
-                .unwrap();
-        assert_eq!(real.dir, PathBuf::from(r"C:\AppData\Vacancy\tidy"));
+        let app_data = PathBuf::from("app-data").join("Vacancy");
+        let real = journals_in(Mode::Real.app_data_with(|| Some(app_data.clone()))).unwrap();
+        assert_eq!(real.dir, app_data.join("tidy"));
         assert!(
             journals_in(Mode::Refused("bad".into()).app_data_with(|| panic!("never asked")))
                 .is_none()
