@@ -31,7 +31,7 @@ interface Props {
 
 /** A control the space bar already works: Space presses it rather than pausing the slides. */
 function isControl(target: EventTarget | null): boolean {
-  return target instanceof Element && target.closest('button, a, input, select, textarea, [role="slider"]') !== null;
+  return target instanceof Element && target.closest('button, summary, a, input, select, textarea, [role="slider"]') !== null;
 }
 
 /**
@@ -51,7 +51,8 @@ export function Wrapped({ report, leaving, entering, onHandoff, overlayRef }: Pr
   const [shown, setShown] = useState(0);
   const [paused, setPaused] = useState(false);
   const [hover, setHover] = useState(false);
-  const running = !paused && !hover && !leaving && !entering;
+  const [reading, setReading] = useState(false);
+  const running = !paused && !hover && !reading && !leaving && !entering;
 
   const deck = useRef<HTMLDivElement>(null);
   const section = useRef<HTMLElement>(null);
@@ -76,6 +77,7 @@ export function Wrapped({ report, leaving, entering, onHandoff, overlayRef }: Pr
     }
     const next = Math.max(0, k);
     if (next === target.current) return;
+    setReading(false);
     dir.current = next > target.current ? 1 : -1;
     target.current = next;
     setIndex(next);
@@ -168,8 +170,11 @@ export function Wrapped({ report, leaving, entering, onHandoff, overlayRef }: Pr
             role="group"
             aria-roledescription="slide"
             aria-label={`${shown + 1} of ${slides.length}: ${slide.label}`}
+            tabIndex={slide.id === 'kept' ? 0 : undefined}
             onPointerEnter={() => setHover(true)}
             onPointerLeave={() => setHover(false)}
+            onFocus={() => setReading(true)}
+            onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setReading(false); }}
           >
             {body[slide.id]()}
           </section>

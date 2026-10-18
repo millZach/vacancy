@@ -4,6 +4,7 @@
 //! ```text
 //! cargo run -p vacancy-core --example fixture -- D:\tmp\vacancy-fixture-1
 //! cargo run -p vacancy-core --example fixture -- --bulk 20000 D:\tmp\vacancy-fixture-2
+//! cargo run -p vacancy-core --example fixture -- --advice D:\tmp\vacancy-advice-1
 //! cargo run -p vacancy-core --example fixture -- --list D:\tmp\vacancy-fixture-1 before.tsv
 //! ```
 //!
@@ -19,17 +20,18 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.as_slice() {
         [flag, root, out] if flag == "--list" => list(root, out),
+        [flag, root] if flag == "--advice" => write(root, 0, true),
         [flag, n, root] if flag == "--bulk" => match n.parse() {
-            Ok(n) => write(root, n),
+            Ok(n) => write(root, n, false),
             Err(_) => {
                 eprintln!("--bulk takes a number of files");
                 ExitCode::FAILURE
             }
         },
-        [root] => write(root, 0),
+        [root] => write(root, 0, false),
         _ => {
             eprintln!(
-                "usage: fixture [--bulk <files>] <empty folder> | fixture --list <folder> <out.tsv>"
+                "usage: fixture [--bulk <files> | --advice] <empty folder> | fixture --list <folder> <out.tsv>"
             );
             ExitCode::FAILURE
         }
@@ -55,7 +57,7 @@ fn list(root: &str, out: &str) -> ExitCode {
 }
 
 /// Writes a profile into `root`, with `bulk` more cache files.
-fn write(root: &str, bulk: usize) -> ExitCode {
+fn write(root: &str, bulk: usize, advice: bool) -> ExitCode {
     let root = PathBuf::from(root);
     let home = std::env::home_dir().unwrap_or_default();
     if std::fs::create_dir_all(&root).is_err() {
@@ -66,7 +68,12 @@ fn write(root: &str, bulk: usize) -> ExitCode {
         eprintln!("refused: {e}");
         return ExitCode::FAILURE;
     }
-    match fixture::build_with(&root, bulk) {
+    let profile = if advice {
+        fixture::build_with_advice(&root, bulk)
+    } else {
+        fixture::build_with(&root, bulk)
+    };
+    match profile {
         Ok(p) => {
             println!("fixture profile written to {}", p.root.display());
             println!("  home:              {}", p.home.display());
@@ -82,6 +89,11 @@ fn write(root: &str, bulk: usize) -> ExitCode {
             );
             println!("  node_modules:      {}", p.node_modules.display());
             println!("  store file:        {}", p.store_file.display());
+            if advice {
+                println!(
+                    "  advice: Steam hint (plus Logic instructions on macOS); fixture mode never opens Steam"
+                );
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {

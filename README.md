@@ -9,10 +9,18 @@ Vacancy is in early development. Releases before 1.0 are previews, and each rele
 ## What Vacancy does
 
 - **Maps your drive.** You see where the space goes as a map you can explore.
-- **Proposes cleanups.** Built-in rules find known junk offline: caches, temp files, old installers, build folders, duplicates, and leftovers from Docker, Xcode and package managers. Each proposal shows its size, why it is safe, and how risky it is.
-- **Proposes tidier folders.** If the [Claude Code](https://claude.com/claude-code) CLI or the Codex CLI is installed, Vacancy asks it to explain big folders the rules don't recognize and to suggest a tidier layout for messy folders like Downloads. You need no API key, because your own subscription runs it.
+- **Proposes cleanups.** Built-in rules find known junk offline: caches, temp files, old installers, build folders, and leftovers from Xcode and package managers. Each proposal shows its size, why it is safe, and how risky it is. Duplicate detection is still planned.
+- **AI assistance is deferred.** Claude Code and Codex integrations remain unavailable until Vacancy can enforce metadata-only access. Unknown-folder explanations and AI reorganization are not active features.
 - **Runs only what you approve.** You pick the items and confirm once, then watch the space come back.
 - **Shows what it did.** The run ends with a report: space freed, what was deleted, what was moved, and what was skipped and why.
+
+### Cleanup tools and reminders
+
+Cleanup tools that choose their own targets are advice only. Vacancy does not run Docker pruning, simulator removal, Homebrew cleanup commands, or Windows system cleanup tools, and it does not request administrator permission to run them. Its file executor still acts only on the exact items you approved, with the Guard checked again before deletion.
+
+The current advice covers Steam games with a known last-played date at least six months ago, and the Logic Pro sound library. You can open a game's uninstall screen in Steam, or follow the instructions inside Logic. Selecting advice saves a reminder under **Left for you** in the report; it does not uninstall anything or count as freed space.
+
+Windows cleanup and Delivery Optimization reminders appear when the Windows folder is present in the scan. Known Docker folders offer image and build-cache review; on Mac, Xcode and Homebrew folders offer simulator/runtime review and cleanup-preview instructions. These are passive presence checks, not inventories of unused objects or estimates of recoverable space. Guides start unchecked; selected instructions stay in the recap, highlights and history. Fixed vendor references remain usable from saved history without a new scan; fixture mode never launches host apps or browsers. Steam uninstall still requires the retained scan and the same current volume. Cleaning known user-level package caches or Xcode build folders through an approved file plan is separate from running those tools.
 
 ## What Vacancy never touches
 
@@ -22,8 +30,8 @@ Deleting is permanent: nothing goes to the Trash or the Recycle Bin. These rules
 - **Protected places stay off-limits.** These are system folders, apps, the root of your home folder, cloud-sync folders (iCloud Drive, OneDrive, Dropbox and others), your Photos library, Time Machine, and anything outside the folders Vacancy is allowed to clean. Vacancy shows them as locked, and no setting, rule or AI suggestion can unlock them.
 - **Changed items are skipped.** Before each action, Vacancy checks the item again. It skips anything that changed since the scan, turned into a link, or is in use.
 - **Links are never followed.** Vacancy never follows a symlink or a Windows junction while it scans or deletes, so a link can't lead it into your documents.
-- **The AI only suggests.** Claude Code and Codex never run commands or touch files. Their suggestions go into the plan for you to review like any other item. They see names, sizes, counts and dates, and never what is inside your files. You can turn the AI off.
-- **Moves can be undone.** Vacancy records every folder move before making it, so the report can put things back. Reorganizing never deletes anything.
+- **Metadata-only AI is the acceptance boundary.** Any future integration must send only names, sizes, counts and dates, never file contents. It may propose items for review but cannot execute them. The current integrations stay disabled because this boundary is not enforceable with the available CLIs.
+- **Journaled moves and Undo are planned.** Reorganization is not available yet. Before it can ship, Vacancy must record each move before it happens and let the report put it back without overwriting or deleting files.
 
 ## Download and install
 

@@ -1,0 +1,98 @@
+[
+  {
+    "id": "hint-windows-cleanup",
+    "guideId": "windowsCleanup",
+    "action": { "kind": "windowsCleanupInstructions" },
+    "title": "Review Windows cleanup",
+    "summary": "Let Windows review update leftovers and temporary system files.",
+    "intro": "Windows is present on this scanned drive. No system cleanup candidates were measured.",
+    "steps": [
+      "Open Settings → System → Storage → Cleanup recommendations (Windows 11), or search for Disk Cleanup and select the Windows drive.",
+      "Review the offered categories. Disk Cleanup's Clean up system files can offer Windows Update Cleanup, temporary system files and system error reports. Categories and permissions vary; an absent category is not a finding of zero usage.",
+      "Select only the categories you want, read their descriptions, and confirm in Windows. Keep previous installations if you need rollback. Let Windows manage component-store leftovers; never delete WinSxS by hand."
+    ],
+    "caution": "System error reports may help diagnose failures. Vacancy will not perform this cleanup or request elevation, and records no freed space for it.",
+    "sourceLabel": "Microsoft · Free up drive space in Windows",
+    "sourceUrl": "https://support.microsoft.com/en-us/windows/experience/storage-filemanagement/free-up-drive-space-in-windows"
+  },
+  {
+    "id": "hint-windows-delivery",
+    "guideId": "windowsDelivery",
+    "action": { "kind": "windowsDeliveryInstructions" },
+    "title": "Review Delivery Optimization",
+    "summary": "Use Windows to review its update download cache.",
+    "intro": "This is a Windows review reminder, not a finding that its download cache contains removable files.",
+    "steps": [
+      "Search for Disk Cleanup in Windows and select the Windows drive.",
+      "If Delivery Optimization Files is offered, select it to review the category. Clear other categories you do not want to remove.",
+      "Confirm in Disk Cleanup only if you choose to remove those files. Windows also clears this cache automatically."
+    ],
+    "caution": "Available categories vary. Vacancy will not open or clean the system cache and records no freed space for this reminder.",
+    "sourceLabel": "Microsoft · Delivery Optimization in Windows",
+    "sourceUrl": "https://support.microsoft.com/en-us/windows/deployment/updates-lifecycle/delivery-optimization-in-windows"
+  },
+  {
+    "id": "hint-docker-images",
+    "guideId": "dockerImages",
+    "action": { "kind": "dockerImagesInstructions" },
+    "title": "Review Docker images",
+    "summary": "Choose images you no longer need in Docker Desktop.",
+    "intro": "A known Docker app or data folder was found. Vacancy has not queried a daemon, checked container usage or established that any image is unused.",
+    "steps": [
+      "Open Docker Desktop → Images → Local. If Docker Desktop is unavailable or not running, return when you can review your local images.",
+      "Review image details and associated containers. An old creation date does not show whether you still need an image.",
+      "Use Docker Desktop's removal control only for images you recognize and choose to remove. Avoid blanket prune commands when reviewing individual images."
+    ],
+    "caution": "Images may need to be pulled or built again. Vacancy never modifies Docker's disk image, volumes or containers, and records no freed space for this reminder.",
+    "sourceLabel": "Docker · Images view",
+    "sourceUrl": "https://docs.docker.com/desktop/use-desktop/images/"
+  },
+  {
+    "id": "hint-docker-cache",
+    "guideId": "dockerCache",
+    "action": { "kind": "dockerCacheInstructions" },
+    "title": "Review Docker build cache",
+    "summary": "Let your Docker builder manage cache retention.",
+    "intro": "A known Docker app or data folder was found. Cache usage and the active builder have not been queried.",
+    "steps": [
+      "Read Docker's build garbage-collection guide for the builder and driver you use.",
+      "For the default docker driver in Docker Desktop, review Settings → Docker Engine and its builder garbage-collection settings. Other drivers use BuildKit configuration; check the guide before changing them.",
+      "Choose retention that suits your builds and use Docker's supported controls yourself if you decide to change it. Do not remove Docker's data folders manually."
+    ],
+    "caution": "Removing build cache can slow later builds. Vacancy runs no Docker commands and records no freed space for this reminder.",
+    "sourceLabel": "Docker · Build garbage collection",
+    "sourceUrl": "https://docs.docker.com/build/cache/garbage-collection/"
+  },
+  {
+    "id": "hint-xcode-components",
+    "guideId": "xcode",
+    "action": { "kind": "xcodeInstructions" },
+    "title": "Review Xcode simulators and runtimes",
+    "summary": "Review unavailable devices and the runtimes you still test.",
+    "intro": "A known Xcode app or developer folder was found. Vacancy has not inventoried devices or inferred that an older runtime is unused.",
+    "steps": [
+      "In Xcode 27, choose Xcode → Open Developer Tool → Device Hub (or Manage Devices from the run destination menu). In earlier versions, choose Window → Devices and Simulators → Simulators. Review unavailable devices and their required runtimes.",
+      "For a simulator you choose to remove, Control-click it in Device Hub and choose Remove. In the older Devices and Simulators window, use Delete. Read the tool's confirmation and preserve any test apps and data you still need.",
+      "Open Xcode → Settings → Components (Platforms in some versions). Review installed simulator runtimes against the OS versions your projects still test, and use Xcode's removal control only for runtimes you choose to remove."
+    ],
+    "caution": "An unavailable device may only need its runtime reinstalled. Age alone does not establish disuse. Vacancy runs no simctl command and records no freed space for this reminder.",
+    "sourceLabel": "Apple · Xcode components and simulator devices",
+    "sourceUrl": "https://developer.apple.com/documentation/xcode/downloading-and-installing-additional-xcode-components"
+  },
+  {
+    "id": "hint-homebrew-cleanup",
+    "guideId": "homebrew",
+    "action": { "kind": "homebrewInstructions" },
+    "title": "Preview Homebrew cleanup",
+    "summary": "Review Homebrew's own preview before choosing cleanup.",
+    "intro": "A known Homebrew installation or download-cache folder was found. Homebrew has not been run to check its current cleanup candidates.",
+    "steps": [
+      "In your own terminal, run brew cleanup --dry-run to preview Homebrew's cleanup candidates without removing them.",
+      "Read the preview and Homebrew's cleanup documentation. Cleanup can cover stale locks, old downloads and older installed versions; it is broader than Vacancy's downloaded-cache file rule.",
+      "If you choose to proceed, run brew cleanup yourself through Homebrew. Review a new dry run if packages or files have changed since the preview."
+    ],
+    "caution": "The preview is not a frozen file plan or a measured saving. Vacancy never runs Homebrew and records no freed space for this reminder.",
+    "sourceLabel": "Homebrew · cleanup manual",
+    "sourceUrl": "https://docs.brew.sh/Manpage#cleanup-options-formulacask-"
+  }
+]
