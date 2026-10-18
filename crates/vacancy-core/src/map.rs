@@ -15,9 +15,9 @@ use ts_rs::TS;
 use crate::categorize::{
     CHECK_EVERY, Categories, CategoryId, Env, Item, ItemRef, Platform, categorize_until,
 };
-use crate::rules::{Moment, Proposal, Proposals, propose_until};
+use crate::rules::{Moment, Proposal, Proposals, Tile, propose_until};
 use crate::scan::{CancelToken, ScanError, ScanOptions, ScanProgress, scan};
-use crate::snapshot::{DirFlags, RootKind, Snapshot, UnixTime};
+use crate::snapshot::{DirFlags, FileId, RootKind, Snapshot, UnixTime};
 use crate::text::group_digits;
 use crate::volume::{DriveKind, VolumeInfo, volume_info};
 
@@ -245,6 +245,39 @@ pub struct ScannedVolume {
     pub overview: Overview,
 }
 
+impl ScannedVolume {
+    /// Carves the categories again for the proposals as they are now and redraws the overview against the same
+    /// drive figures: after the duplicate finder adds its proposal, whose tiles come out of the folders they are in.
+    pub(crate) fn reshape(&mut self) {
+        let tiles = self.proposals.tiles();
+        let claims: Vec<(CategoryId, &[ItemRef])> =
+            tiles.iter().map(|t| (t.category, t.targets)).collect();
+        let carved = self.categories.recarve(&self.snapshot, &claims, &|| false);
+        debug_assert!(carved, "carving that is never stopped finishes");
+        self.overview = overview(
+            &self.snapshot,
+            &self.categories,
+            &self.proposals,
+            self.overview.volume.clone(),
+        );
+    }
+}
+
+/// The id of the overview tile a kept file is drawn in, as [`overview`] names tiles: its item's. The tile may have
+/// been folded into its category's "smaller items".
+pub(crate) fn tile_holding(
+    snapshot: &Snapshot,
+    categories: &Categories,
+    file: FileId,
+) -> Option<String> {
+    Some(match categories.item_holding_file(snapshot, file)? {
+        ItemRef::Dir(d) => format!("d{}", d.index()),
+        ItemRef::File(f) => format!("f{}", f.index()),
+        ItemRef::FilesIn(d) => format!("a{}", d.index()),
+        ItemRef::Proposal(_) => return None,
+    })
+}
+
 /// Scans a volume for the map: [`scan`], then [`categorize`](crate::categorize) with `env`, then the rules'
 /// [proposals](crate::propose) as of `moment`, then [`overview`] against the volume's own numbers, read when the
 /// scan finishes.
@@ -335,12 +368,9 @@ fn build_map_with(
         }
         proposals.append_hint(&hint);
     }
-    let claims: Vec<(CategoryId, &[ItemRef])> = proposals
-        .list()
-        .iter()
-        .enumerate()
-        .map(|(i, p)| (p.category, proposals.targets(i)))
-        .collect();
+    let tiles = proposals.tiles();
+    let claims: Vec<(CategoryId, &[ItemRef])> =
+        tiles.iter().map(|t| (t.category, t.targets)).collect();
     let categories = categories.carve(snapshot, &claims, stop)?;
     let scanned = snapshot.stats().bytes;
     let info = figures(snapshot).unwrap_or_else(|| VolumeInfo {
@@ -397,13 +427,14 @@ fn overview_until(
     unreadable.sort_by_key(|p| (Path::new(p).components().count(), p.clone()));
     unreadable.truncate(UNREADABLE_SAMPLES);
     let mac = categories.platform() == Platform::MacOs;
+    let tiles = proposals.tiles();
 
     let mut list: Vec<MapCategory> = Vec::new();
     for cat in categories.list() {
         let mut items = fold(
             snapshot,
             categories,
-            proposals,
+            (proposals, &tiles),
             &cat.items,
             CATEGORY_ITEMS,
             &format!("more:{:?}", cat.id).to_ascii_lowercase(),
@@ -461,10 +492,11 @@ pub fn browse(
     let item = categories
         .item_of(dir)
         .ok_or_else(|| MapError::NoSuchFolder(id.to_owned()))?;
+    let none = Proposals::default();
     let children = fold(
         snapshot,
         categories,
-        &Proposals::default(),
+        (&none, &[]),
         &categories.contents(snapshot, dir),
         FOLDER_ITEMS,
         &format!("more:{id}"),
@@ -472,10 +504,8 @@ pub fn browse(
     )
     .unwrap_or_default();
     Ok(MapFolder {
-        item: map_item(snapshot, categories, &Proposals::default(), &item, &|| {
-            false
-        })
-        .ok_or_else(|| MapError::NoSuchFolder(id.to_owned()))?,
+        item: map_item(snapshot, categories, (&none, &[]), &item, &|| false)
+            .ok_or_else(|| MapError::NoSuchFolder(id.to_owned()))?,
         category: categories.category_of(dir),
         children,
     })
@@ -511,7 +541,7 @@ pub fn scan_update(progress: &ScanProgress<'_>, preview: Option<&Categories>) ->
 fn fold(
     snapshot: &Snapshot,
     categories: &Categories,
-    proposals: &Proposals,
+    proposals: Shown<'_>,
     items: &[Item],
     keep: usize,
     more_id: &str,
@@ -564,7 +594,7 @@ fn fold(
 fn map_item(
     snapshot: &Snapshot,
     categories: &Categories,
-    proposals: &Proposals,
+    (proposals, tiles): Shown<'_>,
     item: &Item,
     stop: &dyn Fn() -> bool,
 ) -> Option<MapItem> {
@@ -621,18 +651,28 @@ fn map_item(
                 proposal: None,
             }
         }
-        ItemRef::Proposal(p) => {
-            let proposal = proposals.list().get(p)?;
-            let targets = proposals.targets(p);
-            // One place has a path; a proposal gathered from many has none.
-            let path = match targets {
-                [ItemRef::Dir(d)] => snapshot.path(*d).display().to_string(),
-                [ItemRef::File(f)] => snapshot.file_path(*f).display().to_string(),
+        ItemRef::Proposal(t) => {
+            let tile = tiles.get(t)?;
+            let proposal = proposals.list().get(tile.proposal)?;
+            let targets = tile.targets;
+            // One place has a path; a proposal gathered from many has none, and one tile of several is its folder.
+            let path = match (tile.part, targets) {
+                (Some((d, _)), _) => snapshot.path(d).display().to_string(),
+                (None, [ItemRef::Dir(d)]) => snapshot.path(*d).display().to_string(),
+                (None, [ItemRef::File(f)]) => snapshot.file_path(*f).display().to_string(),
                 _ => String::new(),
             };
+            let (id, name, note) = match tile.part {
+                Some((d, note)) => (
+                    format!("p:{}:d{}", proposal.id, d.index()),
+                    "Duplicate copies".to_owned(),
+                    Some(note.to_owned()),
+                ),
+                None => (format!("p:{}", proposal.id), proposal.title.clone(), None),
+            };
             MapItem {
-                id: format!("p:{}", proposal.id),
-                name: proposal.title.clone(),
+                id,
+                name,
                 path,
                 bytes: item.bytes,
                 files: item.files,
@@ -640,12 +680,15 @@ fn map_item(
                 last_used,
                 kind: ItemKind::Proposal,
                 browsable: false,
-                note: None,
+                note,
                 proposal: Some(proposal.id.clone()),
             }
         }
     })
 }
+
+/// The proposals a map is drawn with, and their tiles ([`Proposals::tiles`]).
+type Shown<'a> = (&'a Proposals, &'a [Tile<'a>]);
 
 fn hidden_item(bytes: u64, unreadable: u64, samples: &[String], mac: bool) -> MapItem {
     let examples = samples

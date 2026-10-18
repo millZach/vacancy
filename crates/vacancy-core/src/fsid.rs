@@ -240,6 +240,40 @@ fn read_bounded_impl(
     String::from_utf8(bytes).map_err(|_| io::Error::other("manifest is not UTF-8"))
 }
 
+/// Opens the file at `path` to read it, for the duplicate finder: its volume root, then each folder below opened by
+/// name inside the one before and held, never through a link, and the file itself opened relative to its held
+/// folder without following it. It must be the file the scan recorded (`expected`, its whole identity) and an
+/// ordinary file. On Windows the handle also asks that reading through it leave the file's last-access time alone,
+/// where the file allows that, so hashing a file never makes it look just used to the rules.
+///
+/// Opening a file by its identity is what makes reading it safe to judge by: a folder on the way swapped for a link,
+/// or the file replaced, leads to another identity, and the file is refused.
+pub(crate) fn open_scanned(path: &Path, expected: Identity) -> std::io::Result<std::fs::File> {
+    let refused = || std::io::Error::other("the file is linked, replaced, or can't be opened");
+    let (dir, _root, rest) = sys::root(path).ok_or_else(refused)?;
+    let parts: Vec<_> = path.components().collect();
+    let names = parts[parts.len() - rest..]
+        .iter()
+        .map(|part| match part {
+            Component::Normal(name) => Some(*name),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(refused)?;
+    let (leaf, parents) = names.split_last().ok_or_else(refused)?;
+    let mut pins = vec![dir];
+    for name in parents {
+        let (_, opened) = sys::read_directory(pins.last().unwrap(), name).ok_or_else(refused)?;
+        pins.push(opened);
+    }
+    let (file, identity) =
+        sys::read_file_quietly(pins.last().unwrap(), leaf).ok_or_else(refused)?;
+    if identity != expected || !file.metadata()?.is_file() {
+        return Err(refused());
+    }
+    Ok(file)
+}
+
 /// Fixture proof primitive: create a fresh directory under retained, no-follow parents and apply a mutation
 /// only to the handle returned by FILE_CREATE. An existing or redirected name is never opened for mutation.
 #[cfg(windows)]
@@ -655,6 +689,40 @@ mod sys {
         Some((file, identity))
     }
 
+    /// [`read_file`], asking that reads through the handle leave the last-access time alone (`SetFileTime` with
+    /// all ones), where the file lets its attributes be written; otherwise a plain [`read_file`].
+    pub(super) fn read_file_quietly(dir: &Dir, name: &OsStr) -> Option<(std::fs::File, Identity)> {
+        use std::os::windows::fs::MetadataExt;
+        use std::os::windows::io::FromRawHandle;
+        use windows_sys::Win32::Foundation::FILETIME;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_READ_DATA, FILE_WRITE_ATTRIBUTES, SetFileTime,
+        };
+        let Some(handle) = open_in_with(
+            dir,
+            name,
+            FILE_READ_DATA | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_READ,
+        ) else {
+            return read_file(dir, name);
+        };
+        let keep = FILETIME {
+            dwLowDateTime: u32::MAX,
+            dwHighDateTime: u32::MAX,
+        };
+        // SAFETY: the handle is open with FILE_WRITE_ATTRIBUTES; `keep` outlives the call; null leaves a time alone.
+        unsafe { SetFileTime(handle.0, ptr::null(), &keep, ptr::null()) };
+        let identity = id_of(&handle)?;
+        let raw = handle.0;
+        std::mem::forget(handle);
+        // SAFETY: ownership of the fresh NtOpenFile handle is transferred exactly once to File.
+        let file = unsafe { std::fs::File::from_raw_handle(raw) };
+        if file.metadata().ok()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return None;
+        }
+        Some((file, identity))
+    }
+
     pub(super) fn create_directory(dir: &Dir, name: &OsStr) -> Option<(std::fs::File, Identity)> {
         use std::os::windows::io::FromRawHandle;
         use windows_sys::Wdk::Storage::FileSystem::{FILE_CREATE, NtCreateFile};
@@ -909,6 +977,12 @@ mod sys {
         Some((file, identity))
     }
 
+    /// [`read_file`]: POSIX has no way to read a file without touching its access time short of `O_NOATIME`, which
+    /// macOS lacks; reading never changes the modified or change times the executor goes by.
+    pub(super) fn read_file_quietly(dir: &Dir, name: &OsStr) -> Option<(std::fs::File, Identity)> {
+        read_file(dir, name)
+    }
+
     pub(super) fn read_directory(dir: &Dir, name: &OsStr) -> Option<(Step, Dir)> {
         let (step, dir) = step(dir, name, true)?;
         Some((step, dir?))
@@ -1021,6 +1095,13 @@ mod sys {
     }
 
     pub(super) fn read_file(_dir: &Dir, _name: &OsStr) -> Option<(std::fs::File, super::Identity)> {
+        None
+    }
+
+    pub(super) fn read_file_quietly(
+        _dir: &Dir,
+        _name: &OsStr,
+    ) -> Option<(std::fs::File, super::Identity)> {
         None
     }
 

@@ -169,6 +169,65 @@ pub struct Reorganized {
     pub moved_items: u64,
 }
 
+/// What a run did to duplicate files: the extra copies it deleted, and the one copy of each group that stayed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DuplicatesDone {
+    /// Groups in the plan.
+    #[ts(type = "number")]
+    pub groups: u64,
+    /// Groups that lost at least one extra copy. One copy of every group stayed.
+    #[ts(type = "number")]
+    pub cleared_groups: u64,
+    /// Groups left whole because the copy being kept had changed or gone since the scan.
+    #[ts(type = "number")]
+    pub kept_whole: u64,
+    /// Groups the user unticked: every copy stayed.
+    #[ts(type = "number")]
+    pub skipped_groups: u64,
+    /// Extra copies deleted.
+    #[ts(type = "number")]
+    pub copies_deleted: u64,
+    /// What deleting them freed.
+    #[ts(type = "number")]
+    pub freed_bytes: u64,
+    /// A few groups as they ended: the copy kept and a copy deleted.
+    pub samples: Vec<DuplicatePair>,
+    /// What each of the duplicates' map tiles had planned and freed.
+    pub tiles: Vec<TileFreed>,
+}
+
+/// A duplicate group after the run: the copy that stayed, and one that went.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct DuplicatePair {
+    pub kind: crate::duplicates::FileKind,
+    /// The kept copy's name.
+    pub name: String,
+    /// Where the kept copy is.
+    pub kept: String,
+    /// Where a deleted copy was.
+    pub removed: String,
+    /// Extra copies of it deleted.
+    #[ts(type = "number")]
+    pub copies: u64,
+}
+
+/// What one map tile had planned, and what the run freed from it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TileFreed {
+    /// The tile's id on the map.
+    pub id: String,
+    #[ts(type = "number")]
+    pub planned_bytes: u64,
+    #[ts(type = "number")]
+    pub freed_bytes: u64,
+}
+
 /// What a run did. See the module docs.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -231,6 +290,11 @@ pub struct RunReport {
     /// Folders reorganized, in the plan's order.
     #[serde(default)]
     pub reorganized: Vec<Reorganized>,
+    /// The duplicate files the run cleared, if the plan had them: one copy of each group stayed. Absent in older
+    /// history.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub duplicates: Option<DuplicatesDone>,
     /// The map the run started from: the scan's overview, with each category's name and size before the run. The
     /// summary draws its before/after map from it.
     pub map: Overview,
@@ -435,6 +499,7 @@ mod tests {
                 hint_action: None,
             }],
             reorganized: Vec::new(),
+            duplicates: None,
             map: map(),
         }
     }

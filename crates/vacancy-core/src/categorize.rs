@@ -23,6 +23,7 @@ use crate::snapshot::{DirFlags, DirId, FileId, Markers, RootKind, Snapshot, Unix
 mod catalog;
 mod env;
 
+pub(crate) use env::sync_provider;
 pub use env::{CloudRoot, Env, KnownFolders, Platform};
 
 /// The categories, in the order the map lists them when sizes tie.
@@ -313,6 +314,48 @@ impl Categories {
         claims: &[Claim<'_>],
         stop: &dyn Fn() -> bool,
     ) -> Option<Self> {
+        self.recarve(snapshot, claims, stop).then_some(self)
+    }
+
+    /// [`carve`](Self::carve) in place, again: what was carved before is put back first, so new claims (the
+    /// duplicate finder's, once it is done) are carved as if they had been there from the start. `false`, with
+    /// nothing changed, if `stop` says so.
+    pub(crate) fn recarve(
+        &mut self,
+        snapshot: &Snapshot,
+        claims: &[Claim<'_>],
+        stop: &dyn Fn() -> bool,
+    ) -> bool {
+        let Some(carve) = self.carved(snapshot, claims, stop) else {
+            return false;
+        };
+        let Some(built) = build_items(
+            snapshot,
+            &self.node,
+            &self.file_rules,
+            Some((&carve, claims)),
+            stop,
+        ) else {
+            return false;
+        };
+        let names: Vec<(String, String)> = self
+            .list
+            .iter()
+            .map(|c| (c.name.clone(), c.blurb.clone()))
+            .collect();
+        self.list = finish_list(built.items, |id, _| names[id.index()].clone());
+        self.residual = built.residual;
+        self.carve = Some(carve);
+        true
+    }
+
+    /// What each claim takes, by place, with every folder inside a taken one taken too.
+    fn carved(
+        &self,
+        snapshot: &Snapshot,
+        claims: &[Claim<'_>],
+        stop: &dyn Fn() -> bool,
+    ) -> Option<Carve> {
         let mut carve = Carve {
             dir: vec![0; snapshot.dir_count()],
             ..Carve::default()
@@ -343,22 +386,33 @@ impl Categories {
                 carve.dir[dir.index()] = carve.dir[parent.index()];
             }
         }
-        let built = build_items(
-            snapshot,
-            &self.node,
-            &self.file_rules,
-            Some((&carve, claims)),
-            stop,
-        )?;
-        let names: Vec<(String, String)> = self
-            .list
-            .iter()
-            .map(|c| (c.name.clone(), c.blurb.clone()))
-            .collect();
-        self.list = finish_list(built.items, |id, _| names[id.index()].clone());
-        self.residual = built.residual;
-        self.carve = Some(carve);
-        Some(self)
+        Some(carve)
+    }
+
+    /// The item a kept file is part of on the map: the folder at the top of its item, its folder's loose files
+    /// when that folder is a container, or the file itself when a catalog rule names it. `None` if a proposal takes
+    /// it.
+    pub(crate) fn item_holding_file(&self, snapshot: &Snapshot, file: FileId) -> Option<ItemRef> {
+        if self.taken_file(file) {
+            return None;
+        }
+        if self.file_rules.contains_key(&file) {
+            return Some(ItemRef::File(file));
+        }
+        let mut dir = snapshot.file(file).parent;
+        if self.taken_dir(dir) {
+            return None;
+        }
+        if self.node[dir.index()].container {
+            return Some(ItemRef::FilesIn(dir));
+        }
+        loop {
+            let parent = snapshot.parent(dir);
+            if self.node[dir.index()].item_root || parent.is_none() {
+                return Some(ItemRef::Dir(dir));
+            }
+            dir = parent?;
+        }
     }
 
     fn taken_dir(&self, dir: DirId) -> bool {
