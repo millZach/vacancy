@@ -426,7 +426,7 @@ describe('proposals and the plan', () => {
     expect(freed()).toBe('75.3 GB');
 
     // Everything out: nothing to free.
-    for (const p of fixtures.windows.proposals) await userEvent.click(row(p.title));
+    for (const p of fixtures.windows.proposals.filter((p) => p.action === 'delete')) await userEvent.click(row(p.title));
     expect(within(tray()).getByRole('button', { name: 'Nothing selected yet' })).toBeDisabled();
     expect(freed()).toBe('0 B');
   });

@@ -403,6 +403,7 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
       {planning && (
         <PlanTray
           key={overview.volume.mountPoint}
+          mountPoint={overview.volume.mountPoint}
           proposals={proposals}
           plan={plan}
           agent={agent}

@@ -764,6 +764,7 @@ fn apply_with_check(
                         removal.reason
                     )),
                     action: ProposalAction::Delete,
+                    hint_action: None,
                     regenerable: false,
                     sample_paths: vec![path.to_string_lossy().into()],
                     default_on: false,

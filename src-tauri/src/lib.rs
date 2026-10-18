@@ -68,6 +68,52 @@ impl Mode {
         }
     }
 
+    /// Only the retained scan supplies an action. Refuse fixtures before even consulting host-side closures;
+    /// saved report JSON is deliberately not an authority to open an app.
+    fn open_hint_with(
+        &self,
+        mount_point: &str,
+        lookup: impl FnOnce() -> Option<(String, vacancy_core::hints::HintAction)>,
+        volumes: impl FnOnce() -> Result<Vec<VolumeInfo>, String>,
+        launch: impl FnOnce(u32) -> Result<(), String>,
+    ) -> Result<(), String> {
+        if !matches!(self, Mode::Real) {
+            return Err("Steam can't be opened from fixture mode. No app was launched.".into());
+        }
+        let (expected_volume, action) = lookup().ok_or(
+            "This advice needs a current scan. Scan this drive again before opening Steam.",
+        )?;
+        let vacancy_core::hints::HintAction::SteamUninstall { app_id } = action else {
+            return Err("This advice has local instructions and does not open an app.".into());
+        };
+        if app_id == 0 {
+            return Err("This Steam advice is not valid. Scan this drive again.".into());
+        }
+        let current = volumes()?.into_iter().find(|v| v.mount_point == mount_point)
+            .ok_or("This drive is no longer available. Connect it and scan again before opening Steam.")?;
+        if expected_volume.is_empty() || current.id.is_empty() || current.id != expected_volume {
+            return Err(
+                "The drive changed since this scan. Scan it again before opening Steam.".into(),
+            );
+        }
+        launch(app_id)
+    }
+
+    /// Vendor documentation is independent of disk state and stays useful from history after restart.
+    /// Only a closed compiled guide identity is accepted; fixture modes refuse before host dispatch.
+    fn open_guide_with(
+        &self,
+        guide: vacancy_core::hints::GuideId,
+        launch: impl FnOnce(vacancy_core::hints::HintAction) -> Result<(), String>,
+    ) -> Result<(), String> {
+        if !matches!(self, Mode::Real) {
+            return Err(
+                "Vendor references can't be opened from fixture mode. No app was launched.".into(),
+            );
+        }
+        launch(guide.action())
+    }
+
     /// The mode `VACANCY_FIXTURE_ROOT` asks for, its folder checked by `fixture::check_root`.
     fn from_env() -> Self {
         let Some(root) = std::env::var_os(fixture::ROOT_VAR) else {
@@ -359,6 +405,42 @@ async fn open_full_disk_access_settings() -> Result<(), String> {
     permissions::open_full_disk_access_settings().map_err(|e| e.to_string())
 }
 
+/// Opens only Steam's review screen for a typed hint retained by the current scan. No URL or arguments arrive
+/// from the frontend; stale history needs a new scan, and fixture modes never inspect or launch host apps.
+#[tauri::command]
+async fn open_hint(mount_point: String, proposal_id: String, app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = app.state::<Session>();
+        session.mode.open_hint_with(
+            &mount_point,
+            || {
+                session.scans.with_last(&mount_point, |last| {
+                    let scanned = last?;
+                    let action = scanned.volume.proposals.hint_action(&proposal_id)?.clone();
+                    Some((scanned.volume.overview.volume.id.clone(), action))
+                })
+            },
+            || vacancy_core::list_volumes().map_err(|e| e.to_string()),
+            |app_id| vacancy_core::hints::open_steam_uninstall(app_id).map_err(|e| e.to_string()),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// A fixed vendor reference needs no new scan. No URL, executable, command or filesystem path is accepted.
+#[tauri::command]
+async fn open_guide(guide: vacancy_core::hints::GuideId, app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = app.state::<Session>();
+        session.mode.open_guide_with(guide, |action| {
+            vacancy_core::hints::open_external_hint(&action).map_err(|e| e.to_string())
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Scans a volume, read-only, streaming the HUD's numbers to `on_update`, and returns the overview map with the
 /// cleanups proposed for it (or "cancelled"). The map and the proposals' targets are kept as this drive's, beside
 /// other drives'. A scan already running, on any drive, is cancelled first.
@@ -603,6 +685,8 @@ pub fn run() {
             forget_drive,
             full_disk_access,
             open_full_disk_access_settings,
+            open_hint,
+            open_guide,
             scan_volume,
             cancel_scan,
             browse,
@@ -639,12 +723,207 @@ mod tests {
         }
     }
 
+    fn hint_volume(id: &str) -> VolumeInfo {
+        VolumeInfo {
+            id: id.into(),
+            name: "Fixture volume".into(),
+            mount_point: C.into(),
+            kind: vacancy_core::DriveKind::Internal,
+            system: false,
+            total_bytes: 1000,
+            used_bytes: 500,
+            free_bytes: 500,
+        }
+    }
+
     #[test]
     fn real_mode_returns_the_read_only_discovery_report() {
         let expected = AdvisorStatus::fixture(Vec::new());
         let returned = Mode::Real.advisor_status_with(|| expected.clone());
         assert_eq!(returned, expected);
         assert!(!returned.enabled);
+    }
+
+    #[test]
+    fn hint_fixture_modes_refuse_before_any_lookup_or_launch() {
+        for mode in [
+            Mode::Fixture {
+                root: PathBuf::from("unused"),
+                capacity: 0,
+            },
+            Mode::Refused("invalid".into()),
+        ] {
+            let result = mode.open_hint_with(
+                C,
+                || panic!("no scan/host lookup"),
+                || panic!("no volume lookup"),
+                |_| panic!("no launcher"),
+            );
+            assert!(result.unwrap_err().contains("fixture mode"));
+        }
+    }
+
+    #[test]
+    fn hint_opener_dispatches_only_the_trusted_nonzero_id_on_the_same_volume() {
+        use vacancy_core::hints::HintAction;
+        let mut called = false;
+        Mode::Real
+            .open_hint_with(
+                C,
+                || Some(("volume-a".into(), HintAction::SteamUninstall { app_id: 42 })),
+                || Ok(vec![hint_volume("volume-a")]),
+                |app_id| {
+                    called = true;
+                    assert_eq!(
+                        HintAction::SteamUninstall { app_id }.steam_uri().as_deref(),
+                        Some("steam://uninstall/42")
+                    );
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(called, "positive fake dispatch must actually occur");
+        for action in [
+            HintAction::SteamUninstall { app_id: 0 },
+            HintAction::LogicInstructions,
+        ] {
+            assert!(
+                Mode::Real
+                    .open_hint_with(
+                        C,
+                        || Some(("volume-a".into(), action)),
+                        || panic!("invalid action never looks up volumes"),
+                        |_| panic!("never launch")
+                    )
+                    .is_err()
+            );
+        }
+        let missing = Mode::Real.open_hint_with(
+            C,
+            || None,
+            || panic!("stale history never looks up volumes"),
+            |_| panic!("never launch"),
+        );
+        assert!(missing.unwrap_err().contains("Scan this drive again"));
+        for volumes in [vec![], vec![hint_volume("volume-b")], vec![hint_volume("")]] {
+            assert!(
+                Mode::Real
+                    .open_hint_with(
+                        C,
+                        || Some(("volume-a".into(), HintAction::SteamUninstall { app_id: 42 })),
+                        || Ok(volumes),
+                        |_| panic!("wrong/missing volume never launches")
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            Mode::Real
+                .open_hint_with(
+                    C,
+                    || Some((String::new(), HintAction::SteamUninstall { app_id: 42 })),
+                    || Ok(vec![hint_volume("volume-a")]),
+                    |_| panic!("unknown scan volume never launches")
+                )
+                .is_err()
+        );
+        assert!(
+            Mode::Real
+                .open_hint_with(
+                    C,
+                    || Some(("volume-a".into(), HintAction::SteamUninstall { app_id: 42 })),
+                    || Err("volume query failed".into()),
+                    |_| panic!("failed volume query never launches")
+                )
+                .is_err()
+        );
+        assert_eq!(
+            Mode::Real
+                .open_hint_with(
+                    C,
+                    || Some(("volume-a".into(), HintAction::SteamUninstall { app_id: 42 })),
+                    || Ok(vec![hint_volume("volume-a")]),
+                    |_| Err("Steam is not installed".into())
+                )
+                .unwrap_err(),
+            "Steam is not installed"
+        );
+    }
+
+    #[test]
+    fn vendor_references_work_without_a_scan_and_never_dispatch_from_fixture_modes() {
+        use vacancy_core::hints::GuideId;
+        // A fresh session has no retained scans, just as after reopening a saved report on restart.
+        let session = Session::new(Mode::Real);
+        for guide in [
+            GuideId::WindowsCleanup,
+            GuideId::WindowsDelivery,
+            GuideId::DockerImages,
+            GuideId::DockerCache,
+            GuideId::Xcode,
+            GuideId::Homebrew,
+        ] {
+            let expected = guide.action().external_uri().unwrap();
+            assert!(expected.starts_with("https://"));
+            let mut launched = false;
+            session
+                .mode
+                .open_guide_with(guide, |actual| {
+                    launched = true;
+                    assert_eq!(actual.external_uri().as_deref(), Some(expected.as_str()));
+                    Ok(())
+                })
+                .unwrap();
+            assert!(launched);
+            for mode in [
+                Mode::Fixture {
+                    root: PathBuf::from("fixture"),
+                    capacity: 1,
+                },
+                Mode::Refused("bad fixture".into()),
+            ] {
+                assert!(
+                    mode.open_guide_with(guide, |_| panic!("no host launcher"))
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hint_opener_refuses_matching_unavailable_identities_but_accepts_a_reported_zero() {
+        use vacancy_core::hints::HintAction;
+        // Failed Windows queries now map None to an empty id (covered by the pure Windows offering test).
+        // Identical failures at scan/click time must never establish that this is the same physical volume.
+        for (scanned, current) in [("", ""), ("", "00000000"), ("00000000", "")] {
+            assert!(
+                Mode::Real
+                    .open_hint_with(
+                        C,
+                        || Some((scanned.into(), HintAction::SteamUninstall { app_id: 42 })),
+                        || Ok(vec![hint_volume(current)]),
+                        |_| panic!("unavailable volume identity must never dispatch"),
+                    )
+                    .is_err()
+            );
+        }
+        let mut launched = false;
+        Mode::Real
+            .open_hint_with(
+                C,
+                || Some(("00000000".into(), HintAction::SteamUninstall { app_id: 42 })),
+                || Ok(vec![hint_volume("00000000")]),
+                |id| {
+                    assert_eq!(id, 42);
+                    launched = true;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(
+            launched,
+            "successful numeric zero is an identity, unlike lookup failure"
+        );
     }
 
     fn last(scans: &Scans<u32>, drive: &str) -> Option<u32> {

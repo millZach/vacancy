@@ -10,6 +10,7 @@ mod exec;
 pub mod fixture;
 mod fsid;
 mod guard;
+pub mod hints;
 mod machine;
 mod map;
 mod pathkey;
@@ -21,6 +22,7 @@ mod rules;
 mod scan;
 mod snapshot;
 mod text;
+pub mod tools;
 mod volume;
 
 // Shared fixture setup is compiled only into Windows unit tests, never the library API.

@@ -6,6 +6,7 @@ import type { MapCategory, RunReport } from '../bridge';
 import { formatBytes, formatCount, formatDuration, NBSP } from '../format';
 import { asSentence } from '../run/progress';
 import { HeroNumber } from '../summary/HeroNumber';
+import { AdviceText } from '../plan/AdviceText';
 import { KeyFob, Letterboard, NeonSign } from './bits';
 import {
   biggestWin,
@@ -109,6 +110,8 @@ export function WinSlide({ report: r }: SlideProps) {
             ? `${count(r.deletedItems, 'item')} deleted. Their space may still be in use, or the items held no allocated space.`
             : r.movedItems > 0
               ? 'Folders were reorganized. The next slides show what moved.'
+            : r.steps.length === 0 && r.leftForYou.length > 0
+              ? 'Your reminders are saved under Left for you. Vacancy hasn’t touched those items.'
             : 'Everything in the plan stayed where it was. The next slides say why.'}
         </p>
       </div>
@@ -221,7 +224,7 @@ export function KeptSlide({ report: r }: SlideProps) {
               )}
             </ul>
           ) : (
-            <p className="kept-none">Every file in the plan was free to go.</p>
+            <p className="kept-none">{r.steps.length === 0 ? 'No files were selected for deletion.' : 'Every file in the plan was free to go.'}</p>
           )}
           {(inUse || changed) && (
             <p className="kept-hint">
@@ -257,9 +260,9 @@ export function KeptSlide({ report: r }: SlideProps) {
                     <Signpost size={14} aria-hidden />
                     <div>
                       <b>{a.title}</b>
-                      <span>{a.why}</span>
+                      <AdviceText why={a.why} action={a.hintAction} mountPoint={r.mountPoint} proposalId={a.id} compact />
                     </div>
-                    <em>{formatBytes(a.bytes)}</em>
+                    {a.bytes > 0 && <em>{formatBytes(a.bytes)}</em>}
                   </li>
                 ))}
               </ul>

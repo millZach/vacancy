@@ -35,6 +35,23 @@ describe('the mock bridge', () => {
     expect((await bridge.advisorStatus()).enabled).toBe(false);
   });
 
+  it.each(['windows', 'macos'] as const)('keeps %s reminder runs free of synthetic moves while preserving mixed previews', async (name) => {
+    const fixture = fixtures[name];
+    const bridge = createMockBridge(fixture, { scanMs: 0, runMs: 0, moves: true });
+    const mount = fixture.volumes[0]!.mountPoint;
+    const hint = fixture.proposals.find((p) => p.action === 'hint')!;
+    await bridge.scan(mount, () => {});
+    const reminders = await bridge.buildPlan(mount, [hint.id]);
+    const saved = await bridge.runPlan(mount, reminders.id, () => {});
+    expect(saved).toMatchObject({ steps: [], freedBytes: 0, deletedItems: 0, movedItems: 0, reorganized: [] });
+    await bridge.scan(mount, () => {});
+    const cleanup = fixture.proposals.find((p) => p.action === 'delete')!;
+    const mixed = await bridge.buildPlan(mount, [hint.id, cleanup.id]);
+    const changed = await bridge.runPlan(mount, mixed.id, () => {});
+    expect(changed.reorganized).toEqual(fixture.moves);
+    expect(changed.movedItems).toBe(fixture.moves.reduce((sum, move) => sum + move.movedItems, 0));
+    expect(changed.leftForYou).toHaveLength(1);
+  });
   it('replays a scan: counts climb, categories are found one by one, then the map', async () => {
     vi.useFakeTimers();
     const bridge = createMockBridge(fixtures.windows, { scanMs: 1000 });
@@ -69,7 +86,9 @@ describe('the mock bridge', () => {
     if (c.status !== 'done' || d.status !== 'done') throw new Error('expected maps');
     expect(c.proposals.map((p) => p.id)).toEqual(fixtures.windows.proposals.map((p) => p.id));
     const tiles = c.overview.categories.flatMap((cat) => cat.items.filter((i) => i.kind === 'proposal'));
-    expect(tiles.map((t) => t.proposal).sort()).toEqual(c.proposals.map((p) => p.id).sort());
+    expect(tiles.map((t) => t.proposal).sort()).toEqual(c.proposals.filter((p) => p.action === 'delete').map((p) => p.id).sort());
+    expect(c.proposals.filter((p) => p.action === 'hint')).toHaveLength(5);
+    for (const p of c.proposals.filter(p => p.action === 'hint')) expect(p).toMatchObject({ bytes: 0, itemCount: 0, placeCount: 0, defaultOn: false });
     for (const t of tiles) expect(t.bytes).toBe(c.proposals.find((p) => p.id === t.proposal)!.bytes);
 
     const node = d.proposals.find((p) => p.id === 'w-node')!;
@@ -120,6 +139,7 @@ describe('the mock bridge', () => {
     const scanned = async (options = {}) => {
       const bridge = createMockBridge(fixtures.windows, { scanMs: 0, runMs: 0, ...options });
       await bridge.scan('C:\\', () => {});
+      await expect(bridge.buildPlan('C:\\', [])).rejects.toThrow('the plan has no selected proposals');
       return bridge;
     };
 

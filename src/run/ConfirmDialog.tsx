@@ -27,6 +27,7 @@ export function ConfirmDialog({ plan, platform, onCancel, onGo }: Props) {
   const bin = platform === 'macos' ? 'Trash' : 'Recycle Bin';
   const deletes = plan.bytes > 0 || plan.items > 0;
   const size = formatBytes(plan.bytes);
+  const reminders = plan.leftForYou.length;
   const n = plan.refused.length;
   const allChanged = plan.refused.every((r) => CHANGED.has(r.kind));
 
@@ -82,7 +83,7 @@ export function ConfirmDialog({ plan, platform, onCancel, onGo }: Props) {
             ? `Permanently delete ${size}?`
             : plan.moves > 0
               ? `Move ${formatCount(plan.moves)} ${plan.moves === 1 ? 'file' : 'files'}?`
-              : 'Nothing left to delete'}
+              : reminders > 0 ? `Save ${reminders} ${reminders === 1 ? 'reminder' : 'reminders'}?` : 'Nothing left to delete'}
         </h2>
         {deletes && (
           <p className="dialog-lead">
@@ -97,10 +98,11 @@ export function ConfirmDialog({ plan, platform, onCancel, onGo }: Props) {
             you can undo it from the summary.
           </p>
         )}
-        {!deletes && plan.moves === 0 && (
+        {reminders > 0 && <p className="dialog-quiet">{reminders} {reminders === 1 ? 'reminder will' : 'reminders will'} be saved under Left for you. Vacancy won’t touch these items or count them as freed space.</p>}
+        {!deletes && plan.moves === 0 && reminders === 0 && (
           <p>Everything in the plan changed since the scan. Scan again to see the drive as it is now.</p>
         )}
-        {n > 0 && (deletes || plan.moves > 0) && (
+        {n > 0 && (deletes || plan.moves > 0 || reminders > 0) && (
           <p className="dialog-quiet" title={plan.refused.map((r) => r.path).join('\n')}>
             {n === 1 ? '1 place' : `${formatCount(n)} places`}{' '}
             {allChanged
@@ -113,9 +115,9 @@ export function ConfirmDialog({ plan, platform, onCancel, onGo }: Props) {
           <button type="button" className="btn" onClick={onCancel} autoFocus>
             Go back
           </button>
-          {(deletes || plan.moves > 0) && (
-            <button type="button" className="cta cta--danger" onClick={onGo}>
-              {deletes ? `Delete ${size} permanently` : `Move ${formatCount(plan.moves)} files`}
+          {(deletes || plan.moves > 0 || reminders > 0) && (
+            <button type="button" className={deletes ? 'cta cta--danger' : 'cta'} onClick={onGo}>
+              {deletes ? `Delete ${size} permanently` : plan.moves > 0 ? `Move ${formatCount(plan.moves)} files` : 'Save reminders'}
             </button>
           )}
         </div>

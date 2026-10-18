@@ -14,6 +14,14 @@ Vacancy is in early development. Releases before 1.0 are previews, and each rele
 - **Runs only what you approve.** You pick the items and confirm once, then watch the space come back.
 - **Shows what it did.** The run ends with a report: space freed, what was deleted, what was moved, and what was skipped and why.
 
+### Cleanup tools and reminders
+
+Cleanup tools that choose their own targets are advice only. Vacancy does not run Docker pruning, simulator removal, Homebrew cleanup commands, or Windows system cleanup tools, and it does not request administrator permission to run them. Its file executor still acts only on the exact items you approved, with the Guard checked again before deletion.
+
+The current advice covers Steam games with a known last-played date at least six months ago, and the Logic Pro sound library. You can open a game's uninstall screen in Steam, or follow the instructions inside Logic. Selecting advice saves a reminder under **Left for you** in the report; it does not uninstall anything or count as freed space.
+
+Windows cleanup and Delivery Optimization reminders appear when the Windows folder is present in the scan. Known Docker folders offer image and build-cache review; on Mac, Xcode and Homebrew folders offer simulator/runtime review and cleanup-preview instructions. These are passive presence checks, not inventories of unused objects or estimates of recoverable space. Guides start unchecked; selected instructions stay in the recap, highlights and history. Fixed vendor references remain usable from saved history without a new scan; fixture mode never launches host apps or browsers. Steam uninstall still requires the retained scan and the same current volume. Cleaning known user-level package caches or Xcode build folders through an approved file plan is separate from running those tools.
+
 ## What Vacancy never touches
 
 Deleting is permanent: nothing goes to the Trash or the Recycle Bin. These rules decide what Vacancy can touch:
