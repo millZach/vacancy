@@ -187,11 +187,14 @@ impl Store {
         }
         super::windows::boundary("journal-parent");
         let lease_name = suffix(&name, ".lease")?;
-        let (mut lease, lease_identity) =
-            native::journal_file(&parent.dir, &lease_name, native::JournalOpen::Lease)
-                .map_err(native_error)?;
+        native::revalidate(&parent).map_err(native_error)?;
+        let (mut lease, lease_identity, created) =
+            native::lease_file(&parent.dir, &lease_name, new).map_err(native_error)?;
         let content = read(&mut lease, 64)?;
-        if content.is_empty() {
+        if created {
+            if !content.is_empty() { return Err(Error::CorruptJournal); }
+            native::revalidate(&parent).map_err(native_error)?;
+            native::journal_check(&lease, lease_identity).map_err(native_error)?;
             lease.write_all(LEASE).map_err(io)?;
             lease.sync_all().map_err(io)?;
         } else if content != LEASE {

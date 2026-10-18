@@ -395,7 +395,6 @@ pub(crate) fn mkdir(parent: &Dir, name: &Name) -> Result<(Dir, Step), MkdirFailu
 pub(crate) enum JournalOpen {
     Create,
     Existing,
-    Lease,
 }
 
 pub(crate) fn journal_file(
@@ -413,10 +412,29 @@ pub(crate) fn journal_file(
         match mode {
             JournalOpen::Create => FILE_CREATE,
             JournalOpen::Existing => FILE_OPEN,
-            JournalOpen::Lease => FILE_OPEN_IF,
         },
         FILE_NON_DIRECTORY_FILE,
     )?;
+    journal_handle(handle)
+}
+
+/// Stable lease acquisition. Recovery cannot create or initialize anything; Begin may initialize only a
+/// positively newly-created native file. A pre-existing empty marker is never adopted or overwritten.
+pub(crate) fn lease_file(parent: &Dir, name: &Name, begin: bool) -> Result<(File, Id, bool), Fail> {
+    use windows_sys::Win32::System::WindowsProgramming::{FILE_CREATED, FILE_OPENED};
+    let access = FILE_READ_DATA | FILE_READ_ATTRIBUTES | if begin { FILE_GENERIC_WRITE } else { SYNCHRONIZE };
+    let (handle, information) = create_receipt(&parent.handle, name, access, 0,
+        if begin { FILE_OPEN_IF } else { FILE_OPEN }, FILE_NON_DIRECTORY_FILE).map_err(open_fail)?;
+    let created = match information {
+        value if begin && value == FILE_CREATED as usize => true,
+        value if value == FILE_OPENED as usize => false,
+        _ => return Err(Fail::Changed),
+    };
+    let (file, id) = journal_handle(handle)?;
+    Ok((file, id, created))
+}
+
+fn journal_handle(handle: Handle) -> Result<(File, Id), Fail> {
     let (attributes, _) = attribute_tag(&handle).ok_or(Fail::Unsupported)?;
     if attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0 {
         return Err(Fail::Link);
@@ -466,6 +484,12 @@ fn create_status(
     disposition: u32,
     options: u32,
 ) -> Result<Handle, i32> {
+    create_receipt(parent, name, access, share, disposition, options).map(|(handle, _)| handle)
+}
+
+fn create_receipt(
+    parent: &Handle, name: &Name, access: u32, share: u32, disposition: u32, options: u32,
+) -> Result<(Handle, usize), i32> {
     let object_name = UNICODE_STRING {
         Length: (name.0.len() * 2) as u16,
         MaximumLength: (name.0.len() * 2) as u16,
@@ -502,7 +526,7 @@ fn create_status(
         )
     };
     if status >= 0 && !raw.is_null() {
-        Ok(Handle(raw))
+        Ok((Handle(raw), io.Information))
     } else {
         Err(status)
     }

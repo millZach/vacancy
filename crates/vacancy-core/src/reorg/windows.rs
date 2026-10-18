@@ -443,7 +443,8 @@ impl Engine {
         trust(env)?;
         approved.data.checked()?;
         super::model::check_approval(&approved.data)?;
-        let expected = journal_parent(env, journal)?;
+        let expected = journal_parent_for_root(env, journal, Some(approved.data.root))?;
+        boundary("journal-expected");
         let mut store = Store::open(journal, true, &expected)?;
         store.append(&Event::Approved {
             version: 1,
@@ -1061,6 +1062,14 @@ enum Reconciliation {
     Unresolved,
 }
 fn journal_parent(env: &Env, journal: &Path) -> Result<Vec<native::Id>, Error> {
+    journal_parent_for_root(env, journal, None)
+}
+
+fn journal_parent_for_root(
+    env: &Env,
+    journal: &Path,
+    sealed_root: Option<native::Id>,
+) -> Result<Vec<native::Id>, Error> {
     if !native::plain(journal) || journal.parent() != Some(env.app_data.as_path()) {
         return Err(Error::Denied(
             "journal must be a new file directly in trusted app data".into(),
@@ -1069,6 +1078,9 @@ fn journal_parent(env: &Env, journal: &Path) -> Result<Vec<native::Id>, Error> {
     let parent = native::directory(&env.app_data).map_err(changed)?;
     let root = native::directory(&env.root).map_err(changed)?;
     let id = native::Id::step(root.steps.last().ok_or(Error::Changed)?);
+    if sealed_root.is_some_and(|sealed| sealed != id) {
+        return Err(Error::Changed);
+    }
     let chain = chain(&parent);
     if !chain.contains(&id) || chain.iter().any(|entry| entry.volume != id.volume) {
         return Err(Error::Changed);

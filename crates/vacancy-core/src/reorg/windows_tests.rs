@@ -1213,10 +1213,13 @@ fn exclusive_unavailable_lease_refuses_a_fresh_store_then_release_restores_write
     let (_dir, env) = fixture();
     let source = put(&env, "a.txt");
     let location = journal(&env);
+    drop(Engine::begin(&env, &location, approved(&env, &["a.txt"], &[])).unwrap());
+    // A valid stable lease remains after an interrupted Begin before its base journal is created.
+    // Removing the fixture-only base simulates that state; production never removes/recreates the lease.
+    fs::remove_file(&location).unwrap();
+    let lease_id = crate::fsid::identity(&env.app_data.join("run.vjr.lease"));
     let held = fs::OpenOptions::new()
         .read(true)
-        .write(true)
-        .create_new(true)
         .share_mode(0)
         .open(env.app_data.join("run.vjr.lease"))
         .unwrap();
@@ -1229,6 +1232,7 @@ fn exclusive_unavailable_lease_refuses_a_fresh_store_then_release_restores_write
     assert!(!env.known.documents.join("a.txt").exists());
     drop(held);
     let mut engine = Engine::begin(&env, &location, approved(&env, &["a.txt"], &[])).unwrap();
+    assert_eq!(crate::fsid::identity(&env.app_data.join("run.vjr.lease")), lease_id);
     assert_eq!(engine.run(&CancelToken::new()).unwrap().applied, 1);
     assert_eq!(engine.undo(&CancelToken::new()).unwrap().undone, 1);
     assert!(source.exists());
@@ -1666,4 +1670,124 @@ fn cross_volume_native_rename_refuses_without_copy_delete_or_overwrite() {
             "fixturePreparationOnly": true, "retainedForAudit": true
         })
     );
+}
+
+#[test]
+fn replacement_root_before_begin_or_during_store_acquisition_gets_no_journal_side_effects() {
+    for during_acquisition in [false, true] {
+        let (old_dir, env) = fixture();
+        put(&env, "a.txt");
+        fs::write(env.known.documents.join("old-sentinel"), b"original profile").unwrap();
+        let old_before = crate::fixture::inventory(old_dir.path()).unwrap();
+        let plan = approved(&env, &["a.txt"], &[]);
+        let sealed_root = plan.data.root;
+        let (replacement_dir, replacement_env) = fixture();
+        fs::write(replacement_env.known.documents.join("new-sentinel"), b"replacement profile").unwrap();
+        let replacement_before = crate::fixture::inventory(replacement_dir.path()).unwrap();
+        let replacement_pin = native::directory(replacement_dir.path()).unwrap();
+        assert_ne!(native::Id::step(replacement_pin.steps.last().unwrap()), sealed_root);
+        drop(replacement_pin);
+        let old_path = old_dir.keep();
+        let replacement_path = replacement_dir.keep();
+        let retired = old_path.with_file_name(format!("{}-retired", old_path.file_name().unwrap().to_str().unwrap()));
+        assert!(!retired.exists());
+        if during_acquisition {
+            let (old, replacement, retired) = (old_path.clone(), replacement_path.clone(), retired.clone());
+            set_hook(move |at| {
+                if at == "journal-expected" {
+                    fs::rename(&old, &retired).unwrap();
+                    fs::rename(&replacement, &old).unwrap();
+                }
+            });
+        } else {
+            fs::rename(&old_path, &retired).unwrap();
+            fs::rename(&replacement_path, &old_path).unwrap();
+        }
+        let result = Engine::begin(&env, &journal(&env), plan);
+        clear_hook();
+        assert!(matches!(result, Err(Error::Changed)));
+        assert!(!replacement_path.exists()); // the real replacement actually happened in both variants
+        assert_eq!(crate::fixture::inventory(&retired).unwrap(), old_before);
+        assert_eq!(crate::fixture::inventory(&old_path).unwrap(), replacement_before);
+        assert_eq!(fs::read_dir(&env.app_data).unwrap().count(), 0);
+        assert!(!journal(&env).exists());
+        assert!(!env.app_data.join("run.vjr.lease").exists());
+    }
+}
+
+#[test]
+fn ordinary_new_appdata_in_the_same_sealed_root_is_valid_and_reopen_is_read_only() {
+    let (_dir, env) = fixture();
+    let source = put(&env, "a.txt");
+    fs::write(env.app_data.join("storage-sentinel"), b"old storage").unwrap();
+    let plan = approved(&env, &["a.txt"], &[]);
+    let old_storage = env.home.join("retired-app-data");
+    fs::rename(&env.app_data, &old_storage).unwrap();
+    fs::create_dir(&env.app_data).unwrap();
+    let location = journal(&env);
+    let engine = Engine::begin(&env, &location, plan).unwrap();
+    assert_eq!(engine.status().applied, 0);
+    drop(engine);
+    assert_eq!(fs::read(old_storage.join("storage-sentinel")).unwrap(), b"old storage");
+    let before = crate::fixture::inventory(&env.root).unwrap();
+    let engine = Engine::open(&env, &location).unwrap();
+    assert_eq!(engine.status().applied, 0);
+    drop(engine);
+    assert_eq!(crate::fixture::inventory(&env.root).unwrap(), before);
+    assert!(source.exists());
+    assert!(!env.known.documents.join("a.txt").exists());
+}
+
+#[test]
+fn recovery_never_creates_or_initializes_missing_empty_or_invalid_leases() {
+    for scenario in 0..4 {
+        let (_dir, env) = fixture();
+        let source = put(&env, "a.txt");
+        let location = journal(&env);
+        let lease = env.app_data.join("run.vjr.lease");
+        if scenario != 0 {
+            drop(Engine::begin(&env, &location, approved(&env, &["a.txt"], &[])).unwrap());
+            match scenario {
+                1 => fs::remove_file(&lease).unwrap(),
+                2 => fs::write(&lease, b"").unwrap(),
+                _ => fs::write(&lease, b"foreign marker").unwrap(),
+            }
+        }
+        let before = crate::fixture::inventory(&env.root).unwrap();
+        assert!(Engine::open(&env, &location).is_err());
+        assert_eq!(crate::fixture::inventory(&env.root).unwrap(), before);
+        assert!(source.exists());
+        assert!(!env.known.documents.join("a.txt").exists());
+    }
+}
+
+#[test]
+fn begin_refuses_foreign_empty_or_invalid_lease_without_repurposing_it() {
+    for content in [b"".as_slice(), b"foreign marker".as_slice()] {
+        let (_dir, env) = fixture();
+        put(&env, "a.txt");
+        let plan = approved(&env, &["a.txt"], &[]);
+        let lease = env.app_data.join("run.vjr.lease");
+        fs::write(&lease, content).unwrap();
+        let identity = crate::fsid::identity(&lease);
+        let before = crate::fixture::inventory(&env.root).unwrap();
+        assert!(matches!(Engine::begin(&env, &journal(&env), plan), Err(Error::CorruptJournal)));
+        assert_eq!(crate::fixture::inventory(&env.root).unwrap(), before);
+        assert_eq!(crate::fsid::identity(&lease), identity);
+        assert_eq!(fs::read(&lease).unwrap(), content);
+        assert!(!journal(&env).exists());
+    }
+    let (_dir, env) = fixture();
+    put(&env, "a.txt");
+    let location = journal(&env);
+    drop(Engine::begin(&env, &location, approved(&env, &["a.txt"], &[])).unwrap());
+    let before = crate::fixture::inventory(&env.root).unwrap();
+    let parent = native::directory(&env.app_data).unwrap();
+    let (mut lease, _, created) = native::lease_file(&parent.dir, &Name::text("run.vjr.lease").unwrap(), false).unwrap();
+    assert!(!created);
+    use std::io::Write;
+    assert!(lease.write_all(b"not writable during recovery").is_err());
+    drop(lease);
+    drop(parent);
+    assert_eq!(crate::fixture::inventory(&env.root).unwrap(), before);
 }
