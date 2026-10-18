@@ -104,7 +104,12 @@ try {
   // Untick a group: every copy of it stays.
   const target = o.untick ? cards.filter({ hasText: o.untick }).first() : cards.nth(1);
   said.unticked = (await target.locator('.dup-text b').textContent())?.trim();
-  await target.locator('[role="checkbox"]').click();
+  const box = target.locator('[role="checkbox"]');
+  await box.click();
+  if ((await box.getAttribute('aria-checked')) !== 'false') await box.click();
+  await page.waitForFunction((el) => el.getAttribute('aria-checked') === 'false', await box.elementHandle(), {
+    timeout: 5000,
+  });
   await target.hover();
   await settle(page, 400);
   await shot(page, '5-untick');

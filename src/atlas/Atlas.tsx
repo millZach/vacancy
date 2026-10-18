@@ -415,14 +415,6 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
               </span>
             )}
             {scanning && <span className="crumb-blurb">Mapping as it scans</span>}
-            {overview && !run && (
-              <DuplicatesPill
-                search={search}
-                groups={groups}
-                open={showPanel}
-                onToggle={() => (showPanel ? setDupPanel(false) : openDuplicates())}
-              />
-            )}
             {opening && <LoaderCircle className="crumb-spin" size={13} aria-label="Opening" />}
             {browseError && (
               <span className="crumb-error" role="alert">
@@ -430,6 +422,14 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
               </span>
             )}
           </nav>
+          {overview && !run && (
+            <DuplicatesPill
+              search={search}
+              groups={groups}
+              open={showPanel}
+              onToggle={() => (showPanel ? setDupPanel(false) : openDuplicates())}
+            />
+          )}
           {overview && (
             <>
               <ScanNotes
@@ -673,8 +673,14 @@ function ScanNotes(p: NotesProps) {
         </span>
       )}
       {p.missingAccess && (
-        <button type="button" className="scan-note is-action" onClick={p.onOpenAccess}>
-          <ShieldAlert size={12} aria-hidden /> Allow Full Disk Access
+        <button
+          type="button"
+          className="scan-note is-action"
+          onClick={p.onOpenAccess}
+          title="Allow Full Disk Access"
+          aria-label="Allow Full Disk Access"
+        >
+          <ShieldAlert size={12} aria-hidden /> <span className="scan-note-text">Allow Full Disk Access</span>
         </button>
       )}
     </div>

@@ -13,6 +13,30 @@
   color: var(--color-text-2);
   white-space: nowrap;
 }
+/* On a narrow map the toolbar's notes give way: plain notes truncate, the pill drops a word, and the Full Disk
+   Access button keeps only its icon (its name stays, for assistive tech and as a tooltip). */
+.atlas.is-map .atlas-toolbar {
+  container-type: inline-size;
+}
+.atlas-toolbar .scan-notes {
+  min-width: 0;
+}
+.atlas-toolbar .scan-note:not(.is-action) {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.atlas-toolbar .scan-note.is-action {
+  flex: none;
+}
+@container (max-width: 820px) {
+  .dup-pill-word,
+  .dup-pill-bar,
+  .scan-note-text {
+    display: none;
+  }
+}
 .dup-pill b {
   color: var(--color-text);
   font-variant-numeric: tabular-nums;

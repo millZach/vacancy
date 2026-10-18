@@ -54,9 +54,11 @@ export function DuplicatesPill({ search, groups, open, onToggle }: PillProps) {
       className={open ? 'dup-pill is-ready is-open' : 'dup-pill is-ready'}
       onClick={onToggle}
       aria-pressed={open}
+      aria-label={`${formatCount(groups.length)} duplicate ${groups.length === 1 ? 'group' : 'groups'} · ${formatBytes(bytes)}`}
     >
       <Copy size={12} aria-hidden />
-      {formatCount(groups.length)} duplicate {groups.length === 1 ? 'group' : 'groups'} · <b>{formatBytes(bytes)}</b>
+      {formatCount(groups.length)} <span className="dup-pill-word">duplicate </span>
+      {groups.length === 1 ? 'group' : 'groups'} · <b>{formatBytes(bytes)}</b>
     </button>
   );
 }
