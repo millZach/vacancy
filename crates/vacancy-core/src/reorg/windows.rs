@@ -912,24 +912,23 @@ impl Engine {
         removing: bool,
     ) -> Reconciliation {
         let at = &self.state.plan.directories[index].at;
-        let Ok(parent) = self.parent(&at.parent()) else {
-            return Reconciliation::Unresolved;
-        };
-        match native::child_dir(
-            &parent.dir,
-            at.names.last().expect("validated directory name"),
-        ) {
-            Err(Fail::Gone) => {
-                if removing {
-                    Reconciliation::Applied
-                } else {
-                    Reconciliation::NotApplied
-                }
-            }
-            Ok((_, step)) if removing && Some(native::Id::step(&step)) == expected => {
-                Reconciliation::NotApplied
-            }
-            _ => Reconciliation::Unresolved, // mkdir without a durable ownership receipt never gains ownership.
+        let observed = self.parent(&at.parent()).map(|parent| {
+            native::child_dir(
+                &parent.dir,
+                at.names.last().expect("validated directory name"),
+            )
+            .map(|(_, step)| native::Id::step(&step))
+        });
+        match (removing, observed) {
+            (false, Ok(Err(Fail::Gone))) => Reconciliation::NotApplied,
+            // A mkdir intent without its durable receipt never gains ownership. Whatever holds the name is not
+            // claimed: it is skipped, never removed by Undo, reported, and does not block Undo of the moves.
+            (false, _) => Reconciliation::Kept(
+                "the directory's creation was not recorded, so it is not claimed by this run and is left in place",
+            ),
+            (true, Ok(Err(Fail::Gone))) => Reconciliation::Applied,
+            (true, Ok(Ok(id))) if Some(id) == expected => Reconciliation::NotApplied,
+            (true, _) => Reconciliation::Unresolved,
         }
     }
     pub fn undo(&mut self, cancel: &CancelToken) -> Result<Status, Error> {

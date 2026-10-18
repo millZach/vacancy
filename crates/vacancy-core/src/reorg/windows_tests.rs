@@ -672,11 +672,18 @@ fn process_crashes_at_namespace_and_durable_receipts_reconcile_honestly_then_und
             "reconciliation never moves at {point}"
         );
         if point == "mkdir-namespace" {
-            assert_eq!(status.unresolved, 1);
-            assert!(matches!(
-                engine.undo(&CancelToken::new()),
-                Err(Error::Unresolved)
-            ));
+            // The directory exists but its creation receipt was lost: it is never claimed as owned, so it is
+            // reported, left in place, and does not block Undo.
+            assert_eq!(status.unresolved, 0);
+            assert!(
+                status
+                    .reasons
+                    .iter()
+                    .any(|reason| reason.contains("left in place")),
+                "{status:?}"
+            );
+            engine.undo(&CancelToken::new()).unwrap();
+            assert!(source.exists());
             assert!(env.known.documents.join("Sorted").exists());
         } else {
             assert_eq!(status.unresolved, 0, "{point}");
