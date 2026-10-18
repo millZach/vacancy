@@ -16,6 +16,7 @@ mod map;
 mod pathkey;
 pub mod permissions;
 mod plan;
+pub mod reorg;
 pub mod report;
 mod rules;
 mod scan;
@@ -23,6 +24,11 @@ mod snapshot;
 mod text;
 pub mod tools;
 mod volume;
+
+// Shared fixture setup is compiled only into Windows unit tests, never the library API.
+#[cfg(all(test, windows))]
+#[path = "../tests/support/windows_case.rs"]
+mod windows_case;
 
 pub use categorize::{
     Categories, Category, CategoryId, CloudRoot, Env, Item, ItemRef, KnownFolders, Platform,

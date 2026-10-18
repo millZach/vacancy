@@ -241,6 +241,26 @@ impl Guard {
         self.held.get(&id).map(String::as_str)
     }
 
+    /// A nonexistent descendant has no identity to fabricate. Its existing, retained parent authorizes only
+    /// contents; all deny-by-name rules still apply to the full proposed relative path.
+    #[cfg(windows)]
+    pub(crate) fn judge_absent(
+        &self,
+        parent: &Path,
+        chain: &[Step],
+        relative: &Path,
+    ) -> Result<(), Denied> {
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(Denied::Unclear);
+        }
+        self.judge_walked(parent, chain, true)?;
+        self.deny_by_name(&PathKey::of(&parent.join(relative)).ok_or(Denied::Unclear)?)
+    }
+
     fn judge(&self, walker: &mut Walker, path: &Path, contents: bool) -> Result<(), Denied> {
         self.check_with(walker, path, contents).map(|_| ())
     }
@@ -1011,14 +1031,14 @@ mod tests {
         }
     }
 
-    /// Windows can make one folder case-sensitive (`fsutil file setCaseSensitiveInfo`, as WSL does): `alex` and
-    /// `Alex` in it are two users' homes. Skipped where the system doesn't allow it.
+    /// Windows can make one folder case-sensitive: `alex` and `Alex` in it are two users' homes.
+    /// Explicitly unavailable where the system doesn't allow the native per-directory flag.
     #[cfg(windows)]
     #[test]
     fn a_case_sensitive_folder_on_windows_keeps_homes_apart() {
         let fx = Fx::new();
         let users = fx.at("Users");
-        if !make_case_sensitive(&users) {
+        if !crate::windows_case::make_case_sensitive(&users) {
             return;
         }
         let mine = fx.at("Users/alex/code/app/node_modules");
@@ -1030,30 +1050,9 @@ mod tests {
         let g = fx.guard(&Env::windows(&fx.root, "alex"));
         assert_eq!(g.check(&mine), Ok(()));
         assert_eq!(g.check(&other), Err(Denied::OutsideAllowedRoots));
-    }
-
-    /// Makes the empty folder `dir` case-sensitive, or says why not and returns false.
-    #[cfg(windows)]
-    pub(crate) fn make_case_sensitive(dir: &Path) -> bool {
-        let out = std::process::Command::new("fsutil")
-            .args(["file", "setCaseSensitiveInfo"])
-            .arg(dir)
-            .arg("enable")
-            .output();
-        match out {
-            Ok(out) if out.status.success() => true,
-            Ok(out) => {
-                eprintln!(
-                    "skipped: this system doesn't allow case-sensitive folders: {}",
-                    String::from_utf8_lossy(&out.stdout).trim()
-                );
-                false
-            }
-            Err(e) => {
-                eprintln!("skipped: fsutil didn't run: {e}");
-                false
-            }
-        }
+        eprintln!(
+            "EXERCISED: case-sensitive Guard scenario, native flag verified and two distinct homes checked"
+        );
     }
 
     /// A disk image mounted inside the home folder is another volume: nothing on it inherits the home folder's

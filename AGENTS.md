@@ -10,14 +10,15 @@ Vacancy deletes files permanently. A wrong rule or a bad path join destroys some
 - **Folder moves are journaled.** Every reorganization move is written to a journal before it happens, and the summary offers Undo.
 - **Never follow symlinks or junctions while scanning or deleting.** On Windows, a junction can point a "cache" folder at a user's documents.
 - **System and protected paths are off-limits.** The rules engine has a deny-list (OS folders, app bundles, the user's home root itself, cloud-sync roots) that no proposal can override, including AI proposals.
-- **AI proposes, never executes.** Reorganization ideas from the local Claude Code or Codex CLI become plan items that the user reviews. The model never runs commands or touches files.
+- **Live AI integration is deferred.** Preserve metadata-only privacy: names, sizes, counts and dates, never file contents. Advisor contracts use fakes. Do not invoke a provider or CLI, read its auth/config, or give proposals filesystem execution authority. Any later integration needs an explicit product decision and enforced constraints.
 - **Both platforms, every time.** Paths, permissions (macOS Full Disk Access, Windows long paths and ACLs) and well-known cache locations differ. A change that touches one platform is tested on both.
 
 ## Product decisions
 
 - Stack: Tauri 2. The Rust backend handles scanning, rules, the executor and the journal; the UI is React + TypeScript.
-- Proposals: built-in rules find known junk offline (caches, temp, installers, dev build folders, duplicates, Docker/Xcode/package-manager leftovers). When the Claude Code CLI (`claude`) or the Codex CLI (`codex`) is installed, Vacancy asks it to propose folder reorganization and to explain unknown large folders. No API key.
+- Proposals: built-in rules find known junk offline (caches, temp, installers, dev build folders, duplicates, Docker/Xcode/package-manager leftovers). The current advisor explains its unavailable status; live CLI explanations and reorganization are deferred under the approved privacy decision. Tool/system advice that chooses its own targets stays passive and supplies no deletion or savings authority.
 - Deletion: permanent, one confirmation. Moves stay undoable.
+- Reorganization scope: develop the isolated Windows core journal/Undo engine first. App controls require an approved prototype; macOS move/Undo entry points remain unsupported before mutation. This preparatory scope does not complete app integration or authorize merges.
 
 ## Read first
 

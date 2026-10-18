@@ -98,29 +98,11 @@ pub fn real_path(path: &Path) -> PathBuf {
     }
 }
 
-/// Makes the empty folder `dir` case-sensitive (`fsutil file setCaseSensitiveInfo`, as WSL does), or says why it
-/// can't and returns false, for tests to skip.
+#[cfg(windows)]
+mod windows_case;
 #[cfg(windows)]
 pub fn make_case_sensitive(dir: &Path) -> bool {
-    let out = std::process::Command::new("fsutil")
-        .args(["file", "setCaseSensitiveInfo"])
-        .arg(dir)
-        .arg("enable")
-        .output();
-    match out {
-        Ok(out) if out.status.success() => true,
-        Ok(out) => {
-            eprintln!(
-                "skipped: this system doesn't allow case-sensitive folders: {}",
-                String::from_utf8_lossy(&out.stdout).trim()
-            );
-            false
-        }
-        Err(e) => {
-            eprintln!("skipped: fsutil didn't run: {e}");
-            false
-        }
-    }
+    windows_case::make_case_sensitive(dir)
 }
 
 /// Makes everything at and below `path` look last used `days` ago: the modified and accessed times of every file
