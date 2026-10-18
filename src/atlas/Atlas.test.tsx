@@ -67,11 +67,11 @@ describe('the scan plate', () => {
     expect(screen.getByRole('button', { name: 'Scan Local Disk (C:)' })).toBeEnabled();
   });
 
-  it('says no AI agent was found, and that scanning only reads', async () => {
+  it('shows truthful fixture AI status, and that scanning only reads', async () => {
     renderApp(windows());
 
-    expect(await screen.findByText('No AI agent found.')).toBeInTheDocument();
-    expect(screen.getByText(/Vacancy will use its built-in rules only/)).toBeInTheDocument();
+    expect(await screen.findByText('Built-in rules. AI stays off.')).toBeInTheDocument();
+    expect(await screen.findByText('Preview status only. No apps were checked on this computer.')).toBeInTheDocument();
     expect(screen.getByText('Rules only')).toBeInTheDocument();
     expect(screen.getByText('Scanning only reads. Nothing changes until you approve a plan.')).toBeInTheDocument();
   });

@@ -50,10 +50,19 @@
 }
 
 .head-right {
+  flex: none;
   margin-left: auto;
   display: flex;
   align-items: center;
   gap: var(--space-5);
+}
+
+.shell-head > .drive-menu { flex: 1; }
+.shell-head .drive-menu-button { max-width: 100%; overflow: hidden; }
+/* The approved advisor treatment lets secondary drive figures yield on a narrow map header. */
+@media (max-width: 1200px) {
+  .shell[data-map='true'] .head-disk-nums,
+  .shell[data-map='true'] .head-disk-free { display: none; }
 }
 
 .shell-body {

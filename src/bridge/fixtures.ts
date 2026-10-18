@@ -1,4 +1,5 @@
 import type {
+  AdvisorStatus,
   CategoryId,
   DriveKind,
   FullDiskAccess,
@@ -38,6 +39,8 @@ export interface Fixture {
   /** The drives to offer, the system drive first. */
   volumes: VolumeInfo[];
   fullDiskAccess: FullDiskAccess;
+  /** Synthetic availability; never an assertion about providers installed on the browser's host. */
+  advisorStatus: AdvisorStatus;
   /** The map a scan of the system drive ends with. Other drives get it scaled to their size. */
   overview: Overview;
   /** The cleanups the rules propose for the system drive, biggest first. Each has a tile on the map. */
@@ -722,6 +725,14 @@ export const fixtures = {
       drive('SanDisk (E:)', 'E:\\', 'usb', false, 64, 41),
     ],
     fullDiskAccess: 'notApplicable',
+    advisorStatus: {
+      enabled: false,
+      discovery: 'fixture',
+      providers: [
+        { provider: 'claudeCode', availability: { state: 'unsupported', reason: 'Synthetic fixture: subscription CLI isolation is unsupported.' } },
+        { provider: 'codex', availability: { state: 'notDetected' } },
+      ],
+    },
     overview: win.overview,
     proposals: [...winProposals, {
       id: 'w-steam-advice', category: 'apps', title: 'Cyberpunk 2077 (not played for 430 days)',
@@ -780,6 +791,14 @@ export const fixtures = {
     machineName: 'Alex’s MacBook Air',
     volumes: [macVolume, drive('Samsung T7', '/Volumes/Samsung T7', 'external', false, 1000, 380)],
     fullDiskAccess: 'missing',
+    advisorStatus: {
+      enabled: false,
+      discovery: 'fixture',
+      providers: [
+        { provider: 'claudeCode', availability: { state: 'notDetected' } },
+        { provider: 'codex', availability: { state: 'unsupported', reason: 'Synthetic fixture: subscription CLI isolation is unsupported.' } },
+      ],
+    },
     overview: mac.overview,
     proposals: [...macProposals, {
       id: 'm-logic-advice', category: 'apps', title: 'Logic Pro sound library',

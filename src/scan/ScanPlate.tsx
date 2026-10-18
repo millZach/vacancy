@@ -1,5 +1,5 @@
-import { Check, Map as MapIcon, ScanLine, ShieldAlert, Sparkles } from 'lucide-react';
-import { useId, useRef, type KeyboardEvent, type Ref } from 'react';
+import { Check, Map as MapIcon, ScanLine, ShieldAlert } from 'lucide-react';
+import { useId, useRef, type KeyboardEvent, type ReactNode, type Ref } from 'react';
 import { DriveIcon, DriveStatus, DriveTags, UsageBar } from '../drives/bits';
 import type { DriveItem, ReadyDrives } from '../drives/context';
 import { reclaimableOf } from '../drives/session';
@@ -10,8 +10,8 @@ import './scan.css';
 interface Props {
   drives: ReadyDrives;
   onOpenFullDiskAccess: () => void;
-  /** The AI agent Vacancy found, or null for built-in rules only. */
-  agent: string | null;
+  /** Read-only advisor status note. */
+  advisorNote: ReactNode;
   /** Why the last scan of this drive failed, if it did. */
   failure: string | null;
   onScan: (button: HTMLButtonElement) => void;
@@ -25,7 +25,7 @@ interface Props {
  * already, goes back to its map or scans again. On a Mac without Full Disk Access it says what will be missing and
  * opens the setting.
  */
-export function ScanPlate({ drives, onOpenFullDiskAccess, agent, failure, onScan, contentRef }: Props) {
+export function ScanPlate({ drives, onOpenFullDiskAccess, advisorNote, failure, onScan, contentRef }: Props) {
   const { list, current, machineName } = drives;
   const v = current.volume;
   const several = list.length > 1;
@@ -56,7 +56,7 @@ export function ScanPlate({ drives, onOpenFullDiskAccess, agent, failure, onScan
           </p>
         )}
         {drives.fullDiskAccess === 'missing' && <AccessNote onOpen={onOpenFullDiskAccess} />}
-        <AgentNote agent={agent} />
+        {advisorNote}
         <p className="plate-fine">
           Scanning only reads. Nothing changes until you approve a plan.
           {v.kind !== 'internal' && <> Keep {v.name} plugged in until the scan finishes.</>}
@@ -172,24 +172,6 @@ export function AccessNote({ onOpen }: { onOpen: () => void }) {
           Open System Settings
         </button>
       </span>
-    </div>
-  );
-}
-
-function AgentNote({ agent }: { agent: string | null }) {
-  return (
-    <div className={agent ? 'agent-note' : 'agent-note is-none'} data-no-ripple>
-      <Sparkles size={14} strokeWidth={2} aria-hidden />
-      {agent ? (
-        <span>
-          <b>{agent} is installed.</b> Vacancy will ask it about big folders the built-in rules don’t recognize, and
-          for tidier layouts of messy ones.
-        </span>
-      ) : (
-        <span>
-          <b>No AI agent found.</b> Vacancy will use its built-in rules only.
-        </span>
-      )}
     </div>
   );
 }

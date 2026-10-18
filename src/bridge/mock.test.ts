@@ -6,6 +6,35 @@ afterEach(() => {
 });
 
 describe('the mock bridge', () => {
+  it('previews an unchecked advisor or isolated failure without blocking drives', async () => {
+    const unchecked = createMockBridge(fixtures.windows, { advisor: 'notChecked' });
+    const status = await unchecked.advisorStatus();
+    expect(status.enabled).toBe(false);
+    expect(status.discovery).toBe('fixture');
+    expect(status.providers.map((p) => p.availability.state)).toEqual(['notChecked', 'notChecked']);
+    const failed = createMockBridge(fixtures.windows, { advisor: 'error' });
+    await expect(failed.advisorStatus()).rejects.toThrow('Fixture app availability is unavailable.');
+    expect(await failed.listVolumes()).toHaveLength(3);
+  });
+  it('reports synthetic disabled advisor availability without claiming live support', async () => {
+    for (const fixture of [fixtures.windows, fixtures.macos]) {
+      const bridge = createMockBridge(fixture);
+      const status = await bridge.advisorStatus();
+      expect(status).toEqual(fixture.advisorStatus);
+      expect(status.enabled).toBe(false);
+      expect(status.discovery).toBe('fixture');
+      expect(status.providers.map((provider) => provider.availability.state).sort()).toEqual(['notDetected', 'unsupported']);
+      expect(JSON.stringify(status)).not.toMatch(/executable|[A-Z]:\\|\/Users\//);
+      status.providers.length = 0;
+      expect((await bridge.advisorStatus()).providers).toHaveLength(2);
+    }
+  });
+
+  it('keeps mock advisor disabled even when passed an inconsistent synthetic preference', async () => {
+    const bridge = createMockBridge({ ...fixtures.windows, advisorStatus: { ...fixtures.windows.advisorStatus, enabled: true } });
+    expect((await bridge.advisorStatus()).enabled).toBe(false);
+  });
+
   it.each(['windows', 'macos'] as const)('keeps %s reminder runs free of synthetic moves while preserving mixed previews', async (name) => {
     const fixture = fixtures[name];
     const bridge = createMockBridge(fixture, { scanMs: 0, runMs: 0, moves: true });

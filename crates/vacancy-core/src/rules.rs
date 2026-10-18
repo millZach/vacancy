@@ -173,6 +173,16 @@ pub struct Proposals {
 }
 
 impl Proposals {
+    /// Inserts an already validated advisor target, preserving the parallel arrays and size order. The caller
+    /// must rebuild category carving after advice, since proposal indices can change.
+    pub(crate) fn insert_advice(&mut self, proposal: Proposal, target: ItemRef) {
+        let index = self.list.partition_point(|p| p.bytes >= proposal.bytes);
+        self.list.insert(index, proposal);
+        self.targets.insert(index, vec![target]);
+        self.kinds.insert(index, ActionKind::DeleteDirectory);
+        self.built_apps.insert(index, false);
+    }
+
     /// Trusted catalog advice carries no targets and cannot acquire deletion authority. Append before carving,
     /// after the positive-size rules, preserving both their order and their existing nonoverlapping claims.
     pub(crate) fn append_hint(&mut self, hint: &crate::hints::Hint) {
@@ -342,7 +352,7 @@ struct Found {
 }
 
 /// The Guard, with what the scan saw: which folders are protected, and which hold something protected.
-struct Guarded<'a> {
+pub(crate) struct Guarded<'a> {
     guard: Guard,
     snap: &'a Snapshot,
     /// The folder is protected (the OS, a Photos library, a cloud-sync folder, an app bundle...), or is inside one.
@@ -357,7 +367,7 @@ struct Guarded<'a> {
 }
 
 impl<'a> Guarded<'a> {
-    fn new(
+    pub(crate) fn new(
         snap: &'a Snapshot,
         cats: &Categories,
         guard: Guard,
@@ -434,7 +444,7 @@ impl<'a> Guarded<'a> {
     /// Whether `at` may be deleted: the Guard allows its path, and nothing the scan saw in or around it is
     /// protected, a link, or unread.
     /// `takes_built_apps` says the rule takes Xcode's DerivedData, which holds the apps Xcode builds.
-    fn allows(&self, at: ItemRef, takes_built_apps: bool) -> bool {
+    pub(crate) fn allows(&self, at: ItemRef, takes_built_apps: bool) -> bool {
         let snap = self.snap;
         match at {
             ItemRef::Dir(d) => {
@@ -460,7 +470,7 @@ impl<'a> Guarded<'a> {
 }
 
 /// Which places rules have taken, so no two proposals overlap.
-struct Claims {
+pub(crate) struct Claims {
     dir: Vec<bool>,
     /// Something inside the folder (a subfolder, a kept file, its loose files) is taken.
     below: Vec<bool>,
@@ -469,7 +479,7 @@ struct Claims {
 }
 
 impl Claims {
-    fn new(dirs: usize) -> Self {
+    pub(crate) fn new(dirs: usize) -> Self {
         Self {
             dir: vec![false; dirs],
             below: vec![false; dirs],
@@ -490,7 +500,7 @@ impl Claims {
         false
     }
 
-    fn overlaps(&self, snap: &Snapshot, at: ItemRef) -> bool {
+    pub(crate) fn overlaps(&self, snap: &Snapshot, at: ItemRef) -> bool {
         match at {
             ItemRef::Dir(d) => self.below[d.index()] || self.taken_from(snap, d),
             ItemRef::File(f) => {
@@ -501,7 +511,7 @@ impl Claims {
         }
     }
 
-    fn take(&mut self, snap: &Snapshot, at: ItemRef) {
+    pub(crate) fn take(&mut self, snap: &Snapshot, at: ItemRef) {
         let mut up = match at {
             ItemRef::Dir(d) => {
                 self.dir[d.index()] = true;

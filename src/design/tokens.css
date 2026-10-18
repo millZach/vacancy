@@ -118,6 +118,8 @@
   --shadow-dialog: 0 30px 90px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(0, 0, 0, 0.4);
   --radius-dialog: 13px;
   --text-dialog: 22px; /* its question */
+  --text-advisor-dialog: 33px; /* approved focused advisor status dialog */
+  --text-advisor-mark: 18px;
   --text-dialog-body: 13.5px;
 
   /* ---------- the run ---------- */

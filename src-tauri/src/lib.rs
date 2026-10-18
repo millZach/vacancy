@@ -9,6 +9,7 @@ use std::sync::Mutex;
 
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
+use vacancy_core::advisor::{self, AdvisorStatus};
 use vacancy_core::permissions::{self, FullDiskAccess};
 use vacancy_core::{
     CancelToken, Env, MapFolder, Moment, Plan, PlanSummary, RunEvent, RunHistory, RunReport,
@@ -59,6 +60,14 @@ enum Mode {
 }
 
 impl Mode {
+    /// Fixture modes must bypass discovery before any host PATH, home or filesystem lookup can happen.
+    fn advisor_status_with(&self, discover: impl FnOnce() -> AdvisorStatus) -> AdvisorStatus {
+        match self {
+            Mode::Real => discover(),
+            Mode::Fixture { .. } | Mode::Refused(_) => AdvisorStatus::fixture_disabled(),
+        }
+    }
+
     /// Only the retained scan supplies an action. Refuse fixtures before even consulting host-side closures;
     /// saved report JSON is deliberately not an authority to open an app.
     fn open_hint_with(
@@ -343,6 +352,18 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[tauri::command]
 async fn machine_name() -> String {
     vacancy_core::machine_name()
+}
+
+/// Read-only availability with no executable paths. No CLI is launched, signed into or enabled.
+#[tauri::command]
+async fn advisor_status(app: AppHandle) -> Result<AdvisorStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<Session>()
+            .mode
+            .advisor_status_with(advisor::passive_status)
+    })
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// The drives to offer for scanning, the system drive first. Read-only. Runs on a blocking thread: a drive slow to
@@ -659,6 +680,7 @@ pub fn run() {
         .manage(Session::new(Mode::from_env()))
         .invoke_handler(tauri::generate_handler![
             machine_name,
+            advisor_status,
             list_volumes,
             forget_drive,
             full_disk_access,
@@ -685,6 +707,22 @@ mod tests {
     const C: &str = r"C:\";
     const D: &str = r"D:\";
 
+    #[test]
+    fn fixture_and_refused_fixture_status_never_invoke_host_discovery() {
+        for mode in [
+            Mode::Fixture {
+                root: PathBuf::from("unused-fixture-root"),
+                capacity: 0,
+            },
+            Mode::Refused("invalid fixture".into()),
+        ] {
+            let status =
+                mode.advisor_status_with(|| panic!("fixture mode must never inspect the host"));
+            assert_eq!(status, AdvisorStatus::fixture_disabled());
+            assert!(!status.enabled);
+        }
+    }
+
     fn hint_volume(id: &str) -> VolumeInfo {
         VolumeInfo {
             id: id.into(),
@@ -696,6 +734,14 @@ mod tests {
             used_bytes: 500,
             free_bytes: 500,
         }
+    }
+
+    #[test]
+    fn real_mode_returns_the_read_only_discovery_report() {
+        let expected = AdvisorStatus::fixture(Vec::new());
+        let returned = Mode::Real.advisor_status_with(|| expected.clone());
+        assert_eq!(returned, expected);
+        assert!(!returned.enabled);
     }
 
     #[test]

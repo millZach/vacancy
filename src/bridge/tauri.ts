@@ -1,5 +1,6 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type {
+  AdvisorStatus,
   Bridge,
   FullDiskAccess,
   MapFolder,
@@ -18,6 +19,7 @@ export function createTauriBridge(): Bridge {
   return {
     platform: detectPlatform(),
     machineName: () => invoke<string>('machine_name'),
+    advisorStatus: () => invoke<AdvisorStatus>('advisor_status'),
     listVolumes: () => invoke<VolumeInfo[]>('list_volumes'),
     forgetDrive: (mountPoint) => invoke<undefined>('forget_drive', { mountPoint }),
     fullDiskAccess: () => invoke<FullDiskAccess>('full_disk_access'),

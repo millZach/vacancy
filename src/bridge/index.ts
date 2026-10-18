@@ -4,7 +4,8 @@
 // `&fda=granted` to change the Mac's Full Disk Access answer, `&unplug=20000` to unplug the last drive (the USB
 // stick on Windows) 20 seconds in, `&run=6000` for a mock run of a plan that takes six seconds, `&moves=1` for runs
 // that also report the fixture's folder moves (to see the finish's Moved slide), `&unreadable=2` for a history
-// with two kept runs it can't read, and `&history=0` to start with no past runs.
+// with two kept runs it can't read, and `&history=0` to start with no past runs. `&advisor=notChecked` previews
+// native fixture bypass; `&advisor=error` fails only the advisor status read. These browser fixtures never enable AI.
 import { isTauri } from '@tauri-apps/api/core';
 import { fixtures, isFixtureName } from './fixtures';
 import { createMockBridge } from './mock';
@@ -18,6 +19,7 @@ export { fixtures, type Fixture, type FixtureName } from './fixtures';
 export type * from './types';
 
 const ACCESS: readonly FullDiskAccess[] = ['granted', 'missing', 'unknown', 'notApplicable'];
+const ADVISOR_PREVIEW = ['notChecked', 'error'] as const;
 
 /** The bridge for wherever the UI is running. */
 export function defaultBridge(search = window.location.search): Bridge {
@@ -31,6 +33,7 @@ export function defaultBridge(search = window.location.search): Bridge {
   const unplug = Number(q.get('unplug'));
   const run = q.get('run');
   const unreadable = Number(q.get('unreadable'));
+  const advisor = ADVISOR_PREVIEW.find((a) => a === q.get('advisor'));
   return createMockBridge(fixtures[isFixtureName(name) ? name : 'windows'], {
     ...(delay > 0 ? { delayMs: delay } : {}),
     ...(fail !== null ? { fail } : {}),
@@ -41,5 +44,6 @@ export function defaultBridge(search = window.location.search): Bridge {
     ...(q.get('moves') === '1' ? { moves: true } : {}),
     ...(unreadable > 0 ? { unreadableRuns: unreadable } : {}),
     ...(q.get('history') === '0' ? { pastRuns: false } : {}),
+    ...(advisor ? { advisor } : {}),
   });
 }
