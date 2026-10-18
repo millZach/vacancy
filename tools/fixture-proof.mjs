@@ -2,7 +2,7 @@
 // Requires the app already started with VACANCY_FIXTURE_ROOT and a held-open fixture file.
 // Build the handle-pinned mutation helper first: cargo build -p vacancy-core --example fixture_mutator
 // --mutator <exe> overrides target/debug/examples/fixture_mutator.exe (VACANCY_FIXTURE_MUTATOR also works).
-// --reminders also selects the single default-off reminder from a fresh fixture built with --advice.
+// --reminders also selects the default-off Steam reminder from a fresh fixture built with --advice.
 // Drives scan/plan/confirm/run with UI clicks; stops on the completed run for wrapped-shots (without --run).
 import assert from 'node:assert/strict';
 import { lstat, mkdir, realpath, writeFile } from 'node:fs/promises';
@@ -90,12 +90,15 @@ try {
   await exited; // It has written via the held handle and released every pin before planning.
   await page.getByRole('button', { name: 'Build a plan' }).click();
   if (o.reminders) {
-    const hints = page.getByRole('complementary', { name: 'Plan', exact: true })
-      .getByRole('region', { name: 'Left for you' }).getByRole('checkbox', { name: /^Remind me:/ });
-    assert.equal(await hints.count(), 1, 'The fresh Windows advice fixture must have exactly one reminder');
-    assert.equal(await hints.getAttribute('aria-checked'), 'false', 'Advice must start unselected');
-    await hints.click();
-    assert.equal(await hints.getAttribute('aria-checked'), 'true');
+    const advice = page.getByRole('complementary', { name: 'Plan', exact: true })
+      .getByRole('region', { name: 'Left for you' });
+    // The Windows advice fixture offers the Steam reminder plus Docker and Windows tool guides; all start off.
+    for (const box of await advice.getByRole('checkbox', { name: /^Remind me:/ }).all()) {
+      assert.equal(await box.getAttribute('aria-checked'), 'false', 'Advice must start unselected');
+    }
+    const steam = advice.getByRole('checkbox', { name: 'Remind me: Review Vacancy fixture game in Steam', exact: true });
+    await steam.click();
+    assert.equal(await steam.getAttribute('aria-checked'), 'true');
   }
   const deletionBoxes = page.getByRole('complementary', { name: 'Plan', exact: true })
     .getByRole('region', { name: 'Delete' }).getByRole('checkbox');

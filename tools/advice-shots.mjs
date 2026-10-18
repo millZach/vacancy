@@ -51,7 +51,9 @@ try {
       await page.locator('.atlas.is-map').waitFor();
       await page.getByRole('button', { name: 'Build a plan' }).click();
       const tray = page.getByRole('complementary', { name: 'Plan' });
-      const hint = tray.getByRole('checkbox', { name: /^Remind me:/ });
+      // The fixtures also offer tool guides; select only the Steam (Windows) or Logic (Mac) reminder.
+      const reminder = fixture === 'windows' ? /^Remind me: Cyberpunk 2077/ : /^Remind me: Logic Pro sound library/;
+      const hint = tray.getByRole('checkbox', { name: reminder });
       assert.equal(await hint.getAttribute('aria-checked'), 'false');
       const total = await tray.locator('.tray-total-num').textContent();
       await hint.click();
@@ -63,7 +65,7 @@ try {
         assert.equal((await tray.locator('.tray-total-num').textContent()).replaceAll('\u00a0', ' '), '0 B');
       }
       const advice = tray.getByRole('region', { name: 'Left for you' });
-      await advice.locator('.tray-row-title').click();
+      await advice.locator('.tray-row').filter({ has: page.getByRole('checkbox', { name: reminder }) }).locator('.tray-row-title').click();
       if (fixture === 'windows') {
         await advice.getByRole('button', { name: 'Open Steam uninstall' }).click();
         assert((await advice.getByRole('alert').textContent()).includes('No app was launched.'));
