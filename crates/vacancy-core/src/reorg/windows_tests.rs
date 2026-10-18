@@ -20,16 +20,47 @@ fn clear_hook() {
     HOOK.with(|slot| *slot.borrow_mut() = None);
 }
 
-fn fixture() -> (tempfile::TempDir, Env) {
+/// Case-insensitive component prefix test, as Windows names compare.
+fn within(path: &Path, base: &Path) -> bool {
+    let lower = |path: &Path| {
+        path.components()
+            .map(|part| part.as_os_str().to_string_lossy().to_lowercase())
+            .collect::<Vec<_>>()
+    };
+    lower(path).starts_with(&lower(base))
+}
+
+/// The one outside-home base every fixture lives under, shared by parent tests and their crash children.
+/// `VACANCY_T08_TEST_ROOT` wins (the parent always sets it for a child), then CI's `RUNNER_TEMP`, then a folder in
+/// the workspace `target` directory. Whichever is chosen must be a plain drive path outside the user's home.
+fn test_base() -> PathBuf {
     let base = std::env::var_os("VACANCY_T08_TEST_ROOT")
         .or_else(|| std::env::var_os("RUNNER_TEMP"))
-        .expect("T08 tests require an outside-home wrapper root or CI RUNNER_TEMP");
-    let base = PathBuf::from(base);
-    assert!(native::plain(&base));
-    if let Some(home) = std::env::var_os("USERPROFILE") {
-        let home = PathBuf::from(home);
-        assert!(!base.starts_with(&home) && !home.starts_with(&base));
-    }
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .ancestors()
+                .nth(2)
+                .expect("vacancy-core sits two levels below the workspace root")
+                .join("target")
+                .join("vacancy-t08-tests")
+        });
+    let home = PathBuf::from(
+        std::env::var_os("USERPROFILE")
+            .expect("USERPROFILE is needed to keep T08 fixtures out of home"),
+    );
+    assert!(
+        native::plain(&base) && !within(&base, &home) && !within(&home, &base),
+        "T08 test base {} must be a plain drive path outside {}; set VACANCY_T08_TEST_ROOT to an outside-home folder",
+        base.display(),
+        home.display()
+    );
+    fs::create_dir_all(&base).unwrap();
+    base
+}
+
+fn fixture() -> (tempfile::TempDir, Env) {
+    let base = test_base();
     let dir = tempfile::Builder::new()
         .prefix("vacancy-t08-case-")
         .tempdir_in(base)
@@ -520,6 +551,7 @@ fn run_child(env: &Env, point: &str, mode: &str) -> std::process::Output {
             "--nocapture",
             "--test-threads=1",
         ])
+        .env("VACANCY_T08_TEST_ROOT", test_base())
         .env("VACANCY_T08_CHILD_ROOT", &env.root)
         .env("VACANCY_T08_CRASH_AT", point)
         .env("VACANCY_T08_CHILD_MODE", mode)
@@ -532,9 +564,11 @@ fn run_child(env: &Env, point: &str, mode: &str) -> std::process::Output {
 fn crash_child() {
     let root =
         PathBuf::from(std::env::var_os("VACANCY_T08_CHILD_ROOT").expect("parent fixture root"));
-    let base = PathBuf::from(
-        std::env::var_os("VACANCY_T08_TEST_ROOT").expect("outside-home test wrapper"),
+    assert!(
+        std::env::var_os("VACANCY_T08_TEST_ROOT").is_some(),
+        "the parent passes its resolved test base"
     );
+    let base = test_base();
     assert!(
         root.starts_with(&base)
             && root != base
@@ -694,6 +728,34 @@ fn stable_lease_excludes_a_second_process_for_the_whole_engine_session() {
     );
     engine.run(&CancelToken::new()).unwrap();
     engine.undo(&CancelToken::new()).unwrap();
+}
+
+#[test]
+fn subprocess_tests_share_one_outside_home_base_under_ci_or_no_override() {
+    // Re-run a parent test whose own crash child needs the base, once as CI does (RUNNER_TEMP only) and once with
+    // neither variable (the workspace target fallback). Both must pass the resolved base down to the child.
+    let base = test_base();
+    for runner_temp in [Some(base.as_os_str()), None] {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "reorg::windows::tests::stable_lease_excludes_a_second_process_for_the_whole_engine_session",
+                "--test-threads=1",
+            ])
+            .env_remove("VACANCY_T08_TEST_ROOT")
+            .env_remove("RUNNER_TEMP");
+        if let Some(runner_temp) = runner_temp {
+            command.env("RUNNER_TEMP", runner_temp);
+        }
+        let result = command.output().unwrap();
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(
+            result.status.success() && stdout.contains("1 passed"),
+            "RUNNER_TEMP={runner_temp:?}: {stdout} {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
 }
 
 // Preparation only while focused attempt2 source is frozen. Not compiled/imported yet.
