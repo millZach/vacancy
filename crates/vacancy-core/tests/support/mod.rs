@@ -101,7 +101,9 @@ pub fn real_path(path: &Path) -> PathBuf {
 #[cfg(windows)]
 mod windows_case;
 #[cfg(windows)]
-pub(crate) use windows_case::make_case_sensitive;
+pub fn make_case_sensitive(dir: &Path) -> bool {
+    windows_case::make_case_sensitive(dir)
+}
 
 /// Makes everything at and below `path` look last used `days` ago: the modified and accessed times of every file
 /// and folder. Call it once the tree is built: creating anything inside afterwards makes its folder new again.
