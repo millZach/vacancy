@@ -89,6 +89,18 @@ fn write(root: &str, bulk: usize, advice: bool) -> ExitCode {
             );
             println!("  node_modules:      {}", p.node_modules.display());
             println!("  store file:        {}", p.store_file.display());
+            println!(
+                "  tidy up (Windows): {} loose files in Downloads, Desktop and Documents",
+                p.tidy.files.len()
+            );
+            println!("    collides:        {}", p.tidy.collision.display());
+            println!(
+                "    with:            {}",
+                p.tidy.collision_existing.display()
+            );
+            println!("    also deleted:    {}", p.tidy.deleted_too.display());
+            println!("    hold open:       {}", p.tidy.held_open.display());
+            println!("    change after scan: {}", p.tidy.changed_later.display());
             if advice {
                 println!(
                     "  advice: Steam hint (plus Logic instructions on macOS); fixture mode never opens Steam"

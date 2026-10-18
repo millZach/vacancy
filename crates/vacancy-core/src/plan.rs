@@ -16,7 +16,7 @@
 //!
 //! A plan can't be changed once made: its fields are private and it is only ever read.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,9 +29,11 @@ use crate::categorize::{CategoryId, Env, ItemRef};
 use crate::fsid::{Identity, Walker};
 use crate::guard::{Denied, Guard};
 use crate::map::{Overview, ScannedVolume};
-use crate::report::{LeftForYou, Skip, SkipKind};
+use crate::report::{LeftForYou, Skip, SkipKind, StepKind};
 use crate::rules::{ProposalAction, loose};
+use crate::scan::CancelToken;
 use crate::snapshot::{DirId, Snapshot, file_digest_key};
+use crate::tidy::Approved;
 
 /// A plan, as the confirm dialog shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
@@ -51,7 +53,7 @@ pub struct PlanSummary {
     /// Places it takes them from.
     #[ts(type = "number")]
     pub places: u64,
-    /// Folder moves it makes, which can be undone. None until reorganizations arrive (ticket 08).
+    /// Folder moves it makes (Tidy up), which free nothing and can be undone.
     #[ts(type = "number")]
     pub moves: u64,
     /// Its steps, one per proposal, in the order they run.
@@ -78,6 +80,11 @@ pub struct PlanStep {
     pub items: u64,
     #[ts(type = "number")]
     pub places: u64,
+    /// Deletes, or moves (a Tidy up sort, with `bytes`, `items` and `places` zero).
+    pub kind: StepKind,
+    /// Files it moves, for a move step.
+    #[ts(type = "number")]
+    pub moves: u64,
 }
 
 /// Why a selection couldn't become a plan.
@@ -157,6 +164,10 @@ pub struct Plan {
     since: SystemTime,
     steps: Vec<Step>,
     left_for_you: Vec<LeftForYou>,
+    /// The Tidy up sorts it runs after its deletes, each validated when the plan was made.
+    tidy: Vec<Approved>,
+    /// Sorts refused while planning: nothing of them can run.
+    tidy_refused: Vec<Skip>,
     /// The map of the scan it was made from, for the run's report.
     map: Overview,
 }
@@ -169,7 +180,7 @@ impl Plan {
 
     /// What the confirm dialog shows.
     pub fn summary(&self) -> PlanSummary {
-        let steps: Vec<PlanStep> = self
+        let mut steps: Vec<PlanStep> = self
             .steps
             .iter()
             .map(|s| PlanStep {
@@ -179,20 +190,34 @@ impl Plan {
                 bytes: s.actions.iter().map(|a| a.bytes).sum(),
                 items: s.actions.iter().map(|a| a.files).sum(),
                 places: s.actions.len() as u64,
+                kind: StepKind::Delete,
+                moves: 0,
             })
             .collect();
+        steps.extend(self.tidy.iter().map(|t| PlanStep {
+            id: t.id.clone(),
+            title: t.title(),
+            category: t.category(),
+            bytes: 0,
+            items: 0,
+            places: 0,
+            kind: StepKind::Move,
+            moves: t.moves,
+        }));
         PlanSummary {
             id: self.id.clone(),
             mount_point: self.mount_point.clone(),
             bytes: steps.iter().map(|s| s.bytes).sum(),
             items: steps.iter().map(|s| s.items).sum(),
             places: steps.iter().map(|s| s.places).sum(),
-            moves: 0,
+            moves: self.tidy.iter().map(|t| t.moves).sum(),
             steps,
             refused: self
                 .steps
                 .iter()
                 .flat_map(|s| s.refused.iter().map(|(skip, _)| skip.clone()))
+                .chain(self.tidy.iter().flat_map(|t| t.refused.iter().cloned()))
+                .chain(self.tidy_refused.iter().cloned())
                 .collect(),
             left_for_you: self.left_for_you.iter().map(|l| l.id.clone()).collect(),
         }
@@ -221,6 +246,10 @@ impl Plan {
     pub(crate) fn map(&self) -> &Overview {
         &self.map
     }
+
+    pub(crate) fn tidy(&self) -> &[Approved] {
+        &self.tidy
+    }
 }
 
 /// Makes the plan for the proposals `ids` of the drive `scanned`, whose scan used `env`. Advice and tools in the
@@ -237,7 +266,17 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
     let guard = Guard::new(env, &env.root);
     let mut walker = Walker::default();
     let mut chosen: Vec<usize> = Vec::new();
+    let mut sorts: Vec<&str> = Vec::new();
     for id in ids {
+        if id.starts_with(crate::tidy::PREFIX) {
+            if !scanned.tidy.has(id) {
+                return Err(PlanError::NoSuchProposal(id.clone()));
+            }
+            if !sorts.contains(&id.as_str()) {
+                sorts.push(id);
+            }
+            continue;
+        }
         let i = proposals
             .position(id)
             .ok_or_else(|| PlanError::NoSuchProposal(id.clone()))?;
@@ -365,7 +404,33 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
         }
         steps.push(step);
     }
+    // Delete wins over sort: a file a delete step of this plan takes is left out of every sort.
+    let deleting: HashSet<&str> = steps.iter().map(|s| s.id.as_str()).collect();
+    let mut tidy = Vec::new();
+    let mut tidy_refused = Vec::new();
+    // In the order the tray lists them: Downloads, Desktop, Documents.
+    for proposal in scanned.tidy.proposals() {
+        if !sorts.contains(&proposal.id.as_str()) {
+            continue;
+        }
+        match scanned
+            .tidy
+            .validate(&proposal.id, &deleting, &CancelToken::new())
+        {
+            Some(Ok(approved)) => tidy.push(approved),
+            Some(Err(reason)) => tidy_refused.push(Skip {
+                path: proposal.path.clone(),
+                reason,
+                kind: SkipKind::Changed,
+                bytes: 0,
+                items: proposal.moves.len() as u64,
+            }),
+            None => {}
+        }
+    }
     if left_for_you.is_empty()
+        && tidy.is_empty()
+        && tidy_refused.is_empty()
         && steps
             .iter()
             .all(|s| s.actions.is_empty() && s.refused.is_empty())
@@ -379,6 +444,8 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
         since: snap.started(),
         steps,
         left_for_you,
+        tidy,
+        tidy_refused,
         map: scanned.overview.clone(),
     })
 }

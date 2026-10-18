@@ -27,7 +27,7 @@ items: number,
  */
 places: number, 
 /**
- * Folder moves it makes, which can be undone. None until reorganizations arrive (ticket 08).
+ * Folder moves it makes (Tidy up), which free nothing and can be undone.
  */
 moves: number, 
 /**

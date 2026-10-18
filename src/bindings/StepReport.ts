@@ -2,6 +2,7 @@
 import type { CategoryId } from "./CategoryId";
 import type { Outcome } from "./Outcome";
 import type { Skip } from "./Skip";
+import type { StepKind } from "./StepKind";
 
 /**
  * One step of a run: one proposal of the plan.
@@ -36,13 +37,21 @@ plannedBytes: number,
  */
 freedBytes: number, 
 /**
- * Files the plan meant to delete.
+ * Files the plan meant to delete (for a move step, to move).
  */
 plannedItems: number, 
 /**
  * Files deleted.
  */
 deletedItems: number, 
+/**
+ * Deletes or moves. Older reports have only deletes.
+ */
+kind: StepKind, 
+/**
+ * Files moved, for a move step.
+ */
+movedItems: number, 
 /**
  * Places the plan took files from.
  */
