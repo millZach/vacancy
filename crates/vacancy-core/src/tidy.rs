@@ -876,6 +876,8 @@ pub(crate) fn run_sort(
         on_moved(done as u64, total as u64)
     });
     let ledger = engine.ledger();
+    // Releases the journal lease now; on macOS the engine holds nothing.
+    #[cfg_attr(not(windows), allow(clippy::drop_non_drop))]
     drop(engine);
     if let Err(e) = result {
         record.note = Some(format!(
@@ -1075,6 +1077,8 @@ pub fn undo(
     }
     let result = engine.undo(cancel);
     let ledger = engine.ledger();
+    // Releases the journal lease now; on macOS the engine holds nothing.
+    #[cfg_attr(not(windows), allow(clippy::drop_non_drop))]
     drop(engine);
     settle(record, &ledger);
     record.undo = Some(undone(record, &ledger, now_ms()));
@@ -1119,6 +1123,8 @@ pub fn refresh(env: &Env, journals: &Journals, report: &mut RunReport) -> bool {
             let _ = engine.reconcile(&CancelToken::new());
         }
         let ledger = engine.ledger();
+        // Releases the journal lease now; on macOS the engine holds nothing.
+        #[cfg_attr(not(windows), allow(clippy::drop_non_drop))]
         drop(engine);
         settle(record, &ledger);
         let undone_any = ledger.moves.iter().any(|m| m.undo != OpState::NotRun);
