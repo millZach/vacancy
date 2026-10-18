@@ -91,7 +91,9 @@ impl Plan {
             }
         }
         for (index, root) in self.roots.iter().enumerate() {
-            if self.roots[..index].iter().any(|other| root.chain.starts_with(&other.chain) || other.chain.starts_with(&root.chain)) {
+            if self.roots[..index].iter().any(|other| {
+                root.chain.starts_with(&other.chain) || other.chain.starts_with(&root.chain)
+            }) {
                 return Err(Error::CorruptJournal);
             }
         }
@@ -99,7 +101,15 @@ impl Plan {
         let mut directory_aliases = HashSet::new();
         for dir in &self.directories {
             dir.at.checked(true)?;
-            if !dirs.insert(dir.at.clone()) || !directory_aliases.insert((dir.at.folder, dir.at.names.iter().map(crate::exec::sys::reorg::case_key).collect::<Vec<_>>()))
+            if !dirs.insert(dir.at.clone())
+                || !directory_aliases.insert((
+                    dir.at.folder,
+                    dir.at
+                        .names
+                        .iter()
+                        .map(crate::exec::sys::reorg::case_key)
+                        .collect::<Vec<_>>(),
+                ))
                 || dir.expected.is_some_and(|id| id.volume != self.root.volume)
             {
                 return Err(Error::CorruptJournal);
@@ -110,9 +120,16 @@ impl Plan {
         let mut used_directories = HashSet::new();
         for directory in &self.directories {
             for count in 1..directory.at.names.len() {
-                let parent = Place { folder: directory.at.folder, names: directory.at.names[..count].to_vec() };
-                let Some(spec) = self.directories.iter().find(|spec| spec.at == parent) else { return Err(Error::CorruptJournal); };
-                if directory.expected.is_some() && spec.expected.is_none() { return Err(Error::CorruptJournal); }
+                let parent = Place {
+                    folder: directory.at.folder,
+                    names: directory.at.names[..count].to_vec(),
+                };
+                let Some(spec) = self.directories.iter().find(|spec| spec.at == parent) else {
+                    return Err(Error::CorruptJournal);
+                };
+                if directory.expected.is_some() && spec.expected.is_none() {
+                    return Err(Error::CorruptJournal);
+                }
             }
         }
         for mv in &self.moves {
@@ -148,7 +165,9 @@ impl Plan {
 pub(super) fn check_approval(plan: &Plan) -> Result<(), Error> {
     #[derive(Serialize)]
     #[serde(tag = "kind", rename_all = "camelCase")]
-    enum Approval<'a> { Approved { version: u32, plan: &'a Plan } }
+    enum Approval<'a> {
+        Approved { version: u32, plan: &'a Plan },
+    }
     super::journal::check_record(&Approval::Approved { version: 1, plan })
 }
 
@@ -261,13 +280,17 @@ impl State {
             Event::Started if !self.started => self.started = true,
             Event::Started => return Err(Error::CorruptJournal),
             Event::Finished { cancelled }
-                if self.started && !self.finished && !self.rollback_started && self.pending.is_empty() =>
+                if self.started
+                    && !self.finished
+                    && !self.rollback_started
+                    && self.pending.is_empty() =>
             {
-                if !cancelled {
-                    if (0..self.plan.moves.len()).any(|index| !self.terminal(Operation::Move.key(index)))
-                        || !self.directories_terminal() {
-                        return Err(Error::CorruptJournal);
-                    }
+                if !cancelled
+                    && ((0..self.plan.moves.len())
+                        .any(|index| !self.terminal(Operation::Move.key(index)))
+                        || !self.directories_terminal())
+                {
+                    return Err(Error::CorruptJournal);
                 }
                 self.finished = true;
                 self.cancelled = *cancelled;
@@ -283,7 +306,8 @@ impl State {
                 if *identity != expected {
                     return Err(Error::CorruptJournal);
                 }
-                self.rollback_started |= matches!(operation, Operation::Undo | Operation::RemoveDirectory);
+                self.rollback_started |=
+                    matches!(operation, Operation::Undo | Operation::RemoveDirectory);
                 self.pending.insert(key, *identity);
                 self.receipts.remove(&key);
             }
@@ -339,7 +363,8 @@ impl State {
                 if reason.len() > 1024 {
                     return Err(Error::CorruptJournal);
                 }
-                self.rollback_started |= matches!(operation, Operation::Undo | Operation::RemoveDirectory);
+                self.rollback_started |=
+                    matches!(operation, Operation::Undo | Operation::RemoveDirectory);
                 self.receipts.insert(key, Receipt::Skipped);
                 self.reasons.push(reason.clone());
             }
@@ -347,47 +372,102 @@ impl State {
         Ok(())
     }
     fn terminal(&self, key: (u8, usize)) -> bool {
-        matches!(self.receipts.get(&key), Some(Receipt::Applied(_) | Receipt::Skipped))
+        matches!(
+            self.receipts.get(&key),
+            Some(Receipt::Applied(_) | Receipt::Skipped)
+        )
     }
     fn directories_terminal(&self) -> bool {
-        self.plan.directories.iter().enumerate().all(|(index, directory)| directory.expected.is_some() || self.terminal(Operation::Mkdir.key(index)))
+        self.plan
+            .directories
+            .iter()
+            .enumerate()
+            .all(|(index, directory)| {
+                directory.expected.is_some() || self.terminal(Operation::Mkdir.key(index))
+            })
     }
     fn parent_owned(&self, place: &Place) -> bool {
-        (1..place.names.len()).all(|count| self.directory_identity(&Place { folder: place.folder, names: place.names[..count].to_vec() }).is_some())
+        (1..place.names.len()).all(|count| {
+            self.directory_identity(&Place {
+                folder: place.folder,
+                names: place.names[..count].to_vec(),
+            })
+            .is_some()
+        })
     }
     /// Validate the whole execution phase before either an intent or a pre-action skip. Parent ownership is
     /// required only for intents: a missing/skipped parent is precisely why a legitimate skip can occur.
-    fn before_operation(&self, operation: Operation, index: usize, intent: bool) -> Result<Option<Id>, Error> {
+    fn before_operation(
+        &self,
+        operation: Operation,
+        index: usize,
+        intent: bool,
+    ) -> Result<Option<Id>, Error> {
         self.valid_index(operation, index)?;
         let reverse = matches!(operation, Operation::Undo | Operation::RemoveDirectory);
         let key = operation.key(index);
-        if !self.started || !self.pending.is_empty() || (!reverse && (self.finished || self.rollback_started))
-            || (self.receipts.contains_key(&key) && !(reverse && self.receipts.get(&key) == Some(&Receipt::Skipped))) {
+        if !self.started
+            || !self.pending.is_empty()
+            || (!reverse && (self.finished || self.rollback_started))
+            || (self.receipts.contains_key(&key)
+                && !(reverse && self.receipts.get(&key) == Some(&Receipt::Skipped)))
+        {
             return Err(Error::CorruptJournal);
         }
         let expected = match operation {
             Operation::Move => {
-                if !self.directories_terminal() || (0..index).any(|previous| !self.terminal(Operation::Move.key(previous))) { return Err(Error::CorruptJournal); }
+                if !self.directories_terminal()
+                    || (0..index).any(|previous| !self.terminal(Operation::Move.key(previous)))
+                {
+                    return Err(Error::CorruptJournal);
+                }
                 let mv = &self.plan.moves[index];
-                if intent && (!self.parent_owned(&mv.from) || !self.parent_owned(&mv.to)) { return Err(Error::CorruptJournal); }
+                if intent && (!self.parent_owned(&mv.from) || !self.parent_owned(&mv.to)) {
+                    return Err(Error::CorruptJournal);
+                }
                 Some(mv.fingerprint.id)
             }
             Operation::Undo => {
-                if !matches!(self.receipts.get(&Operation::Move.key(index)), Some(Receipt::Applied(_)))
-                    || (index+1..self.plan.moves.len()).any(|later| matches!(self.receipts.get(&Operation::Move.key(later)), Some(Receipt::Applied(_))) && !self.terminal(Operation::Undo.key(later))) { return Err(Error::CorruptJournal); }
+                if !matches!(
+                    self.receipts.get(&Operation::Move.key(index)),
+                    Some(Receipt::Applied(_))
+                ) || (index + 1..self.plan.moves.len()).any(|later| {
+                    matches!(
+                        self.receipts.get(&Operation::Move.key(later)),
+                        Some(Receipt::Applied(_))
+                    ) && !self.terminal(Operation::Undo.key(later))
+                }) {
+                    return Err(Error::CorruptJournal);
+                }
                 let mv = &self.plan.moves[index];
-                if intent && (!self.parent_owned(&mv.from) || !self.parent_owned(&mv.to)) { return Err(Error::CorruptJournal); }
+                if intent && (!self.parent_owned(&mv.from) || !self.parent_owned(&mv.to)) {
+                    return Err(Error::CorruptJournal);
+                }
                 Some(mv.fingerprint.id)
             }
             Operation::Mkdir => {
                 let dir = &self.plan.directories[index];
-                if dir.expected.is_some() || (intent && !self.parent_owned(&dir.at)) { return Err(Error::CorruptJournal); }
+                if dir.expected.is_some() || (intent && !self.parent_owned(&dir.at)) {
+                    return Err(Error::CorruptJournal);
+                }
                 None
             }
             Operation::RemoveDirectory => {
-                if self.plan.moves.iter().enumerate().any(|(index, _)| matches!(self.receipts.get(&Operation::Move.key(index)), Some(Receipt::Applied(_))) && !self.terminal(Operation::Undo.key(index))) { return Err(Error::CorruptJournal); }
-                if intent && !self.parent_owned(&self.plan.directories[index].at) { return Err(Error::CorruptJournal); }
-                match self.receipts.get(&Operation::Mkdir.key(index)) { Some(Receipt::Applied(id)) => Some(*id), _ => return Err(Error::CorruptJournal) }
+                if self.plan.moves.iter().enumerate().any(|(index, _)| {
+                    matches!(
+                        self.receipts.get(&Operation::Move.key(index)),
+                        Some(Receipt::Applied(_))
+                    ) && !self.terminal(Operation::Undo.key(index))
+                }) {
+                    return Err(Error::CorruptJournal);
+                }
+                if intent && !self.parent_owned(&self.plan.directories[index].at) {
+                    return Err(Error::CorruptJournal);
+                }
+                match self.receipts.get(&Operation::Mkdir.key(index)) {
+                    Some(Receipt::Applied(id)) => Some(*id),
+                    _ => return Err(Error::CorruptJournal),
+                }
             }
         };
         Ok(expected)
@@ -410,7 +490,12 @@ impl State {
             .enumerate()
             .find(|(_, dir)| &dir.at == at)
             .and_then(|(index, dir)| {
-                if matches!(self.receipts.get(&Operation::RemoveDirectory.key(index)), Some(Receipt::Applied(_))) { return None; }
+                if matches!(
+                    self.receipts.get(&Operation::RemoveDirectory.key(index)),
+                    Some(Receipt::Applied(_))
+                ) {
+                    return None;
+                }
                 dir.expected
                     .or_else(|| match self.receipts.get(&Operation::Mkdir.key(index)) {
                         Some(Receipt::Applied(id)) => Some(*id),

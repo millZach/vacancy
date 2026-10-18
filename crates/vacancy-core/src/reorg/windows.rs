@@ -140,7 +140,10 @@ impl Inventory {
             if !ids.contains(&root) || ids.iter().any(|id| id.volume != root.volume) {
                 return Err(Error::Changed);
             }
-            if roots.iter().any(|other: &Root| ids.starts_with(&other.chain) || other.chain.starts_with(&ids)) {
+            if roots
+                .iter()
+                .any(|other: &Root| ids.starts_with(&other.chain) || other.chain.starts_with(&ids))
+            {
                 return Err(Error::Unsupported);
             }
             roots.push(Root {
@@ -316,7 +319,9 @@ impl Inventory {
                     missing_names.push(names[count - 1].os());
                     None
                 };
-                if let Some(previous) = directory_aliases.insert(reservation(&at), at.clone()) && previous != at {
+                if let Some(previous) = directory_aliases.insert(reservation(&at), at.clone())
+                    && previous != at
+                {
                     return Err(Error::InvalidName);
                 }
                 if let Some(previous) = directories.insert(at, identity)
@@ -411,13 +416,7 @@ impl Inventory {
 }
 
 fn reservation(at: &Place) -> (Folder, Vec<Vec<u16>>) {
-    (
-        at.folder,
-        at.names
-            .iter()
-            .map(native::case_key)
-            .collect(),
-    )
+    (at.folder, at.names.iter().map(native::case_key).collect())
 }
 fn collision_name(name: &Name, suffix: u32) -> Result<Name, Error> {
     if suffix == 0 {
@@ -647,7 +646,11 @@ impl Engine {
                 }
                 // FILE_CREATE returning NAME_COLLISION positively proves this call did not create it.
                 // Preserve the external directory, never adopt it, and leave its dependent moves skipped.
-                Err(native::MkdirFailure::Collision) => self.skip(Operation::Mkdir, index, "destination directory arrived after approval")?,
+                Err(native::MkdirFailure::Collision) => self.skip(
+                    Operation::Mkdir,
+                    index,
+                    "destination directory arrived after approval",
+                )?,
                 Err(native::MkdirFailure::Uncertain(error)) => {
                     if matches!(native::exists(&parent.dir, name), Ok(false)) {
                         self.skip(Operation::Mkdir, index, format!("{error:?}"))?;

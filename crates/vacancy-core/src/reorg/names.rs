@@ -39,7 +39,9 @@ impl Name {
     }
 
     pub(crate) fn text(text: &str) -> Result<Self, Error> {
-        if text.len() > 4 * 255 { return Err(Error::InvalidName); }
+        if text.len() > 4 * 255 {
+            return Err(Error::InvalidName);
+        }
         Self::checked(text.encode_utf16().take(256).collect())
     }
 
@@ -101,7 +103,10 @@ mod tests {
         assert_eq!(name.display(), "\\u{D800}A.t");
         assert!(Name::text(&name.display()).is_err());
         assert_ne!(name.display(), Name::text("\u{FFFD}A.t").unwrap().display());
-        assert_ne!(display([92, 117, 123, 68, 56, 48, 48, 125]), display([0xd800]));
+        assert_ne!(
+            display([92, 117, 123, 68, 56, 48, 48, 125]),
+            display([0xd800])
+        );
         assert!(Name::text(&"a".repeat(1024 * 1024)).is_err());
     }
 }

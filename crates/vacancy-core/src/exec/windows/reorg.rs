@@ -8,7 +8,9 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use windows_sys::Wdk::Storage::FileSystem::{
     FILE_CREATE, FILE_OPEN, FILE_OPEN_IF, FileRenameInformation, NtCreateFile, NtSetInformationFile,
 };
-use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_WRITE, FILE_READ_DATA, FILE_RENAME_INFO};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_GENERIC_WRITE, FILE_READ_DATA, FILE_RENAME_INFO,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -135,10 +137,13 @@ pub(crate) fn exists(parent: &Dir, name: &Name) -> Result<bool, Fail> {
 /// A rejection-only reservation key. Native names are never rewritten or used through this key as authority.
 /// Use Windows' single-unit uppercase mapping instead of lossy display strings or Unicode expansion.
 pub(crate) fn case_key(name: &Name) -> Vec<u16> {
-    name.0.iter().map(|&unit| {
-        // SAFETY: pure scalar mapping, no pointer/handle or allocation contract.
-        unsafe { windows_sys::Wdk::System::SystemServices::RtlUpcaseUnicodeChar(unit) }
-    }).collect()
+    name.0
+        .iter()
+        .map(|&unit| {
+            // SAFETY: pure scalar mapping, no pointer/handle or allocation contract.
+            unsafe { windows_sys::Wdk::System::SystemServices::RtlUpcaseUnicodeChar(unit) }
+        })
+        .collect()
 }
 
 /// Metadata work is capped at the listing seam, including ignored entries, not just at the accepted-file count.
@@ -350,7 +355,10 @@ pub(crate) fn rename(file: &PinnedFile, destination: &Dir, name: &Name) -> Resul
 
 /// Create only, relative to a retained real parent. Returns the actual owned identity, never a fabricated one.
 #[derive(Debug)]
-pub(crate) enum MkdirFailure { Collision, Uncertain(Fail) }
+pub(crate) enum MkdirFailure {
+    Collision,
+    Uncertain(Fail),
+}
 
 pub(crate) fn mkdir(parent: &Dir, name: &Name) -> Result<(Dir, Step), MkdirFailure> {
     let handle = create_status(
@@ -360,10 +368,16 @@ pub(crate) fn mkdir(parent: &Dir, name: &Name) -> Result<(Dir, Step), MkdirFailu
         FILE_SHARE_READ | FILE_SHARE_WRITE,
         FILE_CREATE,
         FILE_DIRECTORY_FILE,
-    ).map_err(|status| if status == windows_sys::Win32::Foundation::STATUS_OBJECT_NAME_COLLISION {
-        MkdirFailure::Collision
-    } else { MkdirFailure::Uncertain(open_fail(status)) })?;
-    let (attributes, _) = attribute_tag(&handle).ok_or(MkdirFailure::Uncertain(Fail::Unsupported))?;
+    )
+    .map_err(|status| {
+        if status == windows_sys::Win32::Foundation::STATUS_OBJECT_NAME_COLLISION {
+            MkdirFailure::Collision
+        } else {
+            MkdirFailure::Uncertain(open_fail(status))
+        }
+    })?;
+    let (attributes, _) =
+        attribute_tag(&handle).ok_or(MkdirFailure::Uncertain(Fail::Unsupported))?;
     if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(MkdirFailure::Uncertain(Fail::Link));
     }
@@ -445,7 +459,12 @@ fn create(
 }
 
 fn create_status(
-    parent: &Handle, name: &Name, access: u32, share: u32, disposition: u32, options: u32,
+    parent: &Handle,
+    name: &Name,
+    access: u32,
+    share: u32,
+    disposition: u32,
+    options: u32,
 ) -> Result<Handle, i32> {
     let object_name = UNICODE_STRING {
         Length: (name.0.len() * 2) as u16,

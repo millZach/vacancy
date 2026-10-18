@@ -34,10 +34,15 @@ pub(super) fn check_record(event: &impl Serialize) -> Result<(), Error> {
     struct Limit(usize);
     impl Write for Limit {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if bytes.len() > MAX_RECORD - self.0 { return Err(std::io::Error::other("record bound")); }
-            self.0 += bytes.len(); Ok(bytes.len())
+            if bytes.len() > MAX_RECORD - self.0 {
+                return Err(std::io::Error::other("record bound"));
+            }
+            self.0 += bytes.len();
+            Ok(bytes.len())
         }
-        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
     serde_json::to_writer(Limit(0), event).map_err(|_| Error::Bounds)
 }
@@ -374,31 +379,6 @@ impl Store {
     }
 }
 
-#[cfg(test)]
-pub(super) mod tests {
-    use std::cell::RefCell;
-    #[derive(Clone, Copy)]
-    pub(crate) enum Fault {
-        Before,
-        Partial(usize),
-        Flush,
-    }
-    thread_local! { static FAULT: RefCell<Option<(u64, Fault)>> = const { RefCell::new(None) }; }
-    pub(crate) fn set(sequence: u64, fault: Fault) {
-        FAULT.with(|slot| *slot.borrow_mut() = Some((sequence, fault)));
-    }
-    pub(crate) fn fault(sequence: u64) -> Option<Fault> {
-        FAULT.with(|slot| {
-            let mut value = slot.borrow_mut();
-            if value.as_ref().is_some_and(|(at, _)| *at == sequence) {
-                value.take().map(|(_, fault)| fault)
-            } else {
-                None
-            }
-        })
-    }
-}
-
 fn suffix(name: &Name, text: &str) -> Result<Name, Error> {
     Name::checked(name.0.iter().copied().chain(text.encode_utf16()).collect())
 }
@@ -435,8 +415,12 @@ fn decode(bytes: &[u8], mut sequence: u64, hash: &Hash) -> Result<(Vec<Value>, u
         if length > MAX_RECORD || next != sequence + 1 {
             return Err(Error::CorruptJournal);
         }
-        if remaining.len() < HEADER { return Ok((records, sequence, true)); }
-        if remaining[16..HEADER] != hash.of(&remaining[..16])? { return Err(Error::CorruptJournal); }
+        if remaining.len() < HEADER {
+            return Ok((records, sequence, true));
+        }
+        if remaining[16..HEADER] != hash.of(&remaining[..16])? {
+            return Err(Error::CorruptJournal);
+        }
         let end = HEADER + length;
         if remaining.len() < end + 40 {
             return Ok((records, sequence, true));
@@ -446,10 +430,36 @@ fn decode(bytes: &[u8], mut sequence: u64, hash: &Hash) -> Result<(Vec<Value>, u
         {
             return Err(Error::CorruptJournal);
         }
-        records
-            .push(serde_json::from_slice(&remaining[HEADER..end]).map_err(|_| Error::CorruptJournal)?);
+        records.push(
+            serde_json::from_slice(&remaining[HEADER..end]).map_err(|_| Error::CorruptJournal)?,
+        );
         sequence = next;
         at += end + 40;
     }
     Ok((records, sequence, false))
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use std::cell::RefCell;
+    #[derive(Clone, Copy)]
+    pub(crate) enum Fault {
+        Before,
+        Partial(usize),
+        Flush,
+    }
+    thread_local! { static FAULT: RefCell<Option<(u64, Fault)>> = const { RefCell::new(None) }; }
+    pub(crate) fn set(sequence: u64, fault: Fault) {
+        FAULT.with(|slot| *slot.borrow_mut() = Some((sequence, fault)));
+    }
+    pub(crate) fn fault(sequence: u64) -> Option<Fault> {
+        FAULT.with(|slot| {
+            let mut value = slot.borrow_mut();
+            if value.as_ref().is_some_and(|(at, _)| *at == sequence) {
+                value.take().map(|(_, fault)| fault)
+            } else {
+                None
+            }
+        })
+    }
 }
