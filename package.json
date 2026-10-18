@@ -14,7 +14,10 @@
     "tauri": "tauri",
     "ripple-strip": "node tools/ripple-strip.mjs",
     "map-shots": "node tools/map-shots.mjs",
-    "wrapped-shots": "node tools/wrapped-shots.mjs"
+    "wrapped-shots": "node tools/wrapped-shots.mjs",
+    "prototype:dups": "vite --config prototypes/duplicates/vite.config.ts",
+    "prototype:dups:check": "tsc --noEmit -p prototypes/duplicates/tsconfig.json",
+    "prototype:dups:build": "vite build --config prototypes/duplicates/vite.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/overpass": "^5.3.0",
