@@ -225,7 +225,9 @@ export function HistoryMenu({ locked, onOpen, onUndo }: Props) {
                     const key = `${run.id}:${t.id}`;
                     const stuck = t.stuck;
                     const control =
-                      t.back !== null && !t.undoable ? (
+                      t.interrupted && !t.undoable ? (
+                        <span className="undone is-partial">Interrupted · open to see</span>
+                      ) : t.back !== null && !t.undoable ? (
                         <span className={stuck ? 'undone is-partial' : 'undone'}>
                           {stuck ? `Moved back · ${formatCount(stuck)} stayed` : 'Moved back'}
                         </span>

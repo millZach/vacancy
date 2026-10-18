@@ -4,14 +4,22 @@
 import type { Reorganized, RunReport, Skip, TidyMove, TidyProposal, TidyStay } from '../bridge';
 import { formatCount } from '../format';
 
+/** Whether a delete proposal in the plan takes this file too. (The core decides for sure when it plans.) */
+const deletedIn = (m: TidyMove, plan: readonly string[]) => m.deletedBy.some((id) => plan.includes(id));
+
 /** The moves a plan makes for `t`: every move but those of files a delete proposal in the plan takes. */
 export function activeMoves(t: TidyProposal, plan: readonly string[]): TidyMove[] {
-  return t.moves.filter((m) => !m.deletedBy || !plan.includes(m.deletedBy));
+  return t.moves.filter((m) => !deletedIn(m, plan));
 }
 
 /** Files of `t` the plan deletes instead: a delete proposal in it takes them too. */
 export function goingInPlan(t: TidyProposal, plan: readonly string[]): TidyMove[] {
-  return t.moves.filter((m) => !!m.deletedBy && plan.includes(m.deletedBy));
+  return t.moves.filter((m) => deletedIn(m, plan));
+}
+
+/** The delete proposals in the plan that take some of `t`'s files instead. */
+export function deletersIn(t: TidyProposal, plan: readonly string[]): string[] {
+  return [...new Set(goingInPlan(t, plan).flatMap((m) => m.deletedBy.filter((id) => plan.includes(id))))];
 }
 
 /** The top folder a move goes into: `Images` for `Images\2026`. */

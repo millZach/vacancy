@@ -103,6 +103,12 @@ export function ConfirmDialog({ plan, platform, onCancel, onGo }: Props) {
         {!deletes && plan.moves === 0 && reminders === 0 && (
           <p>Everything in the plan changed since the scan. Scan again to see the drive as it is now.</p>
         )}
+        {plan.movesRefused.length > 0 && (
+          <p className="dialog-quiet" title={plan.movesRefused.map((r) => r.path).join('\n')}>
+            {plan.movesRefused.length === 1 ? '1 file' : `${formatCount(plan.movesRefused.length)} files`} Vacancy would
+            sort changed since you reviewed {plan.movesRefused.length === 1 ? 'it and stays where it is' : 'them and stay where they are'}.
+          </p>
+        )}
         {n > 0 && (deletes || plan.moves > 0 || reminders > 0) && (
           <p className="dialog-quiet" title={plan.refused.map((r) => r.path).join('\n')}>
             {n === 1 ? '1 place' : `${formatCount(n)} places`}{' '}

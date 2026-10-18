@@ -65,7 +65,7 @@ function build(home: string, spec: FolderSpec): TidyProposal {
         kind: d.kind,
         bytes: each,
         renamed: to !== name,
-        deletedBy: d.deletedBy?.names.includes(name) ? d.deletedBy.by : null,
+        deletedBy: d.deletedBy?.names.includes(name) ? [d.deletedBy.by] : [],
       });
     }
   }
@@ -80,8 +80,9 @@ function build(home: string, spec: FolderSpec): TidyProposal {
     stays: spec.stays,
     subfolders: spec.subfolders,
     existing: spec.existing,
-    later: 0,
+    limit: 512,
     capped: false,
+    later: 0,
   };
 }
 
@@ -127,7 +128,8 @@ export function windowsTidy(home: string): TidyFixture {
           renamed: [['fonts.zip', 'fonts (1).zip']],
         },
         { dest: `Videos\\${YEAR}`, kind: 'videos', count: 8, mb: 2300, samples: ['screen-recording.mp4', 'birthday.mov', 'demo-cut.mp4'] },
-        { dest: 'Sort later', kind: 'later', count: 11, mb: 340, samples: ['data.bin', 'export_1734', 'voice-memo.m4a', 'podcast-ep12.mp3'] },
+        { dest: `Audio\\${YEAR - 1}`, kind: 'audio', count: 5, mb: 40, samples: ['voice-memo.m4a', 'podcast-ep12.mp3', 'ringtone.wav'] },
+        { dest: 'Sort later', kind: 'later', count: 6, mb: 300, samples: ['data.bin', 'export_1734', 'download (3)'] },
       ],
     },
     {

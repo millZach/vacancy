@@ -253,6 +253,7 @@ function listing(r: RunReport): RunListing {
       undoable: m.undoable,
       back: m.undo?.back ?? null,
       stuck: m.undo?.stuck.length ?? 0,
+      interrupted: m.interrupted,
     })),
   };
 }

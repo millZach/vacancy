@@ -136,6 +136,7 @@ export function makePlan(
       items: sum(planSteps, (s) => s.items),
       places: sum(planSteps, (s) => s.places),
       moves: sum(sorts, (s) => s.moves.length),
+      movesRefused: [],
       steps: planSteps,
       refused: steps.flatMap((s) => s.refused),
       leftForYou: advice.map((a) => a.id),
@@ -329,6 +330,7 @@ export function play(
       outcome: sortSkips.length === 0 ? 'done' : moved > 0 ? 'partial' : 'skipped',
       skipped: sortSkips,
     };
+    madeFolders.set(`${run.id}:${sort.tidy.id}`, foldersMade(sort.tidy, moves));
     records.push({
       id: sort.tidy.id,
       folder: sort.tidy.name,
@@ -597,18 +599,21 @@ export function mockUndo(report: RunReport, id: string, scripts: Record<string, 
     items: 1,
   }));
   const kept = stuck.length > 0 ? script.kept : [];
-  const made = r.foldersMade;
+  const made = madeFolders.get(`${report.id}:${id}`) ?? r.into.flatMap((top) => [top]);
   const undone: Undone = {
     at: Date.now(),
     back: Math.max(already, r.movedItems - stuck.length),
     stuck,
-    removed: Array.from({ length: Math.max(0, made - kept.length) }, (_, i) => `folder ${i + 1}`),
+    removed: made.filter((d) => !kept.includes(d)),
     kept,
   };
   r.undo = undone;
   r.undoable = false;
   r.note = null;
 }
+
+/** The folders each mock sort made, by `run:sort`, for what a mock Undo removes. */
+const madeFolders = new Map<string, string[]>();
 
 /** Whether a plan step id names a sort. */
 export const isSortStep = isTidy;

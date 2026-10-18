@@ -15,6 +15,7 @@ export const plan: PlanSummary = {
     { id: 'w-browser', title: 'Browser caches', category: 'caches', bytes: 6.3 * GB, items: 48_310, places: 6, kind: 'delete', moves: 0 },
   ],
   refused: [],
+  movesRefused: [],
   leftForYou: [],
 };
 

@@ -82,6 +82,30 @@ function stuckGroups(stuck: readonly Skip[], base: string) {
   return groups;
 }
 
+/** Up to six names, then how many more. */
+function namesOf(names: readonly string[]): string {
+  return names.length <= 6 ? listOf(names) : `${names.slice(0, 5).join(', ')} and ${formatCount(names.length - 5)} more`;
+}
+
+/**
+ * The folders Undo kept, and why as far as is known: the ones that hold files that couldn't go back say so; the
+ * rest still hold something (perhaps a file of yours), so Vacancy left them.
+ */
+function keptLine(folder: string, kept: readonly string[], stuck: readonly { where: string }[]): string {
+  const holding = (k: string) => stuck.some((g) => g.where === k || g.where.startsWith(`${k}\\`));
+  const withStuck = kept.filter(holding);
+  const other = kept.filter((k) => !holding(k));
+  const at = (ks: readonly string[]) => namesOf(ks.map((k) => `${folder}\\${k}`));
+  return [
+    withStuck.length > 0 &&
+      `Kept ${at(withStuck)}, which still ${withStuck.length === 1 ? 'holds' : 'hold'} the files that couldn’t go back.`,
+    other.length > 0 &&
+      `Kept ${at(other)}: ${other.length === 1 ? 'it still holds' : 'they still hold'} something, so Vacancy left ${other.length === 1 ? 'it' : 'them'}.`,
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+
 /** A reason as it reads after "couldn't go back:": "a file now has its old name". */
 const lower = (reason: string) => reason.charAt(0).toLowerCase() + reason.slice(1).replace(/\.$/, '');
 
@@ -110,14 +134,13 @@ export function UndoResult({ record: r }: { record: Reorganized }) {
           </span>
         </p>
       ))}
-      {(u.removed.length > 0 || u.kept.length > 0) && (
+      {u.removed.length > 0 && (
         <p className="undo-quiet">
-          {u.removed.length > 0 &&
-            `Removed the ${u.removed.length === 1 ? 'empty folder' : `${formatCount(u.removed.length)} empty folders`} Vacancy made.`}
-          {u.kept.length > 0 &&
-            ` Kept ${listOf(u.kept)}, which still ${u.kept.length === 1 ? 'holds' : 'hold'} ${u.stuck.length === 1 ? 'that file' : 'those files'}.`}
+          Removed the {u.removed.length === 1 ? 'empty folder' : `${formatCount(u.removed.length)} empty folders`} Vacancy
+          made: {namesOf(u.removed.map((d) => `${r.folder}\\${d}`))}.
         </p>
       )}
+      {u.kept.length > 0 && <p className="undo-quiet">{keptLine(r.folder, u.kept, groups)}</p>}
       {r.note && <p className="undo-quiet">{r.note}</p>}
     </div>
   );

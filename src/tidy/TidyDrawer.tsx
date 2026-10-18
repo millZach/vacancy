@@ -5,6 +5,7 @@ import { formatCount } from '../format';
 import {
   activeMoves,
   afterTree,
+  deletersIn,
   beforeTree,
   foldersMade,
   goingInPlan,
@@ -41,9 +42,7 @@ export function TidyDrawer({ tidy: t, plan, proposals, onToggle, onClose }: Prop
   const made = foldersMade(t, moves).length;
   const samples = sampleMoves(moves);
   const stays = staysByReason(t.stays);
-  const deleters = [...new Set(going.map((m) => m.deletedBy))]
-    .map((id) => proposals.find((p) => p.id === id)?.title ?? id)
-    .filter((x): x is string => !!x);
+  const deleters = deletersIn(t, plan).map((id) => proposals.find((p) => p.id === id)?.title ?? id);
 
   // Escape closes the drawer before the map hears it (it would zoom out).
   useEffect(() => {
@@ -83,10 +82,13 @@ export function TidyDrawer({ tidy: t, plan, proposals, onToggle, onClose }: Prop
             <Tree node={afterTree(t, plan)} />
           </section>
         </div>
-        {t.later > 0 && (
+        {t.capped && (
           <p className="rd-later">
-            Vacancy sorts up to {formatCount(t.loose)} files of a folder in one run. {formatCount(t.later)} more loose{' '}
-            {t.later === 1 ? 'file waits' : 'files wait'} for a later run.
+            Vacancy looks at up to {formatCount(t.limit)} files of a folder in one run, the first ones as Windows lists
+            them.{' '}
+            {t.later > 0
+              ? `${formatCount(t.later)} more ${t.later === 1 ? 'file waits' : 'files wait'} for a later run.`
+              : 'Any more wait for a later run.'}
           </p>
         )}
         {samples.length > 0 && (

@@ -84,7 +84,7 @@ function TidyRow({ tidy: t, plan, on, open, hot, onToggle, onOpen, onHot }: RowP
         <p className="tray-row-sum">
           {formatCount(moves)} of {formatCount(t.loose)} loose {t.loose === 1 ? 'file' : 'files'}, sorted by kind and year.
           {going > 0 && ` ${formatCount(going)} ${going === 1 ? 'goes' : 'go'} in this plan’s deletes instead.`}
-          {t.later > 0 && ` ${formatCount(t.later)} more wait for a later run.`}
+          {t.capped && (t.later > 0 ? ` ${formatCount(t.later)} more wait for a later run.` : ' Any more wait for a later run.')}
         </p>
         <MiniBeforeAfter tidy={t} plan={plan} onOpen={onOpen} />
         <div className="tray-row-meta">

@@ -8,6 +8,9 @@ import { NBSP } from '../format';
 import { ConfirmDialog } from '../run/ConfirmDialog';
 import { RunPanel } from '../run/RunPanel';
 import { foldEvents, settleRun, startRun } from '../run/progress';
+import { reorganized } from '../test/run';
+import { TidyDrawer } from './TidyDrawer';
+import { UndoResult } from './Undo';
 import { activeMoves, afterTree, beforeTree, foldersMade, goingInPlan, kindFolders, sampleMoves, tidyTotals } from './model';
 
 const plain = (s: string | null | undefined) => (s ?? '').replaceAll(NBSP, ' ');
@@ -19,7 +22,7 @@ beforeEach(() => {
 
 describe('the Tidy up model', () => {
   it('leaves files a delete in the plan takes out of the sort, and says they go in the plan', () => {
-    const taken = downloads.moves.filter((m) => m.deletedBy === 'w-installers').length;
+    const taken = downloads.moves.filter((m) => m.deletedBy.includes('w-installers')).length;
     expect(taken).toBe(3);
     expect(activeMoves(downloads, [])).toHaveLength(downloads.moves.length);
     expect(activeMoves(downloads, ['w-installers'])).toHaveLength(downloads.moves.length - taken);
@@ -129,6 +132,7 @@ const movePlan: PlanSummary = {
   moves: 186,
   steps: [{ id: 'tidy-downloads', title: 'Sort Downloads', category: 'downloads', bytes: 0, items: 0, places: 0, kind: 'move', moves: 186 }],
   refused: [],
+  movesRefused: [],
   leftForYou: [],
 };
 
@@ -227,7 +231,8 @@ describe('Undo', () => {
     expect(undo).toHaveBeenCalledWith(expect.stringMatching(/^run-/), 'tidy-downloads');
     expect(result).toHaveTextContent(/of [\d,]+ files are back in Downloads\./);
     expect(result).toHaveTextContent('2 files couldn’t go back: a file now has its old name. They’re still in Downloads\\Documents\\2026: statement-2026-09.pdf, statement-2026-10.pdf.');
-    expect(result).toHaveTextContent('Kept Documents\\2026 and Documents, which still hold those files.');
+    expect(result).toHaveTextContent('Kept Downloads\\Documents\\2026 and Downloads\\Documents, which still hold the files that couldn’t go back.');
+    expect(result).toHaveTextContent(/Removed the \d+ empty folders Vacancy made: Downloads\\[A-Z]/);
     expect(within(recap).getByText('Moved back · 2 stayed')).toBeInTheDocument();
 
     // Past runs offers Undo for the folder still sorted, and shows the one moved back.
@@ -260,5 +265,29 @@ describe('the mock bridge’s Tidy up', () => {
     const alone = await bridge.buildPlan(c, ['tidy-downloads']);
     expect(alone.moves - both.moves).toBe(3);
     expect(alone).toMatchObject({ bytes: 0, items: 0, steps: [{ id: 'tidy-downloads', kind: 'move', bytes: 0 }] });
+  });
+});
+
+describe('what Undo and the drawer say', () => {
+  it('names the folders Undo removed, and says a kept folder still holds something unless stuck files are in it', () => {
+    const record = reorganized({ id: 'tidy-downloads', folder: 'Downloads', movedItems: 3 });
+    render(
+      <UndoResult
+        record={{ ...record, undo: { at: null, back: 3, stuck: [], removed: ['Images\\2026', 'Images'], kept: ['Videos\\2025', 'Videos'] } }}
+      />,
+    );
+    const status = screen.getByRole('status');
+    expect(status).toHaveTextContent('All 3 files are back in Downloads.');
+    expect(status).toHaveTextContent('Removed the 2 empty folders Vacancy made: Downloads\\Images\\2026 and Downloads\\Images.');
+    expect(status).toHaveTextContent('Kept Downloads\\Videos\\2025 and Downloads\\Videos: they still hold something, so Vacancy left them.');
+    expect(status).not.toHaveTextContent('couldn’t go back');
+  });
+
+  it('explains a capped folder even when no count of the rest is known', () => {
+    const capped = { ...downloads, capped: true, later: 0 };
+    render(<TidyDrawer tidy={capped} plan={[]} proposals={[]} onToggle={() => {}} onClose={() => {}} />);
+    expect(screen.getByRole('dialog', { name: 'Sort Downloads' })).toHaveTextContent(
+      'Vacancy looks at up to 512 files of a folder in one run, the first ones as Windows lists them. Any more wait for a later run.',
+    );
   });
 });
