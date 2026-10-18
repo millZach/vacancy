@@ -40,6 +40,8 @@ export function createTauriBridge(): Bridge {
     cancelRun: () => invoke<undefined>('cancel_run'),
     listRuns: () => invoke<RunHistory>('list_runs'),
     openRun: (id) => invoke<RunReport>('open_run', { id }),
+    openHint: (mountPoint, proposalId) => invoke<undefined>('open_hint', { mountPoint, proposalId }),
+    openGuide: (guide) => invoke<undefined>('open_guide', { guide }),
   };
 }
 

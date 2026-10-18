@@ -1,12 +1,15 @@
-import { ChevronDown, LoaderCircle, PanelRightClose } from 'lucide-react';
+import { ChevronDown, LoaderCircle, PanelRightClose, Signpost } from 'lucide-react';
 import { useId, useState } from 'react';
 import type { Proposal } from '../bridge';
 import { formatBytes, formatCount } from '../format';
 import { Checkbox, RiskChip, SourceTag } from './bits';
 import { planTotals, tileOf } from './totals';
+import { HintActionButton } from './HintActionButton';
+import { AdviceText } from './AdviceText';
 import './plan.css';
 
 interface Props {
+  mountPoint: string;
   /** The drive's proposals, biggest first. */
   proposals: Proposal[];
   /** The ids in the drive's plan. */
@@ -30,8 +33,10 @@ interface Props {
  * Variant D's plan tray, beside the map: the drive's delete proposals with tick boxes, risk chips, a source tag and
  * an expandable why with sample paths; and the plan's total, with the button that asks to free it.
  */
-export function PlanTray({ proposals, plan, agent, hot, onHot, onToggle, onClose, onFree, checking, error }: Props) {
+export function PlanTray({ mountPoint, proposals, plan, agent, hot, onHot, onToggle, onClose, onFree, checking, error }: Props) {
   const deletes = proposals.filter((p) => p.action === 'delete');
+  const hints = proposals.filter((p) => p.action === 'hint');
+  const reminders = hints.filter((p) => plan.includes(p.id)).length;
   const on = deletes.filter((p) => plan.includes(p.id)).length;
   const t = planTotals(proposals, plan);
   const note = useId();
@@ -60,6 +65,7 @@ export function PlanTray({ proposals, plan, agent, hot, onHot, onToggle, onClose
             <ProposalRow
               key={p.id}
               proposal={p}
+              mountPoint={mountPoint}
               agent={agent}
               on={plan.includes(p.id)}
               hot={hot === tileOf(p.id)}
@@ -68,6 +74,16 @@ export function PlanTray({ proposals, plan, agent, hot, onHot, onToggle, onClose
             />
           ))}
         </section>
+        {hints.length > 0 && (
+          <section className="tray-group" aria-label="Left for you">
+            <h3>Left for you</h3>
+            <p className="tray-group-note">Vacancy can’t do these itself. Tick one to get a reminder when the run finishes. They don’t count toward the total.</p>
+            {hints.map((p) => (
+              <ProposalRow key={p.id} proposal={p} mountPoint={mountPoint} agent={agent} on={plan.includes(p.id)} hot={false}
+                onToggle={() => onToggle(p.id)} onHot={onHot} />
+            ))}
+          </section>
+        )}
       </div>
 
       <div className="tray-foot">
@@ -76,19 +92,20 @@ export function PlanTray({ proposals, plan, agent, hot, onHot, onToggle, onClose
           <span className="tray-total-lbl">will be freed</span>
         </div>
         <ul className="tray-notes">
-          <li>
+          {on > 0 ? <li>
             {formatCount(t.items)} {t.items === 1 ? 'item' : 'items'} in {t.places} {t.places === 1 ? 'place' : 'places'},
             deleted permanently
-          </li>
+          </li> : <li>No files will be deleted.</li>}
+          {reminders > 0 && <li>{reminders} left for you, not counted</li>}
         </ul>
         <button
           type="button"
           className="cta tray-cta"
-          disabled={on === 0 || checking}
+          disabled={(on === 0 && reminders === 0) || checking}
           aria-describedby={checking || error ? note : undefined}
           onClick={onFree}
         >
-          {on > 0 ? `Free ${formatBytes(t.bytes)}` : 'Nothing selected yet'}
+          {on > 0 ? t.bytes > 0 ? `Free ${formatBytes(t.bytes)}` : 'Delete selected items' : reminders > 0 ? 'Review reminders' : 'Nothing selected yet'}
         </button>
         {checking && (
           <p className="tray-later" id={note}>
@@ -106,6 +123,7 @@ export function PlanTray({ proposals, plan, agent, hot, onHot, onToggle, onClose
 }
 
 interface RowProps {
+  mountPoint: string;
   proposal: Proposal;
   agent: string | null;
   on: boolean;
@@ -115,19 +133,21 @@ interface RowProps {
 }
 
 /** One proposal: tick box, title (which opens the why and sample paths), summary, risk, source and size. */
-function ProposalRow({ proposal: p, agent, on, hot, onToggle, onHot }: RowProps) {
+function ProposalRow({ proposal: p, mountPoint, agent, on, hot, onToggle, onHot }: RowProps) {
   const [open, setOpen] = useState(false);
   const more = useId();
+  const hint = p.action === 'hint';
+  const tile = hint ? null : tileOf(p.id);
   const cls = ['tray-row', on && 'is-on', hot && 'is-hot'].filter(Boolean).join(' ');
   return (
     <div
       className={cls}
-      onMouseEnter={() => onHot(tileOf(p.id))}
+      onMouseEnter={() => onHot(tile)}
       onMouseLeave={() => onHot(null)}
-      onFocus={() => onHot(tileOf(p.id))}
+      onFocus={() => onHot(tile)}
       onBlur={() => onHot(null)}
     >
-      <Checkbox on={on} onChange={onToggle} label={`Include ${p.title}`} />
+      <Checkbox on={on} onChange={onToggle} label={hint ? `Remind me: ${p.title}` : `Include ${p.title}`} />
       <div className="tray-row-main">
         <button
           type="button"
@@ -141,13 +161,14 @@ function ProposalRow({ proposal: p, agent, on, hot, onToggle, onHot }: RowProps)
         </button>
         <p className="tray-row-sum">{p.summary}</p>
         <div className="tray-row-meta">
-          <RiskChip risk={p.risk} />
+          {hint ? <span className="source"><Signpost size={11} aria-hidden /> You do this one</span> : <RiskChip risk={p.risk} />}
           <SourceTag source={p.source} agent={agent} />
         </div>
         {open && (
           <div className="tray-row-more" id={more}>
-            <p>{p.why}</p>
-            {p.regenerable && <p className="tray-regen">Comes back on its own if you need it.</p>}
+            {hint ? <AdviceText why={p.why} action={p.hintAction} mountPoint={mountPoint} proposalId={p.id} /> : <p>{p.why}</p>}
+            {hint && p.hintAction?.kind === 'steamUninstall' && <HintActionButton mountPoint={mountPoint} proposalId={p.id} />}
+            {p.regenerable && !hint && <p className="tray-regen">Comes back on its own if you need it.</p>}
             <ul className="tray-paths" aria-label="Sample paths">
               {p.samplePaths.map((s) => (
                 <li key={s}>{s}</li>
@@ -156,7 +177,7 @@ function ProposalRow({ proposal: p, agent, on, hot, onToggle, onHot }: RowProps)
           </div>
         )}
       </div>
-      <span className="tray-row-size">{formatBytes(p.bytes)}</span>
+      <span className="tray-row-size">{hint ? 'Advice' : formatBytes(p.bytes)}</span>
     </div>
   );
 }

@@ -15,7 +15,7 @@ name: string,
 mountPoint: string, 
 /**
  * Tells this volume apart from another mounted at the same place later (a USB stick swapped for another): the
- * volume's serial number on Windows, its file system id on macOS.
+ * volume's serial number on Windows, its file system id on macOS. Empty when the OS could not supply it.
  */
 id: string, 
 /**

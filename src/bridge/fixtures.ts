@@ -14,6 +14,20 @@ import type {
   Skip,
   VolumeInfo,
 } from './types';
+import toolGuides from '../data/toolGuidance.json';
+import type { HintAction } from '../bindings/HintAction';
+
+function toolAdvice(platform: Platform): Proposal[] {
+  return toolGuides.filter(g => platform === 'windows'
+    ? !['xcodeInstructions', 'homebrewInstructions'].includes(g.action.kind)
+    : !g.action.kind.startsWith('windows')).map(g => ({
+      id: g.id, category: g.action.kind.startsWith('windows') ? 'system' : 'dev',
+      title: g.title, summary: g.summary,
+      why: [g.intro, ...g.steps.map((step, i) => `${i + 1}. ${step}`), g.caution, `Reference: ${g.sourceLabel}`].join('\n'),
+      bytes: 0, itemCount: 0, placeCount: 0, risk: 'review', source: 'rule', aiNote: null,
+      action: 'hint', hintAction: g.action as HintAction, regenerable: false, samplePaths: [], defaultOn: false,
+    }));
+}
 
 /**
  * What the mock bridge answers with. One per platform, with the prototype's datasets (variant D) and drives shaped
@@ -543,7 +557,7 @@ const macProposals = biggestFirst([
     category: 'dev',
     title: 'Homebrew & package caches',
     summary: 'Downloaded bottles and package archives from Homebrew and npm.',
-    why: 'Same as brew cleanup: installed packages keep working, and package managers download anything they need again.',
+    why: 'Only the downloaded bottles and package archives listed in this file plan are removed. Installed versions and dependencies stay in place; this is narrower than brew cleanup. Package managers can download these archives again.',
     gb: 5.6,
     items: 418,
     places: 2,
@@ -720,7 +734,13 @@ export const fixtures = {
       ],
     },
     overview: win.overview,
-    proposals: winProposals,
+    proposals: [...winProposals, {
+      id: 'w-steam-advice', category: 'apps', title: 'Cyberpunk 2077 (not played for 430 days)',
+      summary: 'Use Steam to uninstall this game if you no longer play it.',
+      why: 'Uninstall from Steam so its library stays consistent. Vacancy won’t delete the game or open Steam during a run.',
+      bytes: 0, itemCount: 0, placeCount: 0, risk: 'review', source: 'rule', aiNote: null,
+      action: 'hint', hintAction: { kind: 'steamUninstall', appId: 1091500 }, regenerable: false, samplePaths: [], defaultOn: false,
+    }, ...toolAdvice('windows')],
     folders: win.folders,
     runSkips: [
       {
@@ -780,7 +800,13 @@ export const fixtures = {
       ],
     },
     overview: mac.overview,
-    proposals: macProposals,
+    proposals: [...macProposals, {
+      id: 'm-logic-advice', category: 'apps', title: 'Logic Pro sound library',
+      summary: 'Remove sounds you don’t use from inside Logic Pro.',
+      why: "In Logic Pro, open Sound Library and review your downloaded content (Manage Packs in Logic Pro 12; Sound Library Manager in earlier versions). Use the app's controls for content you no longer need, or relocate the library through Logic. Existing projects may need these sounds. Shared or cloned content means the library's size is not a promise of space recovered.",
+      bytes: 0, itemCount: 0, placeCount: 0, risk: 'review', source: 'rule', aiNote: null,
+      action: 'hint', hintAction: { kind: 'logicInstructions' }, regenerable: false, samplePaths: [], defaultOn: false,
+    }, ...toolAdvice('macos')],
     folders: mac.folders,
     runSkips: [
       {

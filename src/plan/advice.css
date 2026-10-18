@@ -1,0 +1,11 @@
+.guide-text { margin-top: var(--space-2); color: var(--color-text-2); font: 400 var(--text-sm) / 1.5 var(--font-sans); }
+.guide-text p { margin: 0 0 var(--space-2); }
+.guide-text ol { margin: var(--space-3) 0; padding-left: 20px; list-style: decimal; }
+.guide-text ol > li { display: list-item; margin: 0 0 var(--space-2); padding: 0 0 0 3px; border: 0; color: inherit; }
+.guide-text .hint-action button { white-space: normal; text-align: left; }
+.guide-text .hint-link { border: 0; padding: 0; background: none; color: var(--color-neon-ink); font: 500 var(--text-sm) / 1.5 var(--font-sans); cursor: pointer; }
+.guide-text .hint-link:hover { text-decoration: underline; }
+.guide-details { margin-top: var(--space-2); }
+.guide-details > summary { color: var(--color-text-2); cursor: pointer; font: 500 var(--text-sm) / 1.5 var(--font-sans); }
+.guide-details > summary:focus-visible { outline: 2px solid var(--color-neon); outline-offset: 3px; }
+.guide-text .hint-action, .guide-text .hint-action-error { display: block; overflow: visible; -webkit-line-clamp: unset; }

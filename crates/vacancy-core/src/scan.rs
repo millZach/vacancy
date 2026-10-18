@@ -407,6 +407,12 @@ pub(crate) fn is_installer(name: &std::ffi::OsStr) -> bool {
             .any(|e| e.as_bytes().eq_ignore_ascii_case(ext))
 }
 
+/// Retain Steam's tiny manifests for advice without a second, potentially linked directory walk.
+fn is_steam_manifest(name: &std::ffi::OsStr) -> bool {
+    let bytes = name.as_encoded_bytes();
+    bytes.starts_with(b"appmanifest_") && bytes.ends_with(b".acf")
+}
+
 /// Turns entries into a folder's [`Listing`]: hard links merged, small files folded into the folder's totals,
 /// big ones kept, markers noted.
 pub(crate) struct Collector<'a> {
@@ -443,7 +449,10 @@ impl Collector<'_> {
                 listing.own_bytes += e.allocated;
                 listing.own_files += 1;
                 listing.own_last_used = listing.own_last_used.max(used);
-                if e.allocated >= self.keep_from || is_installer(e.name) {
+                if e.allocated >= self.keep_from
+                    || is_installer(e.name)
+                    || is_steam_manifest(e.name)
+                {
                     listing.push_kept(e.name, e.allocated, used, e.identity, e.logical);
                 }
                 let len = e.name.len();

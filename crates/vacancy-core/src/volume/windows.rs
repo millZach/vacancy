@@ -193,9 +193,9 @@ fn volume_root(path: &Path) -> io::Result<String> {
     Ok(from_wide(&buf))
 }
 
-/// The volume's label, serial number, file system's name ("NTFS") and file system flags, each empty (or 0) when
-/// Windows won't say.
-fn label_and_file_system(root_w: &[u16]) -> (String, u32, String, u32) {
+/// The volume's label, optional serial number, file system's name ("NTFS") and file system flags. A failed query
+/// has no serial, distinct from a successful query that reports the legitimate numeric value zero.
+fn label_and_file_system(root_w: &[u16]) -> (String, Option<u32>, String, u32) {
     let mut label = [0u16; LABEL_LEN as usize];
     let mut fs = [0u16; LABEL_LEN as usize];
     let mut serial = 0u32;
@@ -215,9 +215,9 @@ fn label_and_file_system(root_w: &[u16]) -> (String, u32, String, u32) {
         )
     };
     if ok == 0 {
-        (String::new(), 0, String::new(), 0)
+        (String::new(), None, String::new(), 0)
     } else {
-        (from_wide(&label), serial, from_wide(&fs), flags)
+        (from_wide(&label), Some(serial), from_wide(&fs), flags)
     }
 }
 

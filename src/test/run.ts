@@ -138,3 +138,13 @@ export const fullReport: RunReport = {
     },
   ],
 };
+
+/** A saved report with real moves and legacy advice, but no deletion steps. */
+export const moveAdviceReport: RunReport = {
+  ...fullReport,
+  id: 'run-move-advice',
+  steps: [], plannedBytes: 0, freedBytes: 0, deletedItems: 0, skippedItems: 0, freedByCategory: [], biggestWin: null,
+  usedAfter: report.usedBefore, freeAfter: report.freeBefore, freeChange: 0,
+  movedItems: 4,
+  reorganized: [{ id: 'r-move-advice', folder: 'Downloads', movedItems: 4 }],
+};

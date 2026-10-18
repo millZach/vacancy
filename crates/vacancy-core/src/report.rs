@@ -145,9 +145,13 @@ pub struct LeftForYou {
     pub summary: String,
     /// What to do, and why.
     pub why: String,
-    /// What doing it would free, from the scan.
+    /// Zero for advice: a store-reported installed size is never a reclaim estimate.
     #[ts(type = "number")]
     pub bytes: u64,
+    /// Trusted advice affordance, absent in older history. Never counted as freed or executed with the plan.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub hint_action: Option<crate::hints::HintAction>,
 }
 
 /// A folder the run reorganized: its files moved into a tidier layout, every move journaled so it can be undone.
@@ -428,6 +432,7 @@ mod tests {
                 summary: "40 GB in Steam".into(),
                 why: "Uninstall it from Steam.".into(),
                 bytes: 40,
+                hint_action: None,
             }],
             reorganized: Vec::new(),
             map: map(),

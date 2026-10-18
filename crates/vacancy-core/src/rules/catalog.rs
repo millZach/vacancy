@@ -509,8 +509,9 @@ fn macos(env: &Env) -> Vec<Rule> {
             text: Text {
                 title: "Homebrew & package caches",
                 summary: "Downloaded bottles and package archives from {labels}.",
-                why: "Same as brew cleanup: installed packages keep working, and package managers download anything \
-                      they need again.",
+                why: "Only the downloaded bottles and package archives listed in this file plan are removed. \
+                      Installed versions and dependencies stay in place; this is narrower than brew cleanup. \
+                      Package managers can download these archives again.",
             },
         },
         Rule {

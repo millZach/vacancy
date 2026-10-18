@@ -72,6 +72,26 @@ afterEach(() => {
 });
 
 describe('the highlight slides', () => {
+  it('keeps disclosure Space and Enter native while retaining slide navigation', async () => {
+    const guides = fixtures.windows.proposals.filter(p => p.id.startsWith('hint-'));
+    renderFinish({ ...fullReport, leftForYou: guides.map(p => ({
+      id: p.id, title: p.title, summary: p.summary, why: p.why, bytes: 0, hintAction: p.hintAction ?? null,
+    })) });
+    await userEvent.click(screen.getByRole('button', { name: /Slide .*Skipped and left for you/ }));
+    await settle();
+    const summary = within(slide()).getAllByText('Instructions and reference')[0]!;
+    summary.focus();
+    for (const key of [' ', 'Enter']) {
+      const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+      expect(summary.dispatchEvent(event)).toBe(true);
+      expect(event.defaultPrevented).toBe(false);
+      expect(screen.getByRole('button', { name: 'Pause the slides' })).toBeInTheDocument();
+    }
+    expect(slide()).toHaveClass('slide--kept');
+    expect(slide()).toHaveAttribute('tabindex', '0');
+    await key('ArrowRight');
+    expect(slide()).toHaveAccessibleName('7 of 7: Checkout');
+  });
   it('keeps actual deletions visible when hard-link names free zero bytes', async () => {
     const r: RunReport = {
       ...report, freedBytes: 0, deletedItems: 1, biggestWin: null, freedByCategory: [],
@@ -357,7 +377,11 @@ describe('the summary', () => {
     expect(plain(section('Reorganized').textContent)).toBe(
       'ReorganizedDownloads. 812 files moved. Every move is recorded.Desktop. 216 files moved. Every move is recorded.',
     );
-    expect(plain(section('Left for you').textContent)).toContain('Cyberpunk 2077 (not played in 14 months)71.0 GB in Steam.71 GB');
+    const advice = within(section('Left for you'));
+    expect(advice.getByText('Cyberpunk 2077 (not played in 14 months)')).toBeInTheDocument();
+    expect(advice.getByText('71.0 GB in Steam.')).toBeInTheDocument();
+    expect(advice.getByText(fullReport.leftForYou[0]!.why)).toBeInTheDocument();
+    expect(plain(section('Left for you').querySelector('.advice-num')?.textContent)).toBe('71 GB');
     const stat = (label: string) => plain(within(panel()).getByText(label).nextElementSibling?.textContent);
     expect(stat('files moved')).toBe('1,028');
   });

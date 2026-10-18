@@ -118,6 +118,9 @@ pub struct Proposal {
     pub ai_note: Option<String>,
     /// What carrying it out does.
     pub action: ProposalAction,
+    /// Trusted built-in advice action. AI proposals never supply this; commands look it up by proposal id.
+    #[ts(optional = nullable)]
+    pub hint_action: Option<crate::hints::HintAction>,
     /// It comes back on its own if needed (caches, build output).
     pub regenerable: bool,
     /// A few of the places it removes, biggest first, as real paths.
@@ -178,6 +181,28 @@ impl Proposals {
         self.targets.insert(index, vec![target]);
         self.kinds.insert(index, ActionKind::DeleteDirectory);
         self.built_apps.insert(index, false);
+    }
+
+    /// Trusted catalog advice carries no targets and cannot acquire deletion authority. Append before carving,
+    /// after the positive-size rules, preserving both their order and their existing nonoverlapping claims.
+    pub(crate) fn append_hint(&mut self, hint: &crate::hints::Hint) {
+        if self.position(&hint.id).is_some() {
+            return;
+        }
+        self.list.push(hint.proposal());
+        self.targets.push(Vec::new());
+        self.kinds.push(ActionKind::Hint);
+        self.built_apps.push(false);
+    }
+
+    /// Trusted action in this scan's retained catalog, never an action supplied by a frontend or history JSON.
+    pub fn hint_action(&self, id: &str) -> Option<&crate::hints::HintAction> {
+        self.position(id).and_then(|i| {
+            let proposal = &self.list[i];
+            (proposal.action == ProposalAction::Hint)
+                .then_some(proposal.hint_action.as_ref())
+                .flatten()
+        })
     }
 
     /// Every proposal, biggest first.
@@ -1307,6 +1332,7 @@ fn proposal(snap: &Snapshot, rule: &Rule, found: &Found) -> Proposal {
         risk: rule.risk,
         source: ProposalSource::Rule,
         ai_note: None,
+        hint_action: None,
         action: match rule.action {
             ActionKind::DeleteContents | ActionKind::DeleteDirectory => ProposalAction::Delete,
             ActionKind::Tool => ProposalAction::Tool,

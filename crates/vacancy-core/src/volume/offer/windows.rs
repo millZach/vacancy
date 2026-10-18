@@ -42,8 +42,8 @@ pub(crate) struct WindowsDrive {
     pub(crate) subst: bool,
     /// The volume's label, empty when it has none.
     pub(crate) label: String,
-    /// The volume's serial number, 0 when Windows won't say.
-    pub(crate) serial: u32,
+    /// The volume's serial number when Windows supplies it. A successful zero is distinct from query failure.
+    pub(crate) serial: Option<u32>,
     /// The file system's name ("NTFS"), empty when Windows won't say (a card reader with no card in it).
     pub(crate) file_system: String,
     /// The file system is mounted read-only.
@@ -178,7 +178,10 @@ pub(crate) fn describe(d: &WindowsDrive) -> VolumeInfo {
     VolumeInfo {
         name: display_name(&d.label, d.drive_type, &d.root),
         mount_point: d.root.clone(),
-        id: format!("{:08X}", d.serial),
+        id: d
+            .serial
+            .map(|serial| format!("{serial:08X}"))
+            .unwrap_or_default(),
         kind: kind(d.drive_type, d.bus),
         system: d.system,
         total_bytes: d.total_bytes,
@@ -235,7 +238,7 @@ mod tests {
             drive_type: drive_type::FIXED,
             subst: false,
             label: String::new(),
-            serial: u32::from(letter),
+            serial: Some(u32::from(letter)),
             file_system: "NTFS".into(),
             read_only: false,
             bus: Some(0x11), // NVMe
@@ -373,6 +376,28 @@ mod tests {
                 ..found('L')
             },
         ]
+    }
+
+    #[test]
+    fn unavailable_serial_is_not_a_successful_zero_and_does_not_hide_the_system_drive() {
+        let failed = WindowsDrive {
+            system: true,
+            serial: None,
+            label: String::new(),
+            file_system: String::new(),
+            ..found('C')
+        };
+        let offered = drives(std::slice::from_ref(&failed));
+        assert_eq!(offered.len(), 1, "read-only offering policy is unchanged");
+        assert!(
+            offered[0].id.is_empty(),
+            "failed OS identity cannot authorize a launcher"
+        );
+        let legitimate_zero = WindowsDrive {
+            serial: Some(0),
+            ..failed
+        };
+        assert_eq!(describe(&legitimate_zero).id, "00000000");
     }
 
     #[test]

@@ -86,7 +86,7 @@ pub enum PlanError {
     /// An id names no proposal of this scan.
     #[error("there is no proposal {0} in this scan")]
     NoSuchProposal(String),
-    /// Nothing in the selection deletes anything.
+    /// No cleanup or advice was selected.
     #[error("the plan is empty")]
     Empty,
 }
@@ -258,6 +258,7 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
                 summary: p.summary.clone(),
                 why: p.why.clone(),
                 bytes: p.bytes,
+                hint_action: p.hint_action.clone(),
             });
             continue;
         }
@@ -364,9 +365,10 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
         }
         steps.push(step);
     }
-    if steps
-        .iter()
-        .all(|s| s.actions.is_empty() && s.refused.is_empty())
+    if left_for_you.is_empty()
+        && steps
+            .iter()
+            .all(|s| s.actions.is_empty() && s.refused.is_empty())
     {
         return Err(PlanError::Empty);
     }
