@@ -207,6 +207,86 @@ pub(crate) fn list_bounded(
     }
 }
 
+/// Lists a folder for a one-folder inventory: entries until `files` regular files have been listed (subfolders,
+/// links and special entries are listed too but don't count), visiting at most `visits` entries. Once capped, it
+/// goes on reading the listing only to count the regular files after the cap (never opening one), up to
+/// [`COUNT_VISITS`] more entries. Gives the entries, whether it capped, and that count.
+pub(crate) fn list_files_bounded(
+    dir: &Dir,
+    files: usize,
+    visits: usize,
+    cancel: &crate::CancelToken,
+) -> Result<(Vec<Entry>, bool, u64), Fail> {
+    let mut buf = vec![0u64; BUF_BYTES / 8];
+    let mut out = Vec::new();
+    let mut listed_files = 0;
+    let mut visited = 0;
+    let mut capped = false;
+    let mut more = 0u64;
+    let mut counted = 0;
+    let mut class = FileIdExtdDirectoryRestartInfo;
+    loop {
+        if cancel.is_cancelled() {
+            return Ok((out, true, more));
+        }
+        // SAFETY: fixed aligned buffer, owned directory and matching buffer size.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                dir.handle.0,
+                class,
+                buf.as_mut_ptr().cast(),
+                BUF_BYTES as u32,
+            )
+        };
+        class = FileIdExtdDirectoryInfo;
+        if ok == 0 {
+            // SAFETY: this thread's error from the immediately preceding native query.
+            return match unsafe { GetLastError() } {
+                ERROR_NO_MORE_FILES => Ok((out, capped, more)),
+                code => Err(set_fail(code)),
+            };
+        }
+        let mut offset = 0;
+        loop {
+            if cancel.is_cancelled() {
+                return Ok((out, true, more));
+            }
+            // SAFETY: same trusted native listing format/alignment as list(), one valid linked entry at offset.
+            let (e, name, next) = unsafe { read_entry(&buf, offset) };
+            if name != [46] && name != [46, 46] {
+                if !capped && (listed_files == files || visited == visits) {
+                    capped = true;
+                }
+                if capped {
+                    counted += 1;
+                    if counted > COUNT_VISITS {
+                        return Ok((out, true, more));
+                    }
+                    if e.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+                        == 0
+                    {
+                        more += 1;
+                    }
+                } else {
+                    let entry = to_entry(dir, &e, name);
+                    visited += 1;
+                    if entry.kind == Kind::File {
+                        listed_files += 1;
+                    }
+                    out.push(entry);
+                }
+            }
+            if next == 0 {
+                break;
+            }
+            offset += next as usize;
+        }
+    }
+}
+
+/// How many entries after a one-folder cap are read, only to count the regular files among them.
+pub(crate) const COUNT_VISITS: usize = 100_000;
+
 pub(crate) fn prepare_removal(
     parent: &Dir,
     name: &Name,

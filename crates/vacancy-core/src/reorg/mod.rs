@@ -43,6 +43,8 @@ pub struct InventoryEntry {
     pub changed_ns: i128,
     /// Its last-write (modified) time, in nanoseconds since the Unix epoch.
     pub modified_ns: i128,
+    /// Its file id on its volume, as the scan records file identities.
+    pub file_id: u128,
 }
 
 /// Untrusted metadata-only proposal input. It has no native mutation authority.

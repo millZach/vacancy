@@ -30,6 +30,12 @@ impl Inventory {
     pub fn truncated(&self) -> bool {
         false
     }
+    pub fn later(&self) -> u64 {
+        0
+    }
+    pub fn validate_pinned(&self, _: &[Draft], _: &CancelToken) -> Result<ValidatedPlan, Error> {
+        Err(Error::Unsupported)
+    }
     pub fn validate(&self, _: &[Draft], _: &CancelToken) -> Result<ValidatedPlan, Error> {
         Err(Error::Unsupported)
     }

@@ -24,6 +24,8 @@ pub struct Inventory {
     captured: BTreeMap<String, (Place, native::Fingerprint)>,
     entries: Vec<InventoryEntry>,
     truncated: bool,
+    /// Regular files listed after the cap, counted in the same listing pass (one-folder captures only).
+    later: u64,
 }
 
 /// Opaque approval capability. No public fields, Deserialize, mutable move-list accessor or path constructor.
@@ -177,7 +179,9 @@ impl Inventory {
         Self::capture_in(env, None, cancel)
     }
     /// [`Inventory::capture`] of one known folder: the other folders' roots are still sealed (so validation still
-    /// refuses a replaced or nested known folder), but only `only` is listed, with the whole entry budget.
+    /// refuses a replaced or nested known folder), but only `only` is listed. Its cap counts listed regular files,
+    /// not subfolders: the first 512 files in the order Windows lists the folder (by name on NTFS), visiting at most
+    /// four times that many entries. Regular files listed after the cap are counted, not opened ([`Self::later`]).
     pub fn capture_folder(env: &Env, only: Folder, cancel: &CancelToken) -> Result<Self, Error> {
         Self::capture_in(env, Some(only), cancel)
     }
@@ -195,6 +199,7 @@ impl Inventory {
         let mut roots = Vec::new();
         let mut visited = 0;
         let mut truncated = false;
+        let mut later = 0;
         for at in FOLDERS {
             if cancel.is_cancelled() {
                 return Err(Error::Cancelled);
@@ -223,8 +228,15 @@ impl Inventory {
             {
                 continue;
             }
-            let (listed, capped) = native::list_bounded(&parent.dir, MAX_ENTRIES - visited, cancel)
-                .map_err(changed)?;
+            let (listed, capped) = if only.is_some() {
+                let (listed, capped, more) =
+                    native::list_files_bounded(&parent.dir, MAX_ENTRIES, 4 * MAX_ENTRIES, cancel)
+                        .map_err(changed)?;
+                later += more;
+                (listed, capped)
+            } else {
+                native::list_bounded(&parent.dir, MAX_ENTRIES - visited, cancel).map_err(changed)?
+            };
             truncated |= capped;
             visited += listed.len();
             for entry in listed {
@@ -260,6 +272,7 @@ impl Inventory {
                     allocated_bytes: info.allocated,
                     changed_ns: info.latest(),
                     modified_ns: info.written,
+                    file_id: info.id.file,
                 });
                 captured.insert(
                     id,
@@ -283,6 +296,7 @@ impl Inventory {
             captured,
             entries,
             truncated,
+            later,
         })
     }
     pub fn entries(&self) -> &[InventoryEntry] {
@@ -290,6 +304,19 @@ impl Inventory {
     }
     pub fn truncated(&self) -> bool {
         self.truncated
+    }
+    /// For a one-folder capture that hit its cap: regular files listed after it, left for a later run.
+    pub fn later(&self) -> u64 {
+        self.later
+    }
+    /// [`Inventory::validate`], with every draft's file name pinned: a draft naming its file must get exactly that
+    /// name (as the user reviewed it), or it is dropped with [`Error::Taken`]. It is never renumbered.
+    pub fn validate_pinned(
+        &self,
+        drafts: &[Draft],
+        cancel: &CancelToken,
+    ) -> Result<ValidatedPlan, Error> {
+        self.validate_with(drafts, true, cancel)
     }
 
     /// Validates untrusted drafts one at a time. An invalid draft (unknown or repeated source, a source changed since
@@ -299,6 +326,14 @@ impl Inventory {
     /// cancellation, a replaced known folder, a manifest over the journal limit) or when no draft is left, and then
     /// with the first dropped draft's error.
     pub fn validate(&self, drafts: &[Draft], cancel: &CancelToken) -> Result<ValidatedPlan, Error> {
+        self.validate_with(drafts, false, cancel)
+    }
+    fn validate_with(
+        &self,
+        drafts: &[Draft],
+        pinned: bool,
+        cancel: &CancelToken,
+    ) -> Result<ValidatedPlan, Error> {
         if drafts.is_empty() || drafts.len() > MAX_ENTRIES {
             return Err(Error::Bounds);
         }
@@ -351,7 +386,8 @@ impl Inventory {
             if cancel.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            let (chain, to) = match self.resolve(&guard, &item, &reserved) {
+            let exact = pinned && item.draft.filename.is_some();
+            let (chain, to) = match self.resolve(&guard, &item, &reserved, exact) {
                 Ok(value) => value,
                 Err(error) => {
                     reject(item.draft, error);
@@ -452,6 +488,7 @@ impl Inventory {
         guard: &Guard,
         item: &Parsed<'_>,
         reserved: &Reserved,
+        exact: bool,
     ) -> Result<(Chain, Place), Error> {
         let Parsed {
             draft,
@@ -537,7 +574,8 @@ impl Inventory {
         }) {
             return Err(Error::UnknownEntry);
         }
-        for suffix in 0..100 {
+        // A pinned name is used exactly or not at all: never renumbered after the user reviewed it.
+        for suffix in 0..if exact { 1 } else { 100 } {
             let name = collision_name(original, suffix)?;
             let mut candidate = names.clone();
             candidate.push(name.clone());
@@ -562,7 +600,7 @@ impl Inventory {
                 return Ok((chain, to));
             }
         }
-        Err(Error::Bounds)
+        Err(if exact { Error::Taken } else { Error::Bounds })
     }
     fn root_parent(&self, folder_id: Folder) -> Result<Parent, Error> {
         let parent = native::directory(folder(&self.env, folder_id)).map_err(changed)?;
