@@ -23,6 +23,11 @@ mod snapshot;
 mod text;
 mod volume;
 
+// Shared fixture setup is compiled only into Windows unit tests, never the library API.
+#[cfg(all(test, windows))]
+#[path = "../tests/support/windows_case.rs"]
+mod windows_case;
+
 pub use categorize::{
     Categories, Category, CategoryId, CloudRoot, Env, Item, ItemRef, KnownFolders, Platform,
     categorize,

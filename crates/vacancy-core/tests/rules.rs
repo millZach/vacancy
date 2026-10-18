@@ -1128,6 +1128,9 @@ mod guard {
                 "{other} in {found:?}"
             );
         }
+        eprintln!(
+            "EXERCISED: case-sensitive catalog names, native flags verified and exact-name assertions checked"
+        );
     }
 
     /// `*.xcarchive` matches whole names that end so: not a bare `.xcarchive`, not `app.xcarchivex`.
@@ -1450,6 +1453,9 @@ mod guard {
             targets(&fx, &snap, &proposals, "w-temp"),
             vec!["Users/alex/AppData/Local/Temp/old.tmp".to_owned()],
             "`Temp`, never `temp`"
+        );
+        eprintln!(
+            "EXERCISED: case-sensitive temp rule, native flag verified and distinct-folder assertions checked"
         );
     }
 
