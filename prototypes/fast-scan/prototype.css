@@ -1,0 +1,96 @@
+/* THROWAWAY: fast-scan pieces only. The app's header, drive menu, plate, HUD, dot field and map come with their own
+   CSS; everything here uses the design tokens, except Windows' prompt stand-in, which looks like Windows on purpose. */
+
+/* The plate's controls take pointers through the plate (atlas.css lets only the app's own through). */
+.atlas.is-scan .plate-content .mode-seg,
+.atlas.is-scan .plate-content .fast-fine { pointer-events: auto; }
+
+/* ---------- A: a second button ---------- */
+.fast-btn svg { color: var(--color-outside); }
+.fast-btn-ask { font-weight: 500; color: var(--color-text-3); }
+.fast-fine { max-width: 500px; margin: var(--space-5) 0 0; font-size: var(--text-sm); line-height: 1.55; color: var(--color-text-2); text-wrap: pretty; }
+.fast-fine + .advisor-note { margin-top: 22px; }
+
+/* ---------- B: the scan mode in the picker ---------- */
+.mode-seg { display: inline-flex; gap: 2px; margin: -6px 0 20px; padding: 3px; border: 1px solid var(--color-line-2); border-radius: var(--radius-pill); background: var(--color-seg); }
+.mode-seg button { display: inline-flex; align-items: center; gap: 6px; padding: 7px 15px 6px; border: 0; border-radius: var(--radius-pill); background: none; font: 600 var(--text-ui) var(--font-sans); color: var(--color-text-2); cursor: pointer; }
+.mode-seg button:hover { color: var(--color-text); }
+.mode-seg button.is-on { background: var(--color-seg-on); color: var(--color-text); }
+.mode-seg button svg { color: var(--color-text-3); }
+.mode-seg button.is-on svg { color: var(--color-outside); }
+.mode-ask { font-weight: 500; color: var(--color-text-3); }
+.est { display: flex; flex-direction: column; gap: 4px; font-size: var(--text-xs); color: var(--color-text-3); }
+.est-row { display: flex; align-items: center; gap: 6px; padding: 3px 7px 2px; border-radius: var(--radius-xs); }
+.est-row svg { flex: none; }
+.est-row b, .est-row em { margin-left: auto; font-weight: 600; font-style: normal; color: var(--color-text-2); font-variant-numeric: tabular-nums; }
+.est-row.is-on { background: rgba(255, 255, 255, 0.05); color: var(--color-text); }
+.est-row.is-on b { color: var(--color-text); }
+.est-row.is-on svg { color: var(--color-outside); }
+.est-row.is-off em { color: var(--color-text-3); font-weight: 500; }
+.est-row.is-off.is-on em { color: var(--color-review); }
+.est-row.is-off.is-on svg { color: var(--color-review); }
+.fast-note { max-width: 520px; margin-top: 22px; }
+.fast-note svg { color: var(--color-safe); }
+.fast-note.is-plain svg { color: var(--color-text-3); }
+
+/* ---------- the HUD: mode tag, notes and C's offer ---------- */
+.hud-mode { display: inline-flex; align-items: center; gap: 4px; align-self: center; padding: 3px 8px 2px; border: 1px solid rgba(156, 200, 219, 0.35); border-radius: var(--radius-pill); font: 700 var(--text-tag) / 1.3 var(--font-sans); letter-spacing: 0.08em; text-transform: uppercase; color: var(--color-outside); }
+.hud.is-fast .hud-bar i { background: var(--color-outside); }
+.hud-note { display: flex; gap: 8px; margin: 12px 0 0; padding-top: 11px; border-top: 1px solid var(--color-line); font-size: var(--text-sm); line-height: 1.5; color: var(--color-text-2); }
+.hud-note svg { flex: none; margin-top: 2px; }
+.hud-note b { color: var(--color-text); font-weight: 600; }
+.hud-note.is-review svg { color: var(--color-review); }
+.hud-note.is-quiet svg { color: var(--color-text-3); }
+.hud-note.is-safe svg { color: var(--color-safe); }
+.hud-offer { display: flex; align-items: center; gap: 10px; margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--color-line); }
+.hud-offer > svg { flex: none; align-self: flex-start; margin-top: 2px; color: var(--color-outside); }
+.hud-offer p { flex: 1; margin: 0; font-size: var(--text-sm); line-height: 1.5; color: var(--color-text-2); }
+.hud-offer p b { color: var(--color-text); font-weight: 600; }
+.hud-offer p span { display: block; margin-top: 2px; font-size: var(--text-xs); color: var(--color-text-3); }
+.hud-offer .btn { flex: none; }
+
+/* ---------- the map: the Locked folders block ---------- */
+.map-region:has(> [data-tile='r:locked']) { --map-region-c: 0.004; --map-head-locked-c: 0.004; outline: 1px dashed rgba(255, 255, 255, 0.16); outline-offset: -1px; }
+.map-tile.is-locked-block { --map-tile-c-locked: 0.004; }
+.locked-label { position: relative; z-index: 2; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; max-height: 100%; padding: var(--space-2) var(--space-3); pointer-events: none; color: var(--color-tile-text); }
+.locked-label svg { opacity: 0.75; margin-bottom: 2px; }
+.locked-name { font: 600 var(--text-sm) / 1.25 var(--font-sans); }
+.locked-size { font: 500 var(--text-xs) / 1.25 var(--font-sans); color: var(--color-tile-size); font-variant-numeric: tabular-nums; }
+.locked-card { position: absolute; right: 16px; bottom: 16px; z-index: 5; width: 340px; padding: 14px 16px; border: 1px solid var(--color-line-2); border-radius: var(--radius-card); background: var(--color-tip); box-shadow: var(--shadow-hud); font-size: var(--text-ui); line-height: 1.5; color: var(--color-text-2); }
+.locked-card p { margin: 0 0 8px; }
+.locked-card p:last-child { margin-bottom: 0; }
+.locked-card-h { display: flex; align-items: center; gap: 7px; font: 600 var(--text-md) var(--font-sans); color: var(--color-text); }
+.locked-card-quiet { font-size: var(--text-sm); color: var(--color-text-3); }
+.scan-note.is-fast svg { color: var(--color-outside); }
+
+/* ---------- Windows' prompt, a stand-in. Windows' own look, not Vacancy's. ---------- */
+.uac-desktop { position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; background: rgba(0, 0, 0, 0.62); -webkit-backdrop-filter: grayscale(0.6) blur(1px); backdrop-filter: grayscale(0.6) blur(1px); }
+.uac-stand-in { position: absolute; top: 18px; left: 50%; transform: translateX(-50%); max-width: calc(100vw - 40px); padding: 6px 14px; border: 1.5px dashed var(--color-review); border-radius: var(--radius-pill); background: rgba(0, 0, 0, 0.75); font: 700 11px / 1.4 var(--font-sans); letter-spacing: 0.04em; color: var(--color-review); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.uac { width: 456px; border: 1px solid #454545; border-radius: 8px; background: #2b2b2b; box-shadow: 0 32px 64px rgba(0, 0, 0, 0.55); font-family: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif; color: #fff; overflow: hidden; outline: 2px dashed var(--color-review); outline-offset: 6px; }
+.uac-top { padding: 18px 24px 16px; background: #1f1f1f; }
+.uac-title { margin: 0 0 12px; font-size: 12px; color: #d0d0d0; }
+.uac-q { margin: 0; font: 600 20px / 1.3 'Segoe UI Variable Display', 'Segoe UI', system-ui, sans-serif; }
+.uac-body { padding: 18px 24px 16px; }
+.uac-app { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.uac-icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 6px; background: #0f1318; color: #ff4fb3; }
+.uac-name { font-size: 15px; font-weight: 600; }
+.uac-meta { margin: 0 0 10px; font-size: 13px; line-height: 1.5; color: #d0d0d0; overflow-wrap: anywhere; }
+.uac-link { padding: 0; border: 0; background: none; font: inherit; font-size: 13px; color: #99ebff; cursor: pointer; }
+.uac-link:hover { text-decoration: underline; }
+.uac-foot { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 20px 24px 24px; }
+.uac-btn { height: 32px; border: 1px solid #4a4a4a; border-radius: 4px; background: #373737; font: 400 14px 'Segoe UI', system-ui, sans-serif; color: #fff; cursor: pointer; }
+.uac-btn:hover { background: #3e3e3e; }
+.uac-btn.is-yes { border-color: #4cc2ff; background: #4cc2ff; color: #000; }
+.uac-btn.is-yes:hover { background: #47b1e8; }
+.uac-btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+
+/* ---------- the switcher ---------- */
+body.has-switcher .shell-body { padding-bottom: 52px; }
+.prototype-switcher { display: flex; align-items: center; gap: 8px; position: fixed; z-index: 300; bottom: 10px; left: 50%; transform: translateX(-50%); max-width: calc(100vw - 20px); background: var(--color-raise); border: 1px solid var(--color-line-2); border-radius: var(--radius-pill); padding: 7px 14px; box-shadow: var(--shadow-dialog); white-space: nowrap; }
+.prototype-switcher button { display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: var(--radius-pill); background: transparent; color: var(--color-text-2); padding: 5px 7px; cursor: pointer; font: 500 var(--text-sm) var(--font-sans); }
+.prototype-switcher button:hover, .prototype-switcher .on { color: var(--color-text); background: var(--color-line-2); }
+.prototype-label { font-size: 9px; letter-spacing: .1em; color: var(--color-review); }
+.variant-label { font-size: var(--text-sm); min-width: 220px; text-align: center; }
+.switcher-divider { height: 20px; border-left: 1px solid var(--color-line-2); }
+.state-label { font-size: var(--text-xs); color: var(--color-text-3); margin-left: 6px; max-width: 360px; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 1150px) { .state-label { max-width: 220px; } }
