@@ -7,6 +7,7 @@ import type {
   RunReport,
   ScanOutcome,
   ScanUpdate,
+  TidyProposal,
   VolumeInfo,
 } from '../bridge';
 import { foldEvents, settleRun, startRun, type RunView } from '../run/progress';
@@ -48,7 +49,12 @@ export type DriveScan =
       overview: Overview;
       /** The cleanups proposed for this drive, biggest first. */
       proposals: Proposal[];
-      /** The ids of the proposals in this drive's plan. A new scan starts with the ones on by default. */
+      /** The folders Tidy up can sort on this drive (Windows only). They start out of the plan. */
+      tidy: TidyProposal[];
+      /**
+       * The ids of the proposals and sorts in this drive's plan. A new scan starts with the cleanups on by default;
+       * sorts always start out of it.
+       */
       plan: string[];
       /** When it finished, in ms since the epoch. */
       at: number;
@@ -107,6 +113,8 @@ export type Action =
   | { type: 'summarySeen'; mountPoint: string }
   /** From a failed run back to the drive's plan. */
   | { type: 'leaveRun'; mountPoint: string }
+  /** A kept run changed (an Undo ran): the drive whose run it is shows it as it is now. */
+  | { type: 'reportUpdated'; report: RunReport }
   | { type: 'lock'; locked: boolean }
   | { type: 'dismissGone' };
 
@@ -231,6 +239,7 @@ export function reduce(s: Session, a: Action): Session {
               phase: 'done',
               overview: a.outcome.overview,
               proposals: a.outcome.proposals,
+              tidy: a.outcome.tidy,
               plan: a.outcome.proposals.filter((p) => p.defaultOn).map((p) => p.id),
               at: a.at,
               planRun: null,
@@ -249,7 +258,8 @@ export function reduce(s: Session, a: Action): Session {
     }
     case 'plan': {
       const scan = scanOf(s, a.mountPoint);
-      if (scan.phase !== 'done' || !scan.proposals.some((p) => p.id === a.id) || ranPlan(scan)) return s;
+      const known = scan.phase === 'done' && (scan.proposals.some((p) => p.id === a.id) || scan.tidy.some((t) => t.id === a.id));
+      if (scan.phase !== 'done' || !known || ranPlan(scan)) return s;
       if (scan.plan.includes(a.id) === a.on) return s;
       const plan = a.on ? [...scan.plan, a.id] : scan.plan.filter((id) => id !== a.id);
       return { ...s, scans: { ...s.scans, [a.mountPoint]: { ...scan, plan } } };
@@ -290,6 +300,13 @@ export function reduce(s: Session, a: Action): Session {
       return onPlanRun(s, a.mountPoint, (run) => (run?.phase === 'summary' && run.fresh ? { ...run, fresh: false } : run));
     case 'leaveRun':
       return onPlanRun(s, a.mountPoint, (run) => (run?.phase === 'failed' ? null : run));
+    case 'reportUpdated': {
+      const mountPoint = Object.keys(s.scans).find((m) => reportOf(scanOf(s, m))?.id === a.report.id);
+      if (mountPoint === undefined) return s;
+      return onPlanRun(s, mountPoint, (run) =>
+        run && (run.phase === 'ended' || run.phase === 'summary') && run.report.id === a.report.id ? { ...run, report: a.report } : run,
+      );
+    }
     case 'lock':
       return a.locked === s.locked ? s : { ...s, locked: a.locked };
     case 'dismissGone':

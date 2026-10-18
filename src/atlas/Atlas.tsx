@@ -1,6 +1,6 @@
 import { Check, ChevronRight, LoaderCircle, Plus, RotateCcw, ShieldAlert } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { useBridge, type CategoryId, type MapFolder, type PlanSummary } from '../bridge';
+import { useBridge, type CategoryId, type MapFolder, type Overview, type PlanSummary, type TidyProposal } from '../bridge';
 import { DotField, type DotFieldHandle } from '../dotfield/DotField';
 import type { ReadyDrives } from '../drives/context';
 import { GoneNotice } from '../drives/GoneNotice';
@@ -18,6 +18,7 @@ import type { StepView } from '../run/progress';
 import { RunPanel, type ShownRun } from '../run/RunPanel';
 import { ScanHud } from '../scan/ScanHud';
 import { ScanPlate } from '../scan/ScanPlate';
+import { TidyDrawer } from '../tidy/TidyDrawer';
 import { Finish } from '../wrapped/Finish';
 import './atlas.css';
 
@@ -33,6 +34,8 @@ interface Props {
   /** The plan tray is open beside the map. */
   planOpen: boolean;
   onPlanOpen: (open: boolean) => void;
+  /** Undoes one folder's Tidy up of a kept run (its report updates once it has). */
+  onUndo: (runId: string, tidyId: string) => Promise<unknown>;
 }
 
 /** Where the map is zoomed: a category, then folders opened inside it. */
@@ -50,7 +53,7 @@ const ALMOST = 0.98;
  * panel and the plan's tiles drain to vacant ground. After the run the drive's screen is its finish: the highlight
  * slides, then the summary (the before/after map and what changed), which the drive keeps until it is scanned again.
  */
-export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPlanOpen }: Props) {
+export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPlanOpen, onUndo }: Props) {
   const bridge = useBridge();
   const field = useRef<DotFieldHandle>(null);
   const [calm, setCalm] = useState<HTMLDivElement | null>(null);
@@ -65,6 +68,7 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
   const overview = state.phase === 'done' && drives.screen === 'map' ? state.overview : null;
   const scanning = state.phase === 'scanning' ? state : null;
   const proposals = useMemo(() => (state.phase === 'done' ? state.proposals : []), [state]);
+  const tidy = useMemo(() => (state.phase === 'done' ? state.tidy : []), [state]);
   const plan = state.phase === 'done' ? state.plan : [];
   const byId = useMemo(() => new Map(proposals.map((p) => [p.id, p])), [proposals]);
   const planRun = state.phase === 'done' ? state.planRun : null;
@@ -78,6 +82,8 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
   const [checking, setChecking] = useState(false);
   const [confirm, setConfirm] = useState<PlanSummary | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
+  // The Tidy up proposal whose drawer is open over the map, while planning.
+  const [drawerId, setDrawerId] = useState<string | null>(null);
   const [seen, setSeen] = useState(overview);
   if (seen !== overview) {
     // A new map starts at the whole disk.
@@ -89,6 +95,7 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
     setChecking(false);
     setConfirm(null);
     setPlanError(null);
+    setDrawerId(null);
   }
   // Which folder opening is still wanted. Any move on the map, or a new map, makes a pending one stale, so a
   // folder that arrives late never pulls the map back to where the user was. Plans likewise: a change to the plan,
@@ -198,7 +205,10 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
   // Reclaimable tiles always react; other tiles zoom in at the top and open folders below. A run holds the map still.
   const clickable = (leaf: Leaf) =>
     !run && (leaf.proposal !== null || (levels.length === 0 ? leaf.kind !== 'free' : leaf.browsable));
+  const drawer = planning && levels.length === 0 ? (tidy.find((t) => t.id === drawerId) ?? null) : null;
+  const drawerTile = drawer && overview ? folderTileOf(overview, drawer) : null;
   const look = (leaf: Leaf): TileLook => {
+    if (leaf.id === drawerTile) return { cls: 'is-tidy-hot', state: 'loose files Vacancy can sort' };
     if (leaf.proposal === null) return {};
     if (run) return runLook(runSteps.get(leaf.id));
     if (!planning) return { cls: 'is-reclaim', state: 'reclaimable' };
@@ -399,13 +409,30 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
           {scanning && <ScanHud update={scanning.update} progress={progress} onCancel={drives.cancelScan} />}
           {drives.gone && <GoneNotice gone={drives.gone} onDismiss={drives.dismissGone} />}
         </div>
+        {drawer && (
+          <TidyDrawer
+            key={drawer.id}
+            tidy={drawer}
+            plan={plan}
+            proposals={proposals}
+            onToggle={() => setInPlan(drawer.id, !plan.includes(drawer.id))}
+            onClose={() => setDrawerId(null)}
+          />
+        )}
       </main>
       {planning && (
         <PlanTray
           key={overview.volume.mountPoint}
           mountPoint={overview.volume.mountPoint}
           proposals={proposals}
+          tidy={tidy}
           plan={plan}
+          drawer={drawer?.id ?? null}
+          onDrawer={(id) => {
+            if (id !== null && levels.length > 0) navigate([]);
+            setDrawerId(id);
+          }}
+          tidyTile={(t) => folderTileOf(overview, t)}
           agent={agent}
           hot={hot}
           onHot={setHot}
@@ -437,6 +464,7 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
           start={summary.fresh ? 'slides' : 'rest'}
           onSeen={drives.summarySeen}
           onScanAgain={drives.showScanScreen}
+          onUndo={(tidyId) => onUndo(summary.report.id, tidyId)}
         />
       )}
       {planning && confirm && !advisorOpen && (
@@ -449,6 +477,16 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
       )}
     </>
   );
+}
+
+/** The map tile of the folder a Tidy up sorts, if the overview has one: the folder's own tile. */
+function folderTileOf(overview: Overview, t: TidyProposal): string | null {
+  const key = t.path.toLowerCase();
+  for (const c of overview.categories) {
+    const item = c.items.find((i) => i.path.toLowerCase() === key);
+    if (item) return item.id;
+  }
+  return null;
 }
 
 /** What each step has freed from its tile so far, and left in place, by tile. */

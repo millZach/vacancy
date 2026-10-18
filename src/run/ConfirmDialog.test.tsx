@@ -36,7 +36,7 @@ describe('the confirm dialog', () => {
         onGo={() => {}}
       />,
     );
-    expect(dialog()).toHaveTextContent('1,204 files will be moved. Every move is recorded, so you can undo it from the summary.');
+    expect(dialog()).toHaveTextContent('1,204 files will be moved into folders, which frees no space. Every move is recorded, so you can undo it from the recap or Past runs.');
     expect(dialog()).toHaveTextContent('2 places changed since the scan and will be left alone.');
   });
 

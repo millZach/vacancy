@@ -1,5 +1,5 @@
 import { createContext, use } from 'react';
-import type { FullDiskAccess, PlanSummary, VolumeInfo } from '../bridge';
+import type { FullDiskAccess, PlanSummary, RunReport, VolumeInfo } from '../bridge';
 import type { DriveScan, Gone, Screen } from './session';
 
 /** The drives, this computer's name and (on macOS) whether Vacancy can see everything, once they are known. */
@@ -57,6 +57,8 @@ export interface ReadyDrives {
   summarySeen: () => void;
   /** From a failed run of the drive on screen back to its plan. */
   leaveRun: () => void;
+  /** A kept run changed (an Undo ran): the drive whose run it is shows it as it is now. */
+  reportUpdated: (report: RunReport) => void;
   dismissGone: () => void;
 }
 
