@@ -254,9 +254,10 @@ describe('the mock bridge’s Tidy up', () => {
 
   it('plans a sort without the files the plan deletes, and says it frees nothing', async () => {
     const bridge = createMockBridge(fixtures.windows, { scanMs: 0 });
-    await bridge.scan('C:\', () => {});
-    const both = await bridge.buildPlan('C:\', ['w-installers', 'tidy-downloads']);
-    const alone = await bridge.buildPlan('C:\', ['tidy-downloads']);
+    const c = fixtures.windows.volumes[0]!.mountPoint;
+    await bridge.scan(c, () => {});
+    const both = await bridge.buildPlan(c, ['w-installers', 'tidy-downloads']);
+    const alone = await bridge.buildPlan(c, ['tidy-downloads']);
     expect(alone.moves - both.moves).toBe(3);
     expect(alone).toMatchObject({ bytes: 0, items: 0, steps: [{ id: 'tidy-downloads', kind: 'move', bytes: 0 }] });
   });

@@ -179,9 +179,14 @@ impl Mode {
 
     /// The app's data folder, or in fixture mode the fixture's. None when fixture mode was refused.
     fn app_data(&self, app: &AppHandle) -> Option<PathBuf> {
+        self.app_data_with(|| app.path().app_data_dir().ok())
+    }
+
+    /// [`Mode::app_data`], with `real` giving the real app data folder: never asked in fixture modes.
+    fn app_data_with(&self, real: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf> {
         match self {
             Mode::Fixture { root, .. } => Some(fixture::app_data(root)),
-            Mode::Real => app.path().app_data_dir().ok(),
+            Mode::Real => real(),
             Mode::Refused(_) => None,
         }
     }
@@ -193,10 +198,15 @@ impl Mode {
 
     /// Where Tidy up keeps its move journals: a folder of the app's data folder (in fixture mode, the fixture's).
     fn journals(&self, app: &AppHandle) -> Option<tidy::Journals> {
-        self.app_data(app).map(|dir| tidy::Journals {
-            dir: dir.join("tidy"),
-        })
+        journals_in(self.app_data(app))
     }
+}
+
+/// The journal folder inside an app data folder.
+fn journals_in(app_data: Option<PathBuf>) -> Option<tidy::Journals> {
+    app_data.map(|dir| tidy::Journals {
+        dir: dir.join("tidy"),
+    })
 }
 
 /// A quick read-only scan of the fixture, for its figures.
@@ -1013,6 +1023,31 @@ mod tests {
             launched,
             "successful numeric zero is an identity, unlike lookup failure"
         );
+    }
+
+    #[test]
+    fn tidy_journals_live_in_the_app_data_folder_and_in_fixture_mode_the_fixtures() {
+        let root = PathBuf::from(r"D:\tmp\fixture");
+        let fixture = Mode::Fixture {
+            root: root.clone(),
+            capacity: 1,
+        };
+        let journals =
+            journals_in(fixture.app_data_with(|| panic!("fixture mode never asks"))).unwrap();
+        assert_eq!(journals.dir, fixture::app_data(&root).join("tidy"));
+        assert!(
+            journals.dir.starts_with(&root),
+            "inside the fixture, never the real app data"
+        );
+        let real =
+            journals_in(Mode::Real.app_data_with(|| Some(PathBuf::from(r"C:\AppData\Vacancy"))))
+                .unwrap();
+        assert_eq!(real.dir, PathBuf::from(r"C:\AppData\Vacancy\tidy"));
+        assert!(
+            journals_in(Mode::Refused("bad".into()).app_data_with(|| panic!("never asked")))
+                .is_none()
+        );
+        assert!(journals_in(Mode::Real.app_data_with(|| None)).is_none());
     }
 
     fn last(scans: &Scans<u32>, drive: &str) -> Option<u32> {
