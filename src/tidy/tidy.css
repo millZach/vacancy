@@ -1,0 +1,522 @@
+/* Tidy up: the plan tray's group and its before and after, the drawer over the map, and Undo in the recap, the Moved
+   slide and Past runs. The approved prototype's look (prototype/reorg-ui, variant A), on the design tokens. */
+
+/* ---------- the tray group ---------- */
+.tray-row-size.is-files {
+  font-weight: 600;
+  color: var(--color-text-2);
+}
+.tray-notes li.note-moves {
+  color: var(--color-text-2);
+  line-height: 1.45;
+}
+
+.mini-ba {
+  display: grid;
+  grid-template-columns: 74px 14px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin: 2px 0 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.mini-ba:hover {
+  border-color: var(--color-line-hover);
+}
+.mini-before {
+  display: grid;
+  gap: 3px;
+}
+.mini-pile {
+  position: relative;
+  height: 34px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.mini-pile i {
+  position: absolute;
+  width: 4px;
+  height: 5px;
+  border-radius: 1px;
+  background: var(--color-text-3);
+}
+.mini-cap {
+  font-size: var(--text-2xs);
+  color: var(--color-text-3);
+  white-space: nowrap;
+}
+.mini-arrow {
+  color: var(--color-text-3);
+}
+.mini-after {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.mini-folder {
+  display: grid;
+  grid-template-columns: 66px minmax(0, 1fr) 26px;
+  gap: 5px;
+  align-items: center;
+  font-size: var(--text-2xs);
+  color: var(--color-text-2);
+}
+.mini-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mini-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-step-track);
+}
+.mini-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--color-text-3);
+}
+.tidy-row.is-on .mini-bar i {
+  background: var(--color-neon);
+  box-shadow: 0 0 6px rgba(var(--neon-rgb), 0.55);
+}
+.mini-n {
+  text-align: right;
+  color: var(--color-text-3);
+  font-variant-numeric: tabular-nums;
+}
+.mini-more {
+  font-size: var(--text-2xs);
+  color: var(--color-text-3);
+}
+.map-tile.is-tidy-hot::after {
+  box-shadow: inset 0 0 0 2px var(--color-text), inset 0 0 0 4px rgba(var(--neon-rgb), 0.7);
+}
+
+/* ---------- the drawer ---------- */
+.reorg-drawer {
+  position: absolute;
+  z-index: 6;
+  top: var(--toolbar-h);
+  right: var(--gutter);
+  bottom: var(--gutter);
+  width: min(440px, calc(100% - 60px));
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-line-2);
+  border-radius: var(--radius-card);
+  background: var(--color-panel);
+  box-shadow: var(--shadow-dialog);
+  animation: tray-in var(--tray-in) both;
+}
+.rd-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 14px 12px 18px;
+  border-bottom: 1px solid var(--color-line);
+}
+.rd-head h2 {
+  margin: 0;
+  font: 700 17px / 1.2 var(--font-sans);
+}
+.rd-path {
+  margin: 3px 0 0;
+  font: 400 var(--text-2xs) var(--font-mono);
+  color: var(--color-text-3);
+  overflow-wrap: anywhere;
+}
+.rd-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 18px 14px;
+}
+.rd-rule {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-2);
+}
+.rd-rule svg {
+  color: var(--color-text-3);
+}
+.rd-later {
+  margin: 8px 0 0;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--color-review);
+}
+.rd-h {
+  margin: 16px 0 6px;
+  font: 700 var(--text-ui) var(--font-sans);
+  color: var(--color-text);
+}
+.rd-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--color-line);
+  background: var(--tray-foot-glow);
+}
+.rd-foot p {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-2);
+  line-height: 1.4;
+}
+
+.trees {
+  display: grid;
+  grid-template-columns: minmax(0, 0.82fr) 18px minmax(0, 1.18fr);
+  gap: 8px;
+  align-items: start;
+  margin: 14px 0 6px;
+}
+.trees section {
+  min-width: 0;
+  padding: 10px 10px 8px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-card);
+  background: var(--color-bg);
+}
+.trees h3 {
+  margin: 0 0 6px;
+  font: 700 var(--text-caps) / 1 var(--font-sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text-3);
+}
+.trees-arrow {
+  margin-top: 40px;
+  color: var(--color-text-3);
+}
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: var(--text-sm);
+  color: var(--color-text);
+  min-width: 0;
+}
+.tree-row svg {
+  flex: none;
+  color: var(--color-text-3);
+}
+.tree-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tree-count {
+  margin-left: auto;
+  padding-left: 6px;
+  color: var(--color-text-3);
+  font-variant-numeric: tabular-nums;
+}
+.tree-row.is-new .tree-name {
+  color: var(--color-neon-ink);
+}
+.tree-row.is-new svg {
+  color: var(--color-neon);
+}
+.tree-row.is-later svg,
+.tree-row.is-later .tree-name {
+  color: var(--color-review);
+}
+.tree-row.is-stays,
+.tree-row.is-going {
+  color: var(--color-text-2);
+  font-style: italic;
+}
+.tree-tag {
+  flex: none;
+  padding: 1px 5px 0;
+  border: 1px solid rgba(var(--neon-rgb), 0.4);
+  border-radius: var(--radius-pill);
+  font: 700 var(--text-tag) / 1.3 var(--font-sans);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-neon-ink);
+}
+.tree-tag.is-existing {
+  border-color: var(--color-line-2);
+  color: var(--color-text-3);
+}
+
+.sample-moves,
+.stays,
+.facts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.sample-moves li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 14px minmax(0, 1.4fr);
+  gap: 6px;
+  align-items: baseline;
+  padding: 4px 0;
+  font: 400 var(--text-2xs) / 1.45 var(--font-mono);
+  color: var(--color-text-2);
+}
+.sample-moves li svg {
+  align-self: center;
+  color: var(--color-text-3);
+}
+.sm-from,
+.sm-to {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.sm-to {
+  color: var(--color-text);
+}
+.sample-moves li.is-renamed .sm-to {
+  color: var(--color-review);
+}
+.sample-moves li em {
+  grid-column: 1 / -1;
+  font: italic 400 var(--text-xs) / 1.4 var(--font-sans);
+  color: var(--color-review);
+}
+.stays li {
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+  padding: 4px 0;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--color-text-2);
+}
+.stays li svg {
+  flex: none;
+  position: relative;
+  top: 2px;
+  color: var(--color-text-3);
+}
+.stays li b {
+  color: var(--color-text);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.facts {
+  margin: 14px 0 4px;
+  padding: 10px 12px;
+  border-radius: var(--radius-card);
+  background: var(--color-raise);
+}
+.facts li {
+  padding: 2px 0 2px 12px;
+  position: relative;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--color-text-2);
+}
+.facts li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 9px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--color-text-3);
+}
+.facts li.is-undo {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 0;
+  margin-top: 4px;
+  color: var(--color-safe);
+  font-weight: 600;
+}
+.facts li.is-undo::before {
+  display: none;
+}
+
+/* ---------- Undo ---------- */
+.undo-control {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+.undo-error {
+  max-width: 260px;
+  font-size: var(--text-xs);
+  line-height: 1.4;
+  color: var(--color-review);
+  text-align: right;
+}
+.undone {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font: 600 var(--text-sm) var(--font-sans);
+  color: var(--color-safe);
+  white-space: nowrap;
+}
+.undone.is-partial {
+  color: var(--color-review);
+}
+.undo-result {
+  margin: 8px 0 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-line-2);
+  border-radius: var(--radius-card);
+  background: var(--color-bg);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--color-text-2);
+  text-align: left;
+}
+.undo-result p {
+  margin: 0;
+}
+.undo-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--color-safe);
+  font-weight: 600;
+}
+.undo-result .undo-warn {
+  display: flex;
+  gap: 7px;
+  margin-top: 6px;
+  color: var(--color-review);
+}
+.undo-warn svg {
+  flex: none;
+  position: relative;
+  top: 3px;
+}
+.undo-warn b {
+  font-weight: 600;
+}
+.undo-result .undo-quiet {
+  margin-top: 6px;
+  color: var(--color-text-3);
+}
+
+/* ---------- the recap ---------- */
+.sec-aside {
+  font-weight: 500;
+  color: var(--color-text-3);
+  font-size: var(--text-sm);
+}
+.reorg-recap h3 {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+.recap-reorg {
+  padding: 10px 0;
+  border-top: 1px solid var(--color-line);
+}
+.recap-reorg:first-of-type {
+  border-top: 0;
+}
+.rr-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-base);
+  color: var(--color-text-2);
+}
+.rr-head > svg {
+  flex: none;
+  color: var(--color-text-3);
+}
+.rr-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.4;
+}
+.rr-text b {
+  color: var(--color-text);
+}
+.rr-note {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  margin: 6px 0 0 22px;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--color-review);
+}
+.run-skips {
+  margin-top: 6px;
+}
+.run-skips li {
+  font-size: var(--text-sm);
+}
+
+/* ---------- the Moved slide ---------- */
+.moved-card {
+  align-content: start;
+}
+.moved-card .moved-dests {
+  color: var(--color-text-2);
+  font-size: var(--text-sm);
+}
+.moved-undo {
+  margin-top: 10px;
+}
+.moved-card .undo-result span {
+  font-size: inherit;
+  color: inherit;
+}
+.moved-card .undo-result {
+  font-size: var(--text-sm);
+}
+
+/* ---------- Past runs ---------- */
+.history-tag.is-moved {
+  border-color: var(--color-line-2);
+  color: var(--color-text-2);
+}
+.history-undo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 16px 6px 30px;
+  font-size: var(--text-sm);
+  color: var(--color-text-2);
+}
+.history-undo > svg {
+  flex: none;
+  color: var(--color-text-3);
+}
+.hu-text {
+  flex: 1;
+  min-width: 0;
+}
+.hu-text b {
+  color: var(--color-text);
+  margin-right: 4px;
+}
+.history-undo .btn--sm {
+  padding: 3px 8px 2px;
+  font-size: var(--text-sm);
+}
+.history-pop.has-tidy {
+  width: 420px;
+}

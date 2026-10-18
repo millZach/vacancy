@@ -1,4 +1,7 @@
-use super::{Draft, DroppedDraft, Error, InventoryEntry, ReviewedMove, Status};
+use super::{
+    Draft, DroppedDraft, Error, Folder, InventoryEntry, Ledger, PlannedDirectory, ReviewedMove,
+    Status,
+};
 use crate::{CancelToken, Env};
 use std::path::Path;
 
@@ -18,11 +21,20 @@ impl Inventory {
     pub fn capture(_: &Env, _: &CancelToken) -> Result<Self, Error> {
         Err(Error::Unsupported)
     }
+    pub fn capture_folder(_: &Env, _: Folder, _: &CancelToken) -> Result<Self, Error> {
+        Err(Error::Unsupported)
+    }
     pub fn entries(&self) -> &[InventoryEntry] {
         &[]
     }
     pub fn truncated(&self) -> bool {
         false
+    }
+    pub fn later(&self) -> u64 {
+        0
+    }
+    pub fn validate_pinned(&self, _: &[Draft], _: &CancelToken) -> Result<ValidatedPlan, Error> {
+        Err(Error::Unsupported)
     }
     pub fn validate(&self, _: &[Draft], _: &CancelToken) -> Result<ValidatedPlan, Error> {
         Err(Error::Unsupported)
@@ -35,6 +47,9 @@ impl ValidatedPlan {
     pub fn dropped(&self) -> &[DroppedDraft] {
         &[]
     }
+    pub fn directories(&self) -> Vec<PlannedDirectory> {
+        Vec::new()
+    }
 }
 impl Engine {
     pub fn begin(_: &Env, _: &Path, _: ValidatedPlan) -> Result<Self, Error> {
@@ -45,6 +60,23 @@ impl Engine {
     }
     pub fn run(&mut self, _: &CancelToken) -> Result<Status, Error> {
         Err(Error::Unsupported)
+    }
+    pub fn run_observed(
+        &mut self,
+        _: &CancelToken,
+        _: &mut dyn FnMut(usize, usize),
+    ) -> Result<Status, Error> {
+        Err(Error::Unsupported)
+    }
+    pub fn undo_observed(
+        &mut self,
+        _: &CancelToken,
+        _: &mut dyn FnMut(usize, usize),
+    ) -> Result<Status, Error> {
+        Err(Error::Unsupported)
+    }
+    pub fn ledger(&self) -> Ledger {
+        Ledger::default()
     }
     pub fn reconcile(&mut self, _: &CancelToken) -> Result<Status, Error> {
         Err(Error::Unsupported)
@@ -72,6 +104,10 @@ mod tests {
             Err(Error::Unsupported)
         ));
         assert!(matches!(
+            Inventory::capture_folder(&env, Folder::Downloads, &cancel),
+            Err(Error::Unsupported)
+        ));
+        assert!(matches!(
             Engine::open(&env, Path::new("/must-not-be-created")),
             Err(Error::Unsupported)
         ));
@@ -86,6 +122,14 @@ mod tests {
         let mut engine = Engine { _private: () };
         assert!(matches!(engine.run(&cancel), Err(Error::Unsupported)));
         assert!(matches!(engine.undo(&cancel), Err(Error::Unsupported)));
+        assert!(matches!(
+            engine.run_observed(&cancel, &mut |_, _| panic!("never observes")),
+            Err(Error::Unsupported)
+        ));
+        assert!(matches!(
+            engine.undo_observed(&cancel, &mut |_, _| panic!("never observes")),
+            Err(Error::Unsupported)
+        ));
         assert!(matches!(engine.reconcile(&cancel), Err(Error::Unsupported)));
     }
 }

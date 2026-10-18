@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useBridge, type RunReport } from '../bridge';
 import { overviewModel } from '../map/model';
 import { SummaryMap, SummaryPanel } from '../summary/Summary';
+import type { OnUndo } from '../tidy/Undo';
 import { fade, flyNumbers, prefersReducedMotion, whenDone } from './motion';
 import { Wrapped, type Handoff } from './Wrapped';
 
@@ -23,6 +24,8 @@ interface Props {
   onScanAgain?: () => void;
   /** A run from the history: back to where the user was. */
   onClose?: () => void;
+  /** Undoes one folder's Tidy up, from the summary or the Moved slide. The report updates once it has. */
+  onUndo?: OnUndo;
 }
 
 /**
@@ -30,7 +33,7 @@ interface Props {
  * highlights" plays them again. Used for a run that just ended and for one reopened from the history; both read
  * only the run's report.
  */
-export function Finish({ report, start, onSeen, onScanAgain, onClose }: Props) {
+export function Finish({ report, start, onSeen, onScanAgain, onClose, onUndo }: Props) {
   const { platform } = useBridge();
   const [phase, setPhase] = useState<Phase>(start);
   // The flight hands off: the panel's other sections rise in around the numbers landing.
@@ -104,6 +107,7 @@ export function Finish({ report, start, onSeen, onScanAgain, onClose }: Props) {
           onReplay={replay}
           {...(onScanAgain ? { onScanAgain } : {})}
           {...(onClose ? { onClose } : {})}
+          {...(onUndo ? { onUndo } : {})}
         />
       )}
       {slidesUp && (
@@ -113,6 +117,7 @@ export function Finish({ report, start, onSeen, onScanAgain, onClose }: Props) {
           entering={phase === 'replay'}
           onHandoff={handoff}
           overlayRef={overlay}
+          {...(onUndo ? { onUndo } : {})}
         />
       )}
     </div>

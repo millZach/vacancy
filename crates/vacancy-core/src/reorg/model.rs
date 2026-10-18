@@ -235,6 +235,8 @@ pub(super) struct State {
     pub pending: BTreeMap<(u8, usize), Option<Id>>,
     pub receipts: BTreeMap<(u8, usize), Receipt>,
     pub reasons: Vec<String>,
+    /// The latest reason recorded for each operation that was skipped, not attempted or left unresolved.
+    pub notes: BTreeMap<(u8, usize), String>,
 }
 
 impl Operation {
@@ -268,6 +270,7 @@ impl State {
             pending: BTreeMap::new(),
             receipts: BTreeMap::new(),
             reasons: Vec::new(),
+            notes: BTreeMap::new(),
         };
         for event in &events[1..] {
             state.apply(event)?;
@@ -352,6 +355,7 @@ impl State {
                     self.receipts.insert(key, Receipt::Unresolved);
                 }
                 self.reasons.push(reason.clone());
+                self.notes.insert(key, reason.clone());
             }
             Event::NotAttempted {
                 operation,
@@ -367,6 +371,7 @@ impl State {
                     matches!(operation, Operation::Undo | Operation::RemoveDirectory);
                 self.receipts.insert(key, Receipt::Skipped);
                 self.reasons.push(reason.clone());
+                self.notes.insert(key, reason.clone());
             }
         }
         Ok(())

@@ -2111,3 +2111,64 @@ fn begin_refuses_foreign_empty_or_invalid_lease_without_repurposing_it() {
     drop(parent);
     assert_eq!(crate::fixture::inventory(&env.root).unwrap(), before);
 }
+
+#[test]
+fn an_interrupted_tidy_run_reopens_from_its_journal_and_undoes_what_moved() {
+    let (_dir, env) = fixture();
+    let a = put(&env, "a.txt");
+    let b = put(&env, "b.txt");
+    let leaf = "run-1-tidy-downloads.journal";
+    let mut engine = Engine::begin(
+        &env,
+        &env.app_data.join(leaf),
+        approved(&env, &["a.txt", "b.txt"], &["Sorted"]),
+    )
+    .unwrap();
+    // The app closes right after the first move's result is recorded: the journal never finishes.
+    let mut results = 0;
+    set_hook(move |at| {
+        if at == "move-result" {
+            results += 1;
+            if results == 1 {
+                panic!("the app closed");
+            }
+        }
+    });
+    let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        engine.run(&CancelToken::new())
+    }));
+    clear_hook();
+    assert!(crashed.is_err());
+    drop(engine);
+    let journals = crate::tidy::Journals {
+        dir: env.app_data.clone(),
+    };
+    // The report the history kept is the checkpoint: nothing moved yet, as far as it knows.
+    let mut record = crate::report::Reorganized {
+        id: "tidy-downloads".into(),
+        folder: "Downloads".into(),
+        moved_items: 0,
+        planned_items: 2,
+        journal: leaf.into(),
+        path: env.known.downloads.display().to_string(),
+        into: Vec::new(),
+        folders_made: 0,
+        undoable: false,
+        interrupted: true,
+        note: None,
+        undo: None,
+    };
+    assert!(crate::tidy::refresh_record(&env, &journals, &mut record));
+    assert_eq!(record.moved_items, 1);
+    assert!(record.interrupted && record.undoable);
+    assert!(record.note.as_deref().unwrap().contains("isn't resumed"));
+    assert!(
+        !a.exists() && b.exists(),
+        "reading the journal resumed nothing"
+    );
+    crate::tidy::undo_record(&env, &journals, &mut record, &CancelToken::new()).unwrap();
+    let undone = record.undo.as_ref().unwrap();
+    assert_eq!((undone.back, undone.stuck.len()), (1, 0));
+    assert!(a.exists() && b.exists());
+    assert!(!env.known.documents.join("Sorted").exists());
+}

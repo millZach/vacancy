@@ -1,16 +1,19 @@
-import { History, LoaderCircle, Lock } from 'lucide-react';
+import { FolderInput, History, LoaderCircle, Lock, Undo2 } from 'lucide-react';
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { useBridge, type RunHistory, type RunListing, type RunReport } from '../bridge';
+import { useBridge, type RunHistory, type RunListing, type RunReport, type TidyListing } from '../bridge';
 import { errorMessage } from '../errors';
-import { formatBytes } from '../format';
+import { formatBytes, formatCount } from '../format';
 import { formatWhen } from '../summary/when';
 import './history.css';
+import '../tidy/tidy.css';
 
 interface Props {
   /** A plan is running: the history waits, like the drive menu. */
   locked: boolean;
   /** A run was opened: show its summary. */
   onOpen: (report: RunReport) => void;
+  /** Undoes one folder's Tidy up of a kept run, from its journal. Resolves with the run's report as it is now. */
+  onUndo?: (runId: string, tidyId: string) => Promise<RunReport>;
 }
 
 type Listing = { status: 'loading' } | { status: 'ready'; history: RunHistory } | { status: 'error'; message: string };
@@ -33,12 +36,14 @@ function byDrive(runs: RunListing[]): { key: string; name: string; runs: RunList
  * The header's "Past runs": every kept run, per drive, with when it ran and what it freed. Choosing one opens its
  * summary, from which its highlight slides can be replayed. Kept runs that can't be read are counted, not listed.
  */
-export function HistoryMenu({ locked, onOpen }: Props) {
+export function HistoryMenu({ locked, onOpen, onUndo }: Props) {
   const bridge = useBridge();
   const [open, setOpen] = useState(false);
   const [listing, setListing] = useState<Listing>({ status: 'loading' });
   const [opening, setOpening] = useState<string | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
+  /** The folder being moved back, as `run:tidy`. */
+  const [undoing, setUndoing] = useState<string | null>(null);
   const shown = open && !locked;
   const root = useRef<HTMLDivElement>(null);
   const button = useRef<HTMLButtonElement>(null);
@@ -103,6 +108,26 @@ export function HistoryMenu({ locked, onOpen }: Props) {
     );
   };
 
+  // Undo from the list: the run's journal puts its files back; the list then reads afresh.
+  const undo = (run: RunListing, t: TidyListing) => {
+    if (!onUndo) return;
+    const key = `${run.id}:${t.id}`;
+    setUndoing(key);
+    setOpenError(null);
+    onUndo(run.id, t.id)
+      .then(() => bridge.listRuns())
+      .then(
+        (history) => {
+          setUndoing(null);
+          setListing({ status: 'ready', history });
+        },
+        (error: unknown) => {
+          setUndoing(null);
+          setOpenError(errorMessage(error));
+        },
+      );
+  };
+
   const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
     if (!shown) return;
     const items = rows.current.filter((r): r is HTMLButtonElement => r?.isConnected === true);
@@ -125,6 +150,7 @@ export function HistoryMenu({ locked, onOpen }: Props) {
   };
 
   const groups = listing.status === 'ready' ? byDrive(listing.history.runs) : [];
+  const tidied = groups.some((g) => g.runs.some((r) => r.tidy.length > 0));
   let row = 0;
 
   return (
@@ -143,7 +169,7 @@ export function HistoryMenu({ locked, onOpen }: Props) {
         Past runs
       </button>
       {shown && (
-        <div className="history-pop" role="menu" aria-label="Past runs" aria-busy={listing.status === 'loading'}>
+        <div className={tidied ? 'history-pop has-tidy' : 'history-pop'} role="menu" aria-label="Past runs" aria-busy={listing.status === 'loading'}>
           <div className="history-head" aria-hidden>
             Past runs
           </div>
@@ -169,6 +195,7 @@ export function HistoryMenu({ locked, onOpen }: Props) {
                 const at = row++;
                 const when = formatWhen(run.startedAt);
                 return (
+                  <div key={run.id} className="history-run">
                   <button
                     key={run.id}
                     ref={(el) => {
@@ -183,6 +210,7 @@ export function HistoryMenu({ locked, onOpen }: Props) {
                   >
                     <span className="history-when">{when}</span>
                     {run.cancelled && <span className="history-tag">Stopped</span>}
+                    {run.movedItems > 0 && <span className="history-tag is-moved">{formatCount(run.movedItems)} moved</span>}
                     <span className="history-freed">
                       {opening === run.id ? (
                         <LoaderCircle size={13} className="history-spin" aria-label="Opening" />
@@ -193,6 +221,49 @@ export function HistoryMenu({ locked, onOpen }: Props) {
                       )}
                     </span>
                   </button>
+                  {run.tidy.map((t) => {
+                    const key = `${run.id}:${t.id}`;
+                    const stuck = t.stuck;
+                    const control =
+                      t.interrupted && !t.undoable ? (
+                        <span className="undone is-partial">Interrupted · open to see</span>
+                      ) : t.back !== null && !t.undoable ? (
+                        <span className={stuck ? 'undone is-partial' : 'undone'}>
+                          {stuck ? `Moved back · ${formatCount(stuck)} stayed` : 'Moved back'}
+                        </span>
+                      ) : t.undoable && onUndo ? (
+                        (() => {
+                          const at = row++;
+                          return (
+                            <button
+                              ref={(el) => {
+                                rows.current[at] = el;
+                              }}
+                              type="button"
+                              role="menuitem"
+                              tabIndex={-1}
+                              className="btn btn--sm"
+                              aria-label={`Undo ${t.folder}, from the run of ${when}`}
+                              disabled={undoing !== null}
+                              onClick={() => undo(run, t)}
+                            >
+                              {undoing === key ? <LoaderCircle size={13} className="history-spin" aria-hidden /> : <Undo2 size={13} aria-hidden />}
+                              {undoing === key ? 'Moving back' : t.back !== null ? 'Try again' : `Undo ${t.folder}`}
+                            </button>
+                          );
+                        })()
+                      ) : null;
+                    return (
+                      <div key={t.id} className="history-undo">
+                        <FolderInput size={13} aria-hidden />
+                        <span className="hu-text">
+                          <b>{t.folder}</b> {formatCount(t.movedItems)} {t.movedItems === 1 ? 'file' : 'files'} sorted
+                        </span>
+                        {control}
+                      </div>
+                    );
+                  })}
+                  </div>
                 );
               })}
             </div>
@@ -200,6 +271,12 @@ export function HistoryMenu({ locked, onOpen }: Props) {
           {openError && (
             <p className="history-note is-error" role="alert">
               {openError}
+            </p>
+          )}
+          {tidied && onUndo && (
+            <p className="history-foot">
+              Undo works from here any time. A file that changed, or whose old name is taken, stays where it is, and
+              Vacancy says which.
             </p>
           )}
           {listing.status === 'ready' && listing.history.unreadable > 0 && (

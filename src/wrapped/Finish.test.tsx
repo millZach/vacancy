@@ -375,7 +375,7 @@ describe('the summary', () => {
       '38 files are also kept elsewhere under other names (hard links), so their space is still in use.',
     );
     expect(plain(section('Reorganized').textContent)).toBe(
-      'ReorganizedDownloads. 812 files moved. Every move is recorded.Desktop. 216 files moved. Every move is recorded.',
+      'Reorganized moved, not deleted · 0 B freedDownloads. 812 files moved.Desktop. 216 files moved.',
     );
     const advice = within(section('Left for you'));
     expect(advice.getByText('Cyberpunk 2077 (not played in 14 months)')).toBeInTheDocument();

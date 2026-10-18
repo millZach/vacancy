@@ -16,6 +16,8 @@ import type {
 } from './types';
 import toolGuides from '../data/toolGuidance.json';
 import type { HintAction } from '../bindings/HintAction';
+import type { TidyProposal } from './types';
+import { windowsTidy, type TidyScript } from './tidyFixture';
 
 function toolAdvice(platform: Platform): Proposal[] {
   return toolGuides.filter(g => platform === 'windows'
@@ -55,11 +57,35 @@ export interface Fixture {
   /** Runs kept in the history before this session, newest first: when, on which drive, and what they ran. */
   history: PastRun[];
   /**
-   * Folders a run reorganizes, for previewing the finish's Moved slide with `?moves=1` before reorganizations
-   * arrive (ticket 08). No plan can include them yet.
+   * Folders a run reorganizes, for previewing the finish's Moved slide with `?moves=1` on a run whose plan has no
+   * Tidy up of its own. On macOS they can't be undone, as macOS has no Tidy up.
    */
   moves: Reorganized[];
+  /** What Tidy up proposes for the system drive's home (Windows only; none on macOS). */
+  tidy: TidyProposal[];
+  /** What a mock run and Undo of each sort find. */
+  tidyScripts: Record<string, TidyScript>;
 }
+
+/** A preview reorganization for `?moves=1`: `moved` files of `folder`, undoable only where Tidy up exists. */
+function previewMove(id: string, folder: string, path: string, moved: number, into: string[], undoable: boolean): Reorganized {
+  return {
+    id,
+    folder,
+    movedItems: moved,
+    plannedItems: moved,
+    journal: undoable ? `preview-${id}.journal` : '',
+    path,
+    into,
+    foldersMade: into.length + 2,
+    undoable,
+    interrupted: false,
+    note: null,
+    undo: null,
+  };
+}
+
+const winTidy = windowsTidy('C:\\Users\\alex');
 
 /**
  * Something a mock run leaves in place, found when planning (`plan`) or while its step runs (`run`); or, for a note,
@@ -782,9 +808,11 @@ export const fixtures = {
       { mountPoint: 'D:\\', daysAgo: 37, hour: 21, durationMs: 128_300, proposals: ['w-node', 'w-rust'] },
     ],
     moves: [
-      { id: 'r-downloads', folder: 'Downloads', movedItems: 812 },
-      { id: 'r-desktop', folder: 'Desktop', movedItems: 216 },
+      previewMove('r-downloads', 'Downloads', `${home}\\Downloads`, 812, ['Images', 'Documents', 'Installers', 'Archives', 'Videos', 'Sort later'], true),
+      previewMove('r-desktop', 'Desktop', `${home}\\Desktop`, 216, ['Images', 'Documents', 'Sort later'], true),
     ],
+    tidy: winTidy.proposals,
+    tidyScripts: winTidy.scripts,
   },
   macos: {
     platform: 'macos',
@@ -848,9 +876,12 @@ export const fixtures = {
       { mountPoint: '/Volumes/Samsung T7', daysAgo: 44, hour: 20, durationMs: 23_100, proposals: ['m-node'] },
     ],
     moves: [
-      { id: 'r-downloads', folder: 'Downloads', movedItems: 640 },
-      { id: 'r-desktop', folder: 'Desktop', movedItems: 133 },
+      previewMove('r-downloads', 'Downloads', `${mhome}/Downloads`, 640, ['Images', 'Documents', 'Archives'], false),
+      previewMove('r-desktop', 'Desktop', `${mhome}/Desktop`, 133, ['Images', 'Documents'], false),
     ],
+    // macOS has no Tidy up: the core proposes none, and the UI shows nothing for it.
+    tidy: [],
+    tidyScripts: {},
   },
 } satisfies Record<Platform, Fixture>;
 
