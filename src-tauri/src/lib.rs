@@ -14,7 +14,7 @@ use vacancy_core::permissions::{self, FullDiskAccess};
 use vacancy_core::{
     CancelToken, Env, MapFolder, Moment, Plan, PlanSummary, RunEvent, RunHistory, RunReport,
     ScanError, ScanOptions, ScanOutcome, ScanUpdate, ScannedVolume, Snapshot, VolumeInfo, fixture,
-    report,
+    report, tidy,
 };
 
 /// What the app remembers between commands: each drive's last finished scan (which its map's drill-down reads) with
@@ -177,13 +177,25 @@ impl Mode {
         }
     }
 
-    /// Where the run history is kept: the app's data folder, or in fixture mode the fixture's.
-    fn history(&self, app: &AppHandle) -> Option<PathBuf> {
+    /// The app's data folder, or in fixture mode the fixture's. None when fixture mode was refused.
+    fn app_data(&self, app: &AppHandle) -> Option<PathBuf> {
         match self {
             Mode::Fixture { root, .. } => Some(fixture::app_data(root)),
-            _ => app.path().app_data_dir().ok(),
+            Mode::Real => app.path().app_data_dir().ok(),
+            Mode::Refused(_) => None,
         }
-        .map(|dir| report::history_dir(&dir))
+    }
+
+    /// Where the run history is kept: the app's data folder, or in fixture mode the fixture's.
+    fn history(&self, app: &AppHandle) -> Option<PathBuf> {
+        self.app_data(app).map(|dir| report::history_dir(&dir))
+    }
+
+    /// Where Tidy up keeps its move journals: a folder of the app's data folder (in fixture mode, the fixture's).
+    fn journals(&self, app: &AppHandle) -> Option<tidy::Journals> {
+        self.app_data(app).map(|dir| tidy::Journals {
+            dir: dir.join("tidy"),
+        })
     }
 }
 
@@ -483,6 +495,7 @@ async fn scan_volume(
         Ok(Ok(scanned)) => {
             let overview = Box::new(scanned.overview.clone());
             let proposals = scanned.proposals.list().to_vec();
+            let tidy = scanned.tidy.proposals();
             let scanned = Scanned {
                 volume: scanned,
                 plan: None,
@@ -492,6 +505,7 @@ async fn scan_volume(
                 Ok(ScanOutcome::Done {
                     overview,
                     proposals,
+                    tidy,
                 })
             } else {
                 Ok(ScanOutcome::Cancelled)
@@ -614,9 +628,24 @@ async fn run_plan(
     let worker = app.clone();
     let report = tauri::async_runtime::spawn_blocking(move || {
         let session = worker.state::<Session>();
-        let report = vacancy_core::execute(
+        let history = session.mode.history(&worker);
+        let keep = |report: &RunReport| {
+            if let Some(dir) = &history
+                && let Err(e) = report::save(dir, report)
+            {
+                eprintln!(
+                    "could not keep the run in the history at {}: {e}",
+                    dir.display()
+                );
+            }
+        };
+        let journals = session.mode.journals(&worker);
+        let report = vacancy_core::execute_with(
             &plan,
             &env,
+            journals.as_ref(),
+            // Kept before any file moves, so a run the app never finishes still leads to its journals.
+            &mut |so_far| keep(so_far),
             &|| session.mode.figures(&mount_point, None),
             &mut |event| {
                 // The UI may have gone away mid-run; the run finishes either way, and its report is kept.
@@ -624,14 +653,7 @@ async fn run_plan(
             },
             &cancel,
         );
-        if let Some(dir) = session.mode.history(&worker)
-            && let Err(e) = report::save(&dir, &report)
-        {
-            eprintln!(
-                "could not keep the run in the history at {}: {e}",
-                dir.display()
-            );
-        }
+        keep(&report);
         report
     })
     .await;
@@ -660,18 +682,84 @@ async fn list_runs(app: AppHandle) -> RunHistory {
     .unwrap_or_default()
 }
 
-/// A run from the history, as it was kept, for its summary and its highlight slides.
+/// A run from the history, for its summary and its highlight slides: as it was kept, with each folder it
+/// reorganized read again from its journal (what moved, whether Undo can still run, whether it was interrupted).
+/// Reading a journal never moves anything and never resumes a run.
 #[tauri::command]
 async fn open_run(id: String, app: AppHandle) -> Result<RunReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mode = &app.state::<Session>().mode;
+        let session = app.state::<Session>();
+        let mode = &session.mode;
         let dir = mode
             .history(&app)
             .ok_or("The run history can't be found.")?;
-        report::open(&dir, &id).map_err(|e| format!("This run can't be opened: {e}."))
+        let mut report =
+            report::open(&dir, &id).map_err(|e| format!("This run can't be opened: {e}."))?;
+        // A running plan holds its own journal; its report isn't final yet, so it is shown as kept.
+        if !report.reorganized.is_empty() && !session.running() {
+            refresh_tidy(mode, &app, &dir, &mut report);
+        }
+        Ok(report)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Reads a kept run's reorganizations again from their journals, and keeps the report if that changed it.
+fn refresh_tidy(mode: &Mode, app: &AppHandle, history: &Path, report: &mut RunReport) {
+    let (Some(journals), Ok(env)) = (mode.journals(app), mode.env_for(&report.mount_point)) else {
+        return;
+    };
+    if tidy::refresh(&env, &journals, report)
+        && let Err(e) = report::save(history, report)
+    {
+        eprintln!("could not keep the run's journal state in the history: {e}");
+    }
+}
+
+/// Undoes one folder's Tidy up from a kept run, using its journal (which survives a restart), and keeps what Undo
+/// did in the run's report. Files that changed, or whose old names are taken, stay where they are, and the report
+/// says which. Waits for no plan: it refuses while one runs, and no plan or scan starts while it runs.
+#[tauri::command]
+async fn undo_tidy(run_id: String, tidy_id: String, app: AppHandle) -> Result<RunReport, String> {
+    let cancel = CancelToken::new();
+    {
+        let session = app.state::<Session>();
+        let mut run = lock(&session.run);
+        if run.is_some() {
+            return Err("A plan is running. Undo when it has finished.".into());
+        }
+        if session.scans.scanning() {
+            return Err("A scan is running. Undo when it has finished.".into());
+        }
+        *run = Some((String::new(), cancel.clone()));
+    }
+    let worker = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let session = worker.state::<Session>();
+        let mode = &session.mode;
+        let dir = mode
+            .history(&worker)
+            .ok_or("The run history can't be found.")?;
+        let journals = mode
+            .journals(&worker)
+            .ok_or("Vacancy can't find where it keeps its records of moves.")?;
+        let mut report =
+            report::open(&dir, &run_id).map_err(|e| format!("This run can't be opened: {e}."))?;
+        let env = mode.env_for(&report.mount_point).map_err(|e| {
+            format!(
+                "Undo needs the drive this run sorted, {}: {e}",
+                report.mount_point
+            )
+        })?;
+        tidy::undo(&env, &journals, &mut report, &tidy_id, &cancel).map_err(|e| e.to_string())?;
+        report::save(&dir, &report)
+            .map_err(|e| format!("Undo ran, but the history couldn't keep what it did: {e}."))?;
+        Ok(report)
+    })
+    .await;
+    *lock(&app.state::<Session>().run) = None;
+    result.map_err(|e| e.to_string())?
 }
 
 /// Starts the app and blocks until its last window closes.
@@ -695,6 +783,7 @@ pub fn run() {
             cancel_run,
             list_runs,
             open_run,
+            undo_tidy,
         ])
         .run(tauri::generate_context!())
         .expect("Vacancy failed to start");
