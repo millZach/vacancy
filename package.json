@@ -14,7 +14,10 @@
     "tauri": "tauri",
     "ripple-strip": "node tools/ripple-strip.mjs",
     "map-shots": "node tools/map-shots.mjs",
-    "wrapped-shots": "node tools/wrapped-shots.mjs"
+    "wrapped-shots": "node tools/wrapped-shots.mjs",
+    "prototype:reorg": "vite --config prototypes/reorg/vite.config.ts",
+    "prototype:reorg:check": "tsc --noEmit -p prototypes/reorg/tsconfig.json",
+    "prototype:reorg:build": "vite build --config prototypes/reorg/vite.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/overpass": "^5.3.0",
