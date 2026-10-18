@@ -192,7 +192,9 @@ impl Store {
             native::lease_file(&parent.dir, &lease_name, new).map_err(native_error)?;
         let content = read(&mut lease, 64)?;
         if created {
-            if !content.is_empty() { return Err(Error::CorruptJournal); }
+            if !content.is_empty() {
+                return Err(Error::CorruptJournal);
+            }
             native::revalidate(&parent).map_err(native_error)?;
             native::journal_check(&lease, lease_identity).map_err(native_error)?;
             lease.write_all(LEASE).map_err(io)?;

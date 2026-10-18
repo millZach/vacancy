@@ -424,7 +424,7 @@ mod proof {
         let mut first_byte = [0];
         held.read_exact(&mut first_byte)?;
         require(
-            first_byte == [b's'],
+            first_byte == *b"s",
             "held reader did not read expected synthetic seed",
         )?;
         let before = manifest(&root, &out, "before-run.tsv")?;

@@ -422,9 +422,22 @@ pub(crate) fn journal_file(
 /// positively newly-created native file. A pre-existing empty marker is never adopted or overwritten.
 pub(crate) fn lease_file(parent: &Dir, name: &Name, begin: bool) -> Result<(File, Id, bool), Fail> {
     use windows_sys::Win32::System::WindowsProgramming::{FILE_CREATED, FILE_OPENED};
-    let access = FILE_READ_DATA | FILE_READ_ATTRIBUTES | if begin { FILE_GENERIC_WRITE } else { SYNCHRONIZE };
-    let (handle, information) = create_receipt(&parent.handle, name, access, 0,
-        if begin { FILE_OPEN_IF } else { FILE_OPEN }, FILE_NON_DIRECTORY_FILE).map_err(open_fail)?;
+    let access = FILE_READ_DATA
+        | FILE_READ_ATTRIBUTES
+        | if begin {
+            FILE_GENERIC_WRITE
+        } else {
+            SYNCHRONIZE
+        };
+    let (handle, information) = create_receipt(
+        &parent.handle,
+        name,
+        access,
+        0,
+        if begin { FILE_OPEN_IF } else { FILE_OPEN },
+        FILE_NON_DIRECTORY_FILE,
+    )
+    .map_err(open_fail)?;
     let created = match information {
         value if begin && value == FILE_CREATED as usize => true,
         value if value == FILE_OPENED as usize => false,
@@ -488,7 +501,12 @@ fn create_status(
 }
 
 fn create_receipt(
-    parent: &Handle, name: &Name, access: u32, share: u32, disposition: u32, options: u32,
+    parent: &Handle,
+    name: &Name,
+    access: u32,
+    share: u32,
+    disposition: u32,
+    options: u32,
 ) -> Result<(Handle, usize), i32> {
     let object_name = UNICODE_STRING {
         Length: (name.0.len() * 2) as u16,
