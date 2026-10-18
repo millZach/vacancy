@@ -61,6 +61,9 @@ pub struct PlanSummary {
     /// Places the Guard refused, or found changed, while planning: left out of the numbers above, and reported
     /// as skipped when the plan runs.
     pub refused: Vec<Skip>,
+    /// Files of the plan's sorts left out while planning (changed since the review, or their reviewed name taken):
+    /// not in `moves`, and reported with the sort when the plan runs.
+    pub moves_refused: Vec<Skip>,
     /// Advice in the selection that Vacancy can't carry out itself, by proposal id.
     pub left_for_you: Vec<String>,
 }
@@ -135,6 +138,8 @@ pub(crate) struct Action {
     pub(crate) files: u64,
     /// For a file, its length when the scan listed it.
     pub(crate) logical: u64,
+    /// The proposal's target it was made from.
+    pub(crate) from: ItemRef,
 }
 
 /// One proposal of a plan.
@@ -216,7 +221,11 @@ impl Plan {
                 .steps
                 .iter()
                 .flat_map(|s| s.refused.iter().map(|(skip, _)| skip.clone()))
-                .chain(self.tidy.iter().flat_map(|t| t.refused.iter().cloned()))
+                .collect(),
+            moves_refused: self
+                .tidy
+                .iter()
+                .flat_map(|t| t.refused.iter().cloned())
                 .chain(self.tidy_refused.iter().cloned())
                 .collect(),
             left_for_you: self.left_for_you.iter().map(|l| l.id.clone()).collect(),
@@ -400,12 +409,22 @@ pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, 
                 bytes,
                 files,
                 logical,
+                from: at,
             });
         }
         steps.push(step);
     }
-    // Delete wins over sort: a file a delete step of this plan takes is left out of every sort.
-    let deleting: HashSet<&str> = steps.iter().map(|s| s.id.as_str()).collect();
+    // Delete wins over sort: a file a delete step of this plan still takes (its target wasn't refused) is left out of
+    // every sort.
+    let deleting: crate::tidy::Surviving<'_> = steps
+        .iter()
+        .map(|s| {
+            (
+                s.id.as_str(),
+                s.actions.iter().map(|a| a.from).collect::<HashSet<_>>(),
+            )
+        })
+        .collect();
     let mut tidy = Vec::new();
     let mut tidy_refused = Vec::new();
     // In the order the tray lists them: Downloads, Desktop, Documents.

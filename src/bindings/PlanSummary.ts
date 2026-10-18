@@ -40,6 +40,11 @@ steps: Array<PlanStep>,
  */
 refused: Array<Skip>, 
 /**
+ * Files of the plan's sorts left out while planning (changed since the review, or their reviewed name taken):
+ * not in `moves`, and reported with the sort when the plan runs.
+ */
+movesRefused: Array<Skip>, 
+/**
  * Advice in the selection that Vacancy can't carry out itself, by proposal id.
  */
 leftForYou: Array<string>, };

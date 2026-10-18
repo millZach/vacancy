@@ -180,13 +180,14 @@ pub fn execute(
 
 /// [`execute`], for a plan that may hold Tidy up sorts: they run after the deletes, each with a journal of its own
 /// in `journals`. Right before the first sort, `checkpoint` gets the report so far (the sorts marked interrupted),
-/// for the caller to keep: if the app closes while files move, the history still finds their journals. A plan with
-/// sorts and no `journals` moves nothing and says why.
+/// for the caller to keep: if the app closes while files move, the history still finds their journals. If it can't
+/// keep it (it gives why), no sort begins: each is reported skipped with that reason, since a journal nothing leads
+/// to could never be undone from the app. A plan with sorts and no `journals` moves nothing and says why.
 pub fn execute_with(
     plan: &Plan,
     env: &Env,
     journals: Option<&Journals>,
-    checkpoint: &mut dyn FnMut(&RunReport),
+    checkpoint: &mut dyn FnMut(&RunReport) -> Result<(), String>,
     figures: &dyn Fn() -> Option<VolumeInfo>,
     on_event: &mut dyn FnMut(RunEvent),
     cancel: &CancelToken,
@@ -210,8 +211,11 @@ pub fn execute_with(
 #[derive(Default)]
 pub(crate) struct Sorts<'s> {
     journals: Option<&'s Journals>,
-    checkpoint: Option<&'s mut dyn FnMut(&RunReport)>,
+    checkpoint: Option<&'s mut Checkpoint<'s>>,
 }
+
+/// Keeps a run's report before its sorts begin; gives why it couldn't.
+pub type Checkpoint<'a> = dyn FnMut(&RunReport) -> Result<(), String> + 'a;
 
 /// The folder at `path` and what it lists, read now through a fresh walk that follows no link: its chain and its
 /// entries. For the planner, which reads a folder's loose files by identity.
@@ -500,6 +504,8 @@ pub(crate) fn execute_inner(
         steps.push(report);
     }
     let mut reorganized = Vec::new();
+    // Why no sort may begin: the checkpoint report couldn't be kept.
+    let mut blocked = None;
     if !plan.tidy().is_empty() {
         // Kept before any file moves: a run the app never finishes still leads the history to its journals.
         let pending: Vec<Reorganized> = plan
@@ -509,7 +515,7 @@ pub(crate) fn execute_inner(
                 id: t.id.clone(),
                 folder: t.name.clone(),
                 moved_items: 0,
-                planned_items: t.moves,
+                planned_items: t.planned(),
                 journal: crate::tidy::journal_for(&id, &t.id),
                 path: t.path.clone(),
                 into: t.into.clone(),
@@ -532,7 +538,7 @@ pub(crate) fn execute_inner(
             );
             at.id = id.clone();
             at.reorganized = pending;
-            checkpoint(&at);
+            blocked = checkpoint(&at).err();
         }
     }
     let first = steps.len();
@@ -548,6 +554,7 @@ pub(crate) fn execute_inner(
             &id,
             env,
             sorts.journals,
+            blocked.as_deref(),
             cancel,
             &mut |done, total| {
                 on_event(RunEvent::MoveProgress(MoveProgress {
@@ -1560,7 +1567,8 @@ fn sort_report(approved: &Approved, skips: Vec<Skip>, moved: u64) -> StepReport 
         regenerable: false,
         planned_bytes: 0,
         freed_bytes: 0,
-        planned_items: approved.moves,
+        // What the review meant to move: moved and left add up to it.
+        planned_items: approved.planned(),
         deleted_items: 0,
         kind: StepKind::Move,
         moved_items: moved,

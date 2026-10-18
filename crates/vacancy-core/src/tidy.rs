@@ -3,17 +3,19 @@
 //! [`propose`] finds nothing and every entry point says so before touching the disk.
 //!
 //! The rules are offline and read names, sizes and dates only, never contents. A file goes into a folder named
-//! for its kind, found by its extension (Images, Videos, Documents, Installers, Archives), and for images, videos
-//! and documents into a year inside it, the year it was last modified (UTC). A file that fits no kind goes to
-//! "Sort later". Some files stay where they are, each with a reason: shortcuts, the folder's own settings
+//! for its kind, found by its extension (Images, Videos, Audio, Documents, Installers, Archives), and for images,
+//! videos, audio and documents into a year inside it, the year it was last modified (UTC). A file that fits no kind
+//! goes to "Sort later". Some files stay where they are, each with a reason: shortcuts, the folder's own settings
 //! (`desktop.ini`), downloads that haven't finished, hidden files. Only loose regular files at the top of a folder
 //! move, and only within that folder; subfolders stay as they are.
 //!
-//! Each folder's sort is one proposal with at most the engine's entry limit of files, the first ones in the
-//! folder's own (name) order; any more are left for a later run, and the proposal says how many the scan counted.
-//! Every destination name is fixed before review, with a numbered suffix where a name is taken: nothing is ever
-//! overwritten. **Delete wins over sort**: a file that a delete proposal in the same plan takes is left out of the
-//! sort, and the proposal names that delete proposal so the review can show it as going.
+//! Each folder's sort is one proposal over at most [`LIMIT`] files: the first ones in the order Windows lists the
+//! folder (by name on NTFS); the files listed after them are counted in the same listing pass and left for a later
+//! run. Every destination name is fixed before review, with a numbered suffix where a name is taken, and pinned:
+//! the run uses exactly the reviewed name or leaves the file where it is, with why. Nothing is ever overwritten.
+//! **Delete wins over sort**: a file that a delete proposal in the same plan takes, with a target that is still in
+//! the plan, is left out of the sort; the proposal names every delete proposal that takes it, so the review can
+//! show it as going.
 //!
 //! A sort's moves free nothing. Each folder's moves are journaled in a journal of their own in the app's data
 //! folder, so each can be undone on its own, from the summary or from the run history after a restart
@@ -35,12 +37,13 @@ use crate::reorg::{
 use crate::report::{Reorganized, RunReport, Skip, SkipKind, Undone};
 use crate::rules::{ProposalAction, Proposals};
 use crate::scan::CancelToken;
-use crate::snapshot::Snapshot;
+use crate::snapshot::{DirId, Snapshot};
 
 /// The id prefix every Tidy up proposal has: `tidy-downloads`, `tidy-desktop`, `tidy-documents`.
 pub const PREFIX: &str = "tidy-";
 
-/// The most files one folder's sort moves in one run: the engine's entry limit.
+/// The most files one folder's sort looks at, and moves, in one run: the engine's entry limit, counted in regular
+/// files the folder's listing gives.
 pub const LIMIT: usize = crate::reorg::ENTRY_LIMIT;
 
 /// What kind of file a sort thinks something is, from its extension.
@@ -50,6 +53,7 @@ pub const LIMIT: usize = crate::reorg::ENTRY_LIMIT;
 pub enum TidyKind {
     Images,
     Videos,
+    Audio,
     Documents,
     Installers,
     Archives,
@@ -63,6 +67,7 @@ impl TidyKind {
         match self {
             TidyKind::Images => "Images",
             TidyKind::Videos => "Videos",
+            TidyKind::Audio => "Audio",
             TidyKind::Documents => "Documents",
             TidyKind::Installers => "Installers",
             TidyKind::Archives => "Archives",
@@ -74,7 +79,7 @@ impl TidyKind {
     fn by_year(self) -> bool {
         matches!(
             self,
-            TidyKind::Images | TidyKind::Videos | TidyKind::Documents
+            TidyKind::Images | TidyKind::Videos | TidyKind::Audio | TidyKind::Documents
         )
     }
 }
@@ -88,7 +93,8 @@ pub struct TidyMove {
     pub name: String,
     /// The folder it goes into, below the folder being sorted: `Images\2026`.
     pub dest: String,
-    /// Its name there: its own, or with a numbered suffix if a file there already has the name.
+    /// Its name there: its own, or with a numbered suffix if a file there already has the name. The run uses
+    /// exactly this name, or leaves the file where it is.
     pub to: String,
     pub kind: TidyKind,
     /// Allocated bytes. Moving it frees none of them.
@@ -96,10 +102,9 @@ pub struct TidyMove {
     pub bytes: u64,
     /// It gets a numbered suffix: a file there already has its name. Nothing is overwritten.
     pub renamed: bool,
-    /// The delete proposal that takes this file too, if one does. With that proposal in the plan the file is
-    /// deleted, not moved (delete wins over sort).
-    #[ts(optional = nullable)]
-    pub deleted_by: Option<String>,
+    /// Every delete proposal that takes this file too. With one of them in the plan the file is deleted, not
+    /// moved (delete wins over sort).
+    pub deleted_by: Vec<String>,
 }
 
 /// A file a sort leaves where it is, and why.
@@ -148,11 +153,15 @@ pub struct TidyProposal {
     pub subfolders: Vec<TidySubfolder>,
     /// Destination folders (below it, `Images` or `Images\2026`) that already exist. The rest are made.
     pub existing: Vec<String>,
-    /// More loose files than one run takes: how many more the scan counted, left for a later run.
+    /// The most files Vacancy looks at in one folder in one run ([`LIMIT`]).
+    #[ts(type = "number")]
+    pub limit: u64,
+    /// The folder had more files than that: Vacancy looked at the first `limit` of them as Windows lists the
+    /// folder, and `later` more wait for a later run.
+    pub capped: bool,
+    /// Files listed after the cap, counted in the same listing pass, waiting for a later run.
     #[ts(type = "number")]
     pub later: u64,
-    /// Vacancy looked at only the first [`LIMIT`] entries of the folder.
-    pub capped: bool,
 }
 
 /// A drive's Tidy up proposals, with what is needed to plan them: each folder's inventory and drafts. Empty on
@@ -170,11 +179,26 @@ struct FolderSort {
     proposal: TidyProposal,
 }
 
-/// A draft, with the delete proposal that takes its file, if any.
+/// A draft (its reviewed destination pinned), with every delete proposal target that takes its file.
 #[derive(Debug)]
 struct Drafted {
     draft: Draft,
-    deleted_by: Option<String>,
+    covers: Vec<Cover>,
+}
+
+/// A delete proposal's target that takes a file: the proposal's id, and the target.
+type Cover = (String, ItemRef);
+
+/// The delete targets of a plan that are still in it after planning (not refused), by step id.
+pub(crate) type Surviving<'a> = HashMap<&'a str, HashSet<ItemRef>>;
+
+/// Whether a plan whose surviving delete targets are `surviving` deletes a file covered by `covers`.
+pub(crate) fn deleted(covers: &[Cover], surviving: &Surviving<'_>) -> bool {
+    covers.iter().any(|(id, target)| {
+        surviving
+            .get(id.as_str())
+            .is_some_and(|t| t.contains(target))
+    })
 }
 
 impl Tidy {
@@ -188,29 +212,26 @@ impl Tidy {
         self.folders.iter().any(|f| f.proposal.id == id)
     }
 
-    /// Validates the sort `id` again, now, for a plan whose delete proposals are `deleting`: their files are left
-    /// out. Gives the approved capability and the moves left out since the scan (changed, or no free name), or
-    /// why nothing of it can run.
+    /// Validates the sort `id` again, now, for a plan whose delete targets still in it are `surviving`: the files
+    /// they take are left out. Every reviewed name is pinned: a move whose name is no longer free is left out with
+    /// why, never renumbered. Gives the approved capability and the moves left out since the review, or why
+    /// nothing of it can run.
     pub(crate) fn validate(
         &self,
         id: &str,
-        deleting: &HashSet<&str>,
+        surviving: &Surviving<'_>,
         cancel: &CancelToken,
     ) -> Option<Result<Approved, String>> {
         let sort = self.folders.iter().find(|f| f.proposal.id == id)?;
         let drafts: Vec<Draft> = sort
             .drafts
             .iter()
-            .filter(|d| {
-                d.deleted_by
-                    .as_deref()
-                    .is_none_or(|by| !deleting.contains(by))
-            })
+            .filter(|d| !deleted(&d.covers, surviving))
             .map(|d| d.draft.clone())
             .collect();
         if drafts.is_empty() {
             return Some(Err(format!(
-                "Every file Vacancy would sort in {} is in your Delete list, so nothing is left to move",
+                "Every file Vacancy would sort in {} is deleted by this plan, so nothing is left to move",
                 sort.proposal.name
             )));
         }
@@ -220,7 +241,7 @@ impl Tidy {
             .iter()
             .map(|e| (e.id.as_str(), e.name.as_str()))
             .collect();
-        Some(match sort.inventory.validate(&drafts, cancel) {
+        Some(match sort.inventory.validate_pinned(&drafts, cancel) {
             Ok(plan) => {
                 let refused = plan
                     .dropped()
@@ -277,7 +298,7 @@ pub(crate) struct Approved {
     pub(crate) moves: u64,
     /// The top folders the files go into, most files first ("Images").
     pub(crate) into: Vec<String>,
-    /// Moves left out since the scan, with why.
+    /// Moves left out since the review, with why.
     pub(crate) refused: Vec<Skip>,
     /// Taken by the run, once.
     pub(crate) plan: Arc<Mutex<Option<ValidatedPlan>>>,
@@ -295,6 +316,11 @@ impl Approved {
             Folder::Downloads => CategoryId::Downloads,
             Folder::Desktop | Folder::Documents => CategoryId::Media,
         }
+    }
+
+    /// Files the review meant to move: those the run moves, and those planning left out since the review.
+    pub(crate) fn planned(&self) -> u64 {
+        self.moves + self.refused.len() as u64
     }
 }
 
@@ -346,6 +372,10 @@ const IMAGES: &[&str] = &[
 ];
 const VIDEOS: &[&str] = &[
     "mp4", "mov", "avi", "mkv", "wmv", "webm", "m4v", "flv", "mpg", "mpeg", "3gp", "mts", "m2ts",
+];
+const AUDIO: &[&str] = &[
+    "mp3", "m4a", "wav", "flac", "aac", "ogg", "oga", "opus", "wma", "aif", "aiff", "aifc", "alac",
+    "ape", "mid", "midi", "amr",
 ];
 const DOCUMENTS: &[&str] = &[
     "pdf", "doc", "docx", "odt", "rtf", "txt", "md", "xls", "xlsx", "xlsm", "ods", "csv", "ppt",
@@ -401,6 +431,8 @@ pub fn sort(name: &str) -> Sorted {
         TidyKind::Images
     } else if VIDEOS.contains(&ext) {
         TidyKind::Videos
+    } else if AUDIO.contains(&ext) {
+        TidyKind::Audio
     } else if DOCUMENTS.contains(&ext) {
         TidyKind::Documents
     } else if INSTALLERS.contains(&ext) {
@@ -440,33 +472,40 @@ pub fn destination(from: Folder, kind: TidyKind, year: i32) -> Vec<String> {
     dirs
 }
 
-/// What the delete proposals take, by lower-cased path: single files, folders whole, and folders' loose files.
+/// What the scan's delete proposals take, by snapshot identity: kept files, folders taken whole, and folders'
+/// loose files.
 struct Taken<'a> {
-    files: HashMap<String, &'a str>,
-    whole: Vec<(String, &'a str)>,
-    loose: HashMap<String, &'a str>,
+    snap: &'a Snapshot,
+    /// Kept files taken one by one: their folder and file id.
+    files: Vec<(DirId, u128, Cover)>,
+    /// Folders taken whole.
+    whole: Vec<(DirId, Cover)>,
+    /// Folders whose loose files (those the scan didn't keep one by one) are taken.
+    loose: Vec<(DirId, Cover)>,
 }
 
 impl<'a> Taken<'a> {
-    fn of(snap: &Snapshot, proposals: &'a Proposals) -> Self {
+    fn of(snap: &'a Snapshot, proposals: &Proposals) -> Self {
         let mut taken = Taken {
-            files: HashMap::new(),
+            snap,
+            files: Vec::new(),
             whole: Vec::new(),
-            loose: HashMap::new(),
+            loose: Vec::new(),
         };
         for (i, p) in proposals.list().iter().enumerate() {
             if p.action != ProposalAction::Delete {
                 continue;
             }
             for &t in proposals.targets(i) {
+                let cover = (p.id.clone(), t);
                 match t {
                     ItemRef::File(f) => {
-                        taken.files.insert(key(&snap.file_path(f)), p.id.as_str());
+                        if let Some(id) = snap.file_identity(f) {
+                            taken.files.push((snap.file(f).parent, id, cover));
+                        }
                     }
-                    ItemRef::Dir(d) => taken.whole.push((key(&snap.path(d)), p.id.as_str())),
-                    ItemRef::FilesIn(d) => {
-                        taken.loose.insert(key(&snap.path(d)), p.id.as_str());
-                    }
+                    ItemRef::Dir(d) => taken.whole.push((d, cover)),
+                    ItemRef::FilesIn(d) => taken.loose.push((d, cover)),
                     ItemRef::Proposal(_) => {}
                 }
             }
@@ -474,34 +513,45 @@ impl<'a> Taken<'a> {
         taken
     }
 
-    /// The delete proposal that takes the loose file `name` at the top of `folder`, if one does.
-    fn by(&self, folder: &Path, name: &str) -> Option<String> {
-        let dir = key(folder);
-        let file = key(&folder.join(name));
-        self.files
-            .get(&file)
-            .or_else(|| self.loose.get(&dir))
-            .copied()
-            .or_else(|| {
-                self.whole
-                    .iter()
-                    .find(|(d, _)| dir == *d || dir.starts_with(&format!("{d}\\")))
-                    .map(|(_, id)| *id)
-            })
-            .map(str::to_owned)
+    /// Every delete target that takes the file `file_id` at the top of the scanned folder `folder`.
+    fn covers(&self, folder: Option<DirId>, file_id: u128) -> Vec<Cover> {
+        let Some(folder) = folder else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let kept_here = self
+            .snap
+            .files(folder)
+            .any(|f| self.snap.file_identity(f) == Some(file_id));
+        for (dir, id, cover) in &self.files {
+            if *dir == folder && *id == file_id {
+                out.push(cover.clone());
+            }
+        }
+        for (dir, cover) in &self.loose {
+            if *dir == folder && !kept_here {
+                out.push(cover.clone());
+            }
+        }
+        for (dir, cover) in &self.whole {
+            let mut at = Some(folder);
+            while let Some(d) = at {
+                if d == *dir {
+                    out.push(cover.clone());
+                    break;
+                }
+                at = self.snap.parent(d);
+            }
+        }
+        out
     }
 }
 
-fn key(path: &Path) -> String {
-    path.to_string_lossy()
-        .trim_end_matches(['\\', '/'])
-        .to_lowercase()
-}
-
 /// The Tidy up proposals for a finished scan whose environment is `env`, read now from fresh bounded inventories
-/// of the three known folders (names, sizes and dates only). `proposals` are the scan's cleanups: a file one of
-/// them deletes is marked so a plan with it leaves the file out of the sort. Nothing on macOS, nor on a drive that
-/// doesn't hold the known folders; a folder Vacancy can't inventory is left out.
+/// of the three known folders (names, sizes and dates only). `proposals` are the scan's cleanups: a file they
+/// delete is marked with every proposal that takes it, so a plan with one of them leaves the file out of the sort.
+/// Nothing on macOS, nor on a drive that doesn't hold the known folders; a folder Vacancy can't inventory is left
+/// out.
 pub fn propose(snap: &Snapshot, proposals: &Proposals, env: &Env, cancel: &CancelToken) -> Tidy {
     if env.platform != Platform::Windows {
         return Tidy::default();
@@ -532,6 +582,7 @@ fn sort_folder(
 ) -> Option<FolderSort> {
     let root = known(env, at);
     let path = root.display().to_string();
+    let dir = snap.find(root);
     let mut entries: Vec<&InventoryEntry> = inventory.entries().iter().collect();
     entries.sort_by(|a, b| {
         a.name
@@ -558,7 +609,7 @@ fn sort_folder(
                         directories: destination(at, kind, year_of(e.modified_ns)),
                         filename: None,
                     },
-                    deleted_by: taken.by(root, &e.name),
+                    covers: taken.covers(dir, e.file_id),
                 });
             }
         }
@@ -570,15 +621,21 @@ fn sort_folder(
     let plan = inventory.validate(&all, cancel).ok()?;
     let by_id: HashMap<&str, &InventoryEntry> =
         entries.iter().map(|e| (e.id.as_str(), *e)).collect();
-    let deleted: HashMap<&str, Option<String>> = drafts
+    let covers: HashMap<&str, &[Cover]> = drafts
         .iter()
-        .map(|d| (d.draft.entry_id.as_str(), d.deleted_by.clone()))
+        .map(|d| (d.draft.entry_id.as_str(), d.covers.as_slice()))
         .collect();
     let moves = plan
         .review()
         .iter()
         .filter_map(|mv| {
             let e = by_id.get(mv.entry_id.as_str())?;
+            let mut deleted_by: Vec<String> = covers
+                .get(mv.entry_id.as_str())
+                .map(|c| c.iter().map(|(id, _)| id.clone()).collect())
+                .unwrap_or_default();
+            deleted_by.sort();
+            deleted_by.dedup();
             Some(TidyMove {
                 name: e.name.clone(),
                 dest: mv.directories.join("\\"),
@@ -586,7 +643,7 @@ fn sort_folder(
                 kind: kinds.get(&mv.entry_id).copied().unwrap_or(TidyKind::Later),
                 bytes: e.allocated_bytes,
                 renamed: mv.filename != e.name,
-                deleted_by: deleted.get(mv.entry_id.as_str()).cloned().flatten(),
+                deleted_by,
             })
         })
         .collect::<Vec<_>>();
@@ -602,11 +659,26 @@ fn sort_folder(
             });
         }
     }
-    // Only drafts that made it into the review are planned; the rest are already said in `stays`.
-    let kept: HashSet<String> = plan.review().iter().map(|m| m.entry_id.clone()).collect();
+    // Only drafts that made it into the review are planned, each pinned to its reviewed destination: the run uses
+    // exactly what the drawer showed, or leaves the file where it is.
+    let reviewed: HashMap<&str, (&[String], &str)> = plan
+        .review()
+        .iter()
+        .map(|m| {
+            (
+                m.entry_id.as_str(),
+                (m.directories.as_slice(), m.filename.as_str()),
+            )
+        })
+        .collect();
     let drafts: Vec<Drafted> = drafts
         .into_iter()
-        .filter(|d| kept.contains(&d.draft.entry_id))
+        .filter_map(|mut d| {
+            let (dirs, name) = reviewed.get(d.draft.entry_id.as_str())?;
+            d.draft.directories = dirs.to_vec();
+            d.draft.filename = Some((*name).to_owned());
+            Some(d)
+        })
         .collect();
     let mut existing: Vec<String> = plan
         .directories()
@@ -615,7 +687,6 @@ fn sort_folder(
         .map(|d| d.names.join("\\"))
         .collect();
     existing.sort();
-    let dir = snap.find(root);
     let subfolders = dir
         .map(|d| {
             let mut subs: Vec<TidySubfolder> = snap
@@ -629,13 +700,6 @@ fn sort_folder(
             subs
         })
         .unwrap_or_default();
-    let capped = inventory.truncated();
-    let scanned = dir.map_or(0, |d| snap.own(d).files);
-    let later = if capped {
-        scanned.saturating_sub(entries.len() as u64)
-    } else {
-        0
-    };
     Some(FolderSort {
         proposal: TidyProposal {
             id: format!("{PREFIX}{}", folder_id(at)),
@@ -647,8 +711,9 @@ fn sort_folder(
             stays,
             subfolders,
             existing,
-            later,
-            capped,
+            limit: LIMIT as u64,
+            capped: inventory.truncated(),
+            later: inventory.later(),
         },
         inventory,
         drafts,
@@ -662,6 +727,12 @@ fn said_dropped(reason: &str) -> (SkipKind, String) {
         (
             SkipKind::Changed,
             "It changed after Vacancy looked.".to_owned(),
+        )
+    } else if is(Error::Taken) {
+        (
+            SkipKind::Changed,
+            "Another file now has the name you reviewed for it, and Vacancy won't pick a different one."
+                .to_owned(),
         )
     } else if is(Error::InvalidName) {
         (
@@ -787,20 +858,23 @@ fn plain_journal(name: &str) -> bool {
 pub(crate) type OnMoved<'a> = &'a mut dyn FnMut(u64, u64);
 
 /// Runs one approved sort: begins its journal and runs the engine. Gives the step's skips, its folder's record for
-/// the report, and how many files moved. Never resumes anything; a failure to journal stops the moves.
+/// the report, and how many files moved. Nothing is touched off Windows, nor when `blocked` says why this run may
+/// not move files (its report couldn't be kept, so its journal would be unreachable). Never resumes anything; a
+/// failure to journal stops the moves.
 pub(crate) fn run_sort(
     approved: &Approved,
     run_id: &str,
     env: &Env,
     journals: Option<&Journals>,
+    blocked: Option<&str>,
     cancel: &CancelToken,
     on_moved: OnMoved<'_>,
 ) -> (Vec<Skip>, Reorganized) {
-    let mut record = Reorganized {
+    let record = Reorganized {
         id: approved.id.clone(),
         folder: approved.name.clone(),
         moved_items: 0,
-        planned_items: approved.moves,
+        planned_items: approved.planned(),
         journal: String::new(),
         path: approved.path.clone(),
         into: approved.into.clone(),
@@ -810,67 +884,73 @@ pub(crate) fn run_sort(
         note: None,
         undo: None,
     };
-    let whole = |reason: String, kind: SkipKind| Skip {
-        path: approved.path.clone(),
-        reason,
-        kind,
-        bytes: 0,
-        items: approved.moves,
+    let whole = |reason: String, kind: SkipKind| {
+        (
+            vec![Skip {
+                path: approved.path.clone(),
+                reason,
+                kind,
+                bytes: 0,
+                items: approved.moves,
+            }],
+            record.clone(),
+        )
     };
+    // Unsupported before anything touches the disk, the journal folder included.
+    if env.platform != Platform::Windows {
+        return whole(
+            "Tidy up isn't available on this computer, so nothing was moved".into(),
+            SkipKind::Failed,
+        );
+    }
     if cancel.is_cancelled() {
-        return (
-            vec![whole(
-                "You stopped the run before it got here".into(),
-                SkipKind::Cancelled,
-            )],
-            record,
+        return whole(
+            "You stopped the run before it got here".into(),
+            SkipKind::Cancelled,
+        );
+    }
+    if let Some(why) = blocked {
+        return whole(
+            format!(
+                "Vacancy couldn't keep this run in Past runs before moving files ({why}), so it moved nothing: Undo \
+                 needs that record"
+            ),
+            SkipKind::Failed,
         );
     }
     let Some(journals) = journals else {
-        return (
-            vec![whole(
-                "Vacancy had nowhere to keep the record of its moves, so it moved nothing".into(),
-                SkipKind::Failed,
-            )],
-            record,
+        return whole(
+            "Vacancy had nowhere to keep the record of its moves, so it moved nothing".into(),
+            SkipKind::Failed,
         );
     };
     let Some(plan) = approved.plan.lock().ok().and_then(|mut p| p.take()) else {
-        return (
-            vec![whole(
-                "This sort already ran. Scan again to sort again".into(),
-                SkipKind::Failed,
-            )],
-            record,
+        return whole(
+            "This sort already ran. Scan again to sort again".into(),
+            SkipKind::Failed,
         );
     };
-    let jenv = journals.env(env);
     if let Err(e) = std::fs::create_dir_all(&journals.dir) {
-        return (
-            vec![whole(
-                format!(
-                    "Vacancy couldn't make the folder for its record of moves ({e}), so it moved nothing"
-                ),
-                SkipKind::Failed,
-            )],
-            record,
+        return whole(
+            format!(
+                "Vacancy couldn't make the folder for its record of moves ({e}), so it moved nothing"
+            ),
+            SkipKind::Failed,
         );
     }
     let name = journal_for(run_id, &approved.id);
-    let mut engine = match Engine::begin(&jenv, &journals.dir.join(&name), plan) {
+    let mut engine = match Engine::begin(&journals.env(env), &journals.dir.join(&name), plan) {
         Ok(engine) => engine,
         Err(e) => {
-            return (
-                vec![whole(
-                    format!(
-                        "Vacancy couldn't start the record of its moves ({e}), so it moved nothing"
-                    ),
-                    SkipKind::Failed,
-                )],
-                record,
+            return whole(
+                format!(
+                    "Vacancy couldn't start the record of its moves ({e}), so it moved nothing"
+                ),
+                SkipKind::Failed,
             );
         }
     };
+    let mut record = record;
     record.journal = name;
     let result = engine.run_observed(cancel, &mut |done, total| {
         on_moved(done as u64, total as u64)
@@ -931,29 +1011,22 @@ fn settle(record: &mut Reorganized, ledger: &Ledger) -> Vec<Skip> {
     }
     if not_run > 0 {
         let cancelled = ledger.cancelled;
+        let files = if not_run == 1 {
+            "file wasn't"
+        } else {
+            "files weren't"
+        };
         skips.push(Skip {
             path: base.clone(),
-            reason: if cancelled {
-                format!(
-                    "{} {} moved: you stopped the run",
-                    crate::text::group_digits(not_run),
-                    if not_run == 1 {
-                        "file wasn't"
-                    } else {
-                        "files weren't"
-                    }
-                )
-            } else {
-                format!(
-                    "{} {} moved: the run ended before their turn",
-                    crate::text::group_digits(not_run),
-                    if not_run == 1 {
-                        "file wasn't"
-                    } else {
-                        "files weren't"
-                    }
-                )
-            },
+            reason: format!(
+                "{} {files} moved: {}",
+                crate::text::group_digits(not_run),
+                if cancelled {
+                    "you stopped the run"
+                } else {
+                    "the run ended before their turn"
+                }
+            ),
             kind: if cancelled {
                 SkipKind::Cancelled
             } else {
@@ -970,9 +1043,18 @@ fn undoable(m: &LedgerMove) -> bool {
     m.moved == OpState::Applied && m.undo != OpState::Applied
 }
 
+/// Whether the journal shows any Undo operation: a move put back, or tried, or a directory removed, or tried.
+fn undo_attempted(ledger: &Ledger) -> bool {
+    ledger.moves.iter().any(|m| m.undo != OpState::NotRun)
+        || ledger
+            .directories
+            .iter()
+            .any(|d| d.removed != OpState::NotRun)
+}
+
 /// What the journal says Undo did: what came back, what couldn't and why, which empty folders Vacancy made were
-/// removed and which it kept.
-fn undone(record: &Reorganized, ledger: &Ledger, at: i64) -> Undone {
+/// removed and which it kept. `at` is when it ran, if that is known.
+fn undone(record: &Reorganized, ledger: &Ledger, at: Option<i64>) -> Undone {
     let base = &record.path;
     let rel = |names: &[String]| names.join("\\");
     let mut stuck = Vec::new();
@@ -1034,6 +1116,20 @@ pub enum TidyError {
     Unresolved(String),
 }
 
+impl TidyError {
+    /// Whether `note` is what a failed open of a journal left on a record: a later successful read clears it.
+    fn left(note: &str) -> bool {
+        [
+            TidyError::Unsupported.to_string(),
+            TidyError::NoJournal.to_string(),
+            TidyError::Busy.to_string(),
+        ]
+        .iter()
+        .any(|n| n == note)
+            || note.starts_with("The record of this tidy-up's moves can't be read")
+    }
+}
+
 fn open_engine(env: &Env, journals: &Journals, record: &Reorganized) -> Result<Engine, TidyError> {
     if env.platform != Platform::Windows {
         return Err(TidyError::Unsupported);
@@ -1069,6 +1165,18 @@ pub fn undo(
         .iter_mut()
         .find(|r| r.id == id)
         .ok_or_else(|| TidyError::NoSuchSort(id.to_owned()))?;
+    undo_record(env, journals, record, cancel)?;
+    report.moved_items = report.reorganized.iter().map(|r| r.moved_items).sum();
+    Ok(())
+}
+
+/// [`undo`] of one folder's record.
+pub(crate) fn undo_record(
+    env: &Env,
+    journals: &Journals,
+    record: &mut Reorganized,
+    cancel: &CancelToken,
+) -> Result<(), TidyError> {
     let mut engine = open_engine(env, journals, record)?;
     if engine.status().unresolved > 0 {
         engine
@@ -1081,71 +1189,73 @@ pub fn undo(
     #[cfg_attr(not(windows), allow(clippy::drop_non_drop))]
     drop(engine);
     settle(record, &ledger);
-    record.undo = Some(undone(record, &ledger, now_ms()));
-    match result {
-        Ok(_) => {
-            record.note = None;
-            Ok(())
-        }
-        Err(Error::Unresolved | Error::StoppedUnresolved) => {
-            let e = "a move back wasn't confirmed".to_owned();
-            record.note = Some(format!(
-                "Undo stopped: {e}. Vacancy kept a record of it to check."
-            ));
-            Ok(())
-        }
-        Err(e) => {
-            record.note = Some(format!("Undo stopped: {e}."));
-            Ok(())
-        }
+    // Only an Undo that tried something is one: refused up front, it leaves what an earlier Undo did, and says why.
+    if undo_attempted(&ledger) {
+        record.undo = Some(undone(record, &ledger, Some(now_ms())));
     }
+    record.note = match result {
+        Ok(_) => None,
+        Err(Error::Unresolved | Error::StoppedUnresolved) => Some(
+            "Undo stopped: a move back wasn't confirmed. Vacancy kept a record of it to check."
+                .into(),
+        ),
+        Err(e) => Some(format!("Undo stopped: {e}.")),
+    };
+    Ok(())
 }
 
 /// Reads each sort of a reopened run from its journal, as it stands now: what moved, whether it can still be
 /// undone, whether it was interrupted, and what an Undo did (if the report missed it). Metadata only: it may
 /// record what a crash left unconfirmed, but it never moves, makes or removes anything, and never resumes a run.
-/// Gives whether the report changed.
+/// A journal another window holds leaves its record exactly as kept. Gives whether the report changed.
 pub fn refresh(env: &Env, journals: &Journals, report: &mut RunReport) -> bool {
-    let before = report.reorganized.clone();
+    let mut changed = false;
     for record in report.reorganized.iter_mut() {
-        if record.journal.is_empty() {
-            continue;
-        }
-        let mut engine = match open_engine(env, journals, record) {
-            Ok(engine) => engine,
-            Err(e) => {
-                record.undoable = false;
-                record.note = Some(e.to_string());
-                continue;
-            }
-        };
-        if engine.status().unresolved > 0 {
-            let _ = engine.reconcile(&CancelToken::new());
-        }
-        let ledger = engine.ledger();
-        // Releases the journal lease now; on macOS the engine holds nothing.
-        #[cfg_attr(not(windows), allow(clippy::drop_non_drop))]
-        drop(engine);
-        settle(record, &ledger);
-        let undone_any = ledger.moves.iter().any(|m| m.undo != OpState::NotRun);
-        if undone_any && record.undo.is_none() {
-            record.undo = Some(undone(record, &ledger, now_ms()));
-        }
-        if record.interrupted {
-            record.note = Some(
-                "This tidy-up was interrupted: Vacancy closed while it ran. It isn't resumed; what moved can be undone."
-                    .into(),
-            );
-        } else if record
-            .note
-            .as_deref()
-            .is_some_and(|n| n.starts_with("The record of this tidy-up"))
-        {
-            record.note = None;
-        }
+        changed |= refresh_record(env, journals, record);
     }
-    report.moved_items = report.reorganized.iter().map(|r| r.moved_items).sum();
-    report.reorganized != before
+    let moved = report.reorganized.iter().map(|r| r.moved_items).sum();
+    changed |= report.moved_items != moved;
+    report.moved_items = moved;
+    changed
+}
+
+/// [`refresh`] of one folder's record. Gives whether it changed.
+pub(crate) fn refresh_record(env: &Env, journals: &Journals, record: &mut Reorganized) -> bool {
+    if record.journal.is_empty() {
+        return false;
+    }
+    let before = record.clone();
+    let mut engine = match open_engine(env, journals, record) {
+        Ok(engine) => engine,
+        // Another window holds it right now: nothing is known that the kept record doesn't say.
+        Err(TidyError::Busy) => return false,
+        Err(e) => {
+            record.undoable = false;
+            record.note = Some(e.to_string());
+            return *record != before;
+        }
+    };
+    if engine.status().unresolved > 0 {
+        let _ = engine.reconcile(&CancelToken::new());
+    }
+    let ledger = engine.ledger();
+    // Releases the journal lease now; on macOS the engine holds nothing.
+    #[cfg_attr(not(windows), allow(clippy::drop_non_drop))]
+    drop(engine);
+    settle(record, &ledger);
+    // An Undo the report missed: when it ran isn't known.
+    if record.undo.is_none() && undo_attempted(&ledger) {
+        record.undo = Some(undone(record, &ledger, None));
+    }
+    if record.interrupted {
+        record.note = Some(
+            "This tidy-up was interrupted: Vacancy closed while it ran. It isn't resumed; what moved can be undone."
+                .into(),
+        );
+    } else if record.note.as_deref().is_some_and(TidyError::left) {
+        record.note = None;
+    }
+    *record != before
 }
 
 fn now_ms() -> i64 {
@@ -1169,7 +1279,9 @@ mod tests {
             Sorted::Into(TidyKind::Installers)
         );
         assert_eq!(sort("fonts.zip"), Sorted::Into(TidyKind::Archives));
-        assert_eq!(sort("podcast.mp3"), Sorted::Into(TidyKind::Later));
+        assert_eq!(sort("podcast.mp3"), Sorted::Into(TidyKind::Audio));
+        assert_eq!(sort("Voice Memo.M4A"), Sorted::Into(TidyKind::Audio));
+        assert_eq!(sort("track.flac"), Sorted::Into(TidyKind::Audio));
         assert_eq!(sort("export_1734"), Sorted::Into(TidyKind::Later));
         assert!(matches!(sort("desktop.ini"), Sorted::Stays(_)));
         assert!(matches!(sort("Steam.lnk"), Sorted::Stays(_)));
@@ -1219,6 +1331,52 @@ mod tests {
             destination(Folder::Downloads, TidyKind::Later, 2020),
             ["Sort later"]
         );
+    }
+
+    #[test]
+    fn audio_is_sorted_by_year() {
+        assert_eq!(
+            destination(Folder::Downloads, TidyKind::Audio, 2025),
+            ["Audio", "2025"]
+        );
+        assert_eq!(
+            destination(Folder::Documents, TidyKind::Audio, 2025),
+            ["Audio", "2025"]
+        );
+    }
+
+    #[test]
+    fn a_file_is_left_out_only_while_a_target_that_takes_it_is_still_in_the_plan() {
+        use crate::snapshot::{DirId, FileId};
+        let file = ItemRef::File(FileId(3));
+        let loose = ItemRef::FilesIn(DirId(1));
+        let covers = vec![
+            ("w-installers".to_owned(), file),
+            ("w-loose".to_owned(), loose),
+        ];
+        let mut surviving: Surviving<'_> = HashMap::new();
+        assert!(!deleted(&covers, &surviving), "no delete in the plan");
+        surviving.insert("w-installers", HashSet::new());
+        assert!(
+            !deleted(&covers, &surviving),
+            "its target was refused while planning"
+        );
+        surviving.insert("w-other", HashSet::from([file]));
+        assert!(!deleted(&covers, &surviving), "another step's target");
+        surviving.insert("w-loose", HashSet::from([loose]));
+        assert!(
+            deleted(&covers, &surviving),
+            "the second proposal that takes it"
+        );
+    }
+
+    #[test]
+    fn notes_from_a_failed_open_are_recognised() {
+        assert!(TidyError::left(&TidyError::Busy.to_string()));
+        assert!(TidyError::left(
+            &TidyError::Unreadable("x".into()).to_string()
+        ));
+        assert!(!TidyError::left("Vacancy stopped moving files here: x."));
     }
 
     #[test]

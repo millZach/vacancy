@@ -222,9 +222,11 @@ pub struct Reorganized {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct Undone {
-    /// When it ran, in milliseconds since the Unix epoch.
-    #[ts(type = "number")]
-    pub at: i64,
+    /// When it ran, in milliseconds since the Unix epoch, if known (an Undo found in the journal by a later read
+    /// has no time).
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub at: Option<i64>,
     /// Files back where they were.
     #[ts(type = "number")]
     pub back: u64,
@@ -252,6 +254,8 @@ pub struct TidyListing {
     /// Files Undo couldn't put back.
     #[ts(type = "number")]
     pub stuck: u64,
+    /// Its run was interrupted (Vacancy closed while it ran).
+    pub interrupted: bool,
 }
 
 impl From<&Reorganized> for TidyListing {
@@ -263,6 +267,7 @@ impl From<&Reorganized> for TidyListing {
             undoable: r.undoable,
             back: r.undo.as_ref().map(|u| u.back),
             stuck: r.undo.as_ref().map_or(0, |u| u.stuck.len() as u64),
+            interrupted: r.interrupted,
         }
     }
 }

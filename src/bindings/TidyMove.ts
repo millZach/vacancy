@@ -14,7 +14,8 @@ name: string,
  */
 dest: string, 
 /**
- * Its name there: its own, or with a numbered suffix if a file there already has the name.
+ * Its name there: its own, or with a numbered suffix if a file there already has the name. The run uses
+ * exactly this name, or leaves the file where it is.
  */
 to: string, kind: TidyKind, 
 /**
@@ -26,7 +27,7 @@ bytes: number,
  */
 renamed: boolean, 
 /**
- * The delete proposal that takes this file too, if one does. With that proposal in the plan the file is
- * deleted, not moved (delete wins over sort).
+ * Every delete proposal that takes this file too. With one of them in the plan the file is deleted, not
+ * moved (delete wins over sort).
  */
-deletedBy?: string | null, };
+deletedBy: Array<string>, };

@@ -602,7 +602,7 @@ struct TidyFiles {
     stays: Vec<String>,
 }
 
-/// Writes (through `file`) the messy loose files Tidy up sorts: images, videos, documents, installers, archives
+/// Writes (through `file`) the messy loose files Tidy up sorts: images, videos, audio, documents, installers, archives
 /// and odd files in Downloads, Desktop and the top of Documents, modified this year and one and two years ago;
 /// a name already taken in its destination; and files the rules leave alone. Kept apart from the cleanup
 /// fixture so the two grow independently. Installers here are fresh, so the old-installers cleanup leaves them;
@@ -624,6 +624,7 @@ fn tidy_files(file: &mut impl FnMut(&str, usize, u64)) -> TidyFiles {
         ("Downloads/old-lease.pdf", 8 * KIB, BEFORE),
         ("Downloads/screen-recording.mp4", 64 * KIB, NOW),
         ("Downloads/birthday.mov", 48 * KIB, LAST),
+        ("Downloads/voice-memo.m4a", 12 * KIB, LAST),
         ("Downloads/VSCodeUserSetup-x64.exe", 40 * KIB, 5),
         ("Downloads/fonts.zip", 20 * KIB, 100),
         ("Downloads/drivers.7z", 16 * KIB, 100),

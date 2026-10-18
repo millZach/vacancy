@@ -6,9 +6,10 @@ import type { Skip } from "./Skip";
  */
 export type Undone = { 
 /**
- * When it ran, in milliseconds since the Unix epoch.
+ * When it ran, in milliseconds since the Unix epoch, if known (an Undo found in the journal by a later read
+ * has no time).
  */
-at: number, 
+at: number | null, 
 /**
  * Files back where they were.
  */

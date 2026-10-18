@@ -3,4 +3,4 @@
 /**
  * What kind of file a sort thinks something is, from its extension.
  */
-export type TidyKind = "images" | "videos" | "documents" | "installers" | "archives" | "later";
+export type TidyKind = "images" | "videos" | "audio" | "documents" | "installers" | "archives" | "later";

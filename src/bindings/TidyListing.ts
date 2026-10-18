@@ -11,4 +11,8 @@ back: number | null,
 /**
  * Files Undo couldn't put back.
  */
-stuck: number, };
+stuck: number, 
+/**
+ * Its run was interrupted (Vacancy closed while it ran).
+ */
+interrupted: boolean, };

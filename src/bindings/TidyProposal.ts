@@ -41,10 +41,15 @@ subfolders: Array<TidySubfolder>,
  */
 existing: Array<string>, 
 /**
- * More loose files than one run takes: how many more the scan counted, left for a later run.
+ * The most files Vacancy looks at in one folder in one run ([`LIMIT`]).
  */
-later: number, 
+limit: number, 
 /**
- * Vacancy looked at only the first [`LIMIT`] entries of the folder.
+ * The folder had more files than that: Vacancy looked at the first `limit` of them as Windows lists the
+ * folder, and `later` more wait for a later run.
  */
-capped: boolean, };
+capped: boolean, 
+/**
+ * Files listed after the cap, counted in the same listing pass, waiting for a later run.
+ */
+later: number, };

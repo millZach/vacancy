@@ -196,6 +196,14 @@ mod windows {
         assert_eq!(to(&downloads, "birthday.mov").0, format!("Videos\\{last}"));
         assert_eq!(to(&downloads, "VSCodeUserSetup-x64.exe").0, "Installers");
         assert_eq!(to(&downloads, "drivers.7z").0, "Archives");
+        assert_eq!(
+            to(&downloads, "voice-memo.m4a"),
+            (
+                format!("Audio\\{last}"),
+                "voice-memo.m4a".into(),
+                TidyKind::Audio
+            )
+        );
         assert_eq!(to(&downloads, "export_1734").2, TidyKind::Later);
         assert_eq!(to(&downloads, "data.bin").0, "Sort later");
         // A name already taken in its destination gets a numbered suffix; the folder is the user's.
@@ -257,13 +265,13 @@ mod windows {
             .iter()
             .find(|m| m.name == "old-setup.exe")
             .expect("the old installer can be sorted");
-        assert_eq!(old.deleted_by.as_deref(), Some("w-installers"));
+        assert_eq!(old.deleted_by, ["w-installers"]);
         assert!(
             downloads
                 .moves
                 .iter()
                 .filter(|m| m.name != "old-setup.exe")
-                .all(|m| m.deleted_by.is_none())
+                .all(|m| m.deleted_by.is_empty())
         );
         let alone = plan(&fx.scanned, &fx.env, &["tidy-downloads".into()]).unwrap();
         let both = plan(
@@ -300,11 +308,16 @@ mod windows {
         });
         let downloads = fx.sort("tidy-downloads");
         assert!(downloads.capped);
-        assert!(downloads.loose as usize <= tidy::LIMIT);
+        assert_eq!(downloads.limit as usize, tidy::LIMIT);
+        // The cap counts files, not the subfolder listed among them, and the files after it are counted in the
+        // same listing: together they are every loose file of the folder.
+        assert_eq!(downloads.loose as usize, tidy::LIMIT);
         assert!(downloads.moves.len() <= tidy::LIMIT);
-        assert!(downloads.later > 0, "{}", downloads.later);
-        let total = 600 + 20; // the bulk files and the fixture's own loose files, about
-        assert!(downloads.loose + downloads.later >= total - 20);
+        let files = std::fs::read_dir(fx.profile.home.join("Downloads"))
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_type().unwrap().is_file())
+            .count() as u64;
+        assert_eq!(downloads.loose + downloads.later, files);
         // Deterministic: the first ones in name order.
         let names: Vec<&str> = downloads.moves.iter().map(|m| m.name.as_str()).collect();
         let mut sorted = names.clone();
@@ -328,7 +341,10 @@ mod windows {
             &planned,
             &fx.env,
             Some(&journals),
-            &mut |r| checkpoints.push(r.clone()),
+            &mut |r| {
+                checkpoints.push(r.clone());
+                Ok(())
+            },
             &|| None,
             &mut |e| {
                 if matches!(e, RunEvent::MoveProgress(_)) && cancel_after_first(&e) {
@@ -402,6 +418,11 @@ mod windows {
                 .iter()
                 .all(|s| s.freed_bytes == 0 && s.deleted_items == 0)
         );
+        // Moved and left add up to what the review meant to move, plan-time refusals included.
+        for s in &sorts {
+            let left: u64 = s.skipped.iter().map(|k| k.items).sum();
+            assert_eq!(s.moved_items + left, s.planned_items, "{}", s.id);
+        }
         let deletes: u64 = report
             .steps
             .iter()
@@ -599,5 +620,289 @@ mod windows {
             fx.profile.home.join("Desktop\\Images").exists(),
             "nothing was undone"
         );
+    }
+
+    /// A plan of `ids`, as the confirm dialog gets it, and the run of it.
+    fn planned(fx: &Fx, ids: &[&str]) -> vacancy_core::Plan {
+        let ids: Vec<String> = ids.iter().map(|s| (*s).to_owned()).collect();
+        plan(&fx.scanned, &fx.env, &ids).unwrap()
+    }
+
+    #[test]
+    fn a_run_whose_report_cant_be_kept_moves_nothing_and_says_why() {
+        let fx = Fx::new();
+        let before = fx.known();
+        let plan = planned(&fx, &["tidy-downloads", "tidy-desktop"]);
+        let report = execute_with(
+            &plan,
+            &fx.env,
+            Some(&fx.journals()),
+            &mut |_| Err("the disk is full".to_owned()),
+            &|| None,
+            &mut |_| {},
+            &CancelToken::new(),
+        );
+        assert_eq!(report.moved_items, 0);
+        for r in &report.reorganized {
+            assert!(
+                r.journal.is_empty() && !r.undoable,
+                "{}: no journal begun",
+                r.id
+            );
+        }
+        for s in report.steps.iter().filter(|s| s.kind == StepKind::Move) {
+            assert_eq!(s.outcome, Outcome::Skipped);
+            assert!(
+                s.skipped.iter().any(|k| k.reason.contains(
+                    "couldn't keep this run in Past runs before moving files (the disk is full)"
+                )),
+                "{:#?}",
+                s.skipped
+            );
+        }
+        assert!(
+            !fx.journals().dir.exists(),
+            "no journal folder or journal was made"
+        );
+        assert_eq!(fx.known(), before);
+    }
+
+    #[test]
+    fn reviewed_names_are_used_exactly_or_the_file_stays_with_why() {
+        let fx = Fx::new();
+        let downloads = fx.sort("tidy-downloads");
+        let photo = downloads
+            .moves
+            .iter()
+            .find(|m| m.name == "IMG_3301.jpg")
+            .unwrap()
+            .clone();
+        let documents = fx.sort("tidy-documents");
+        let tax = documents
+            .moves
+            .iter()
+            .find(|m| m.name == "tax-return.pdf")
+            .unwrap()
+            .clone();
+        assert_eq!(tax.to, "tax-return (1).pdf");
+        // After the review: the file the collision was with goes, and a new file takes a reviewed name.
+        std::fs::remove_file(&fx.profile.tidy.collision_existing).unwrap();
+        let images = fx.profile.home.join("Downloads").join(&photo.dest);
+        std::fs::create_dir_all(&images).unwrap();
+        std::fs::write(images.join("IMG_3301.jpg"), b"someone else's photo").unwrap();
+        let plan = planned(&fx, &["tidy-downloads", "tidy-documents"]);
+        let refused = plan.summary().moves_refused;
+        let skip = refused
+            .iter()
+            .find(|k| k.path.ends_with("\\IMG_3301.jpg"))
+            .expect("the photo whose reviewed name is taken is left out");
+        assert!(
+            skip.reason.contains("won't pick a different one"),
+            "{}",
+            skip.reason
+        );
+        let (report, _, _) = run_plan(&fx, &plan);
+        assert!(report.moved_items > 0);
+        // Still the reviewed name, though the plain one is free now; and the photo stayed, never renumbered.
+        assert!(
+            fx.profile
+                .home
+                .join("Documents")
+                .join(&tax.dest)
+                .join("tax-return (1).pdf")
+                .exists()
+        );
+        assert!(
+            !fx.profile
+                .home
+                .join("Documents")
+                .join(&tax.dest)
+                .join("tax-return.pdf")
+                .exists()
+        );
+        assert!(fx.profile.home.join("Downloads\\IMG_3301.jpg").exists());
+        assert!(!images.join("IMG_3301 (1).jpg").exists());
+        assert_eq!(
+            std::fs::read(images.join("IMG_3301.jpg")).unwrap(),
+            b"someone else's photo"
+        );
+    }
+
+    /// Runs an already made plan with journals and a checkpoint that always keeps.
+    fn run_plan(fx: &Fx, plan: &vacancy_core::Plan) -> (RunReport, Vec<RunEvent>, Vec<RunReport>) {
+        let mut events = Vec::new();
+        let mut checkpoints = Vec::new();
+        let report = execute_with(
+            plan,
+            &fx.env,
+            Some(&fx.journals()),
+            &mut |r| {
+                checkpoints.push(r.clone());
+                Ok(())
+            },
+            &|| None,
+            &mut |e| events.push(e),
+            &CancelToken::new(),
+        );
+        (report, events, checkpoints)
+    }
+
+    #[test]
+    fn a_delete_whose_target_was_refused_while_planning_no_longer_holds_its_file_out_of_the_sort() {
+        let fx = Fx::new();
+        // The old installer is replaced after the scan: the cleanup refuses it while planning, so the sort must not
+        // quietly leave it out on that cleanup's behalf. It changed for the sort too, which says so.
+        std::fs::remove_file(&fx.profile.tidy.deleted_too).unwrap();
+        std::fs::write(&fx.profile.tidy.deleted_too, b"another file in its place").unwrap();
+        let summary = planned(&fx, &["w-installers", "tidy-downloads"]).summary();
+        assert!(
+            summary
+                .refused
+                .iter()
+                .any(|k| k.path.ends_with("old-setup.exe")),
+            "the cleanup refused it: {:#?}",
+            summary.refused
+        );
+        let left = summary
+            .moves_refused
+            .iter()
+            .find(|k| k.path.ends_with("old-setup.exe"))
+            .expect("the sort reports it rather than holding it out silently");
+        assert_eq!(left.kind, SkipKind::Changed);
+    }
+
+    #[test]
+    fn a_journal_another_window_holds_leaves_the_kept_record_as_it_was() {
+        let fx = Fx::new();
+        let (report, _, _) = run(&fx, &["tidy-desktop".into()], &CancelToken::new());
+        let journals = fx.journals();
+        let mut env = fx.env.clone();
+        env.app_data = journals.dir.clone();
+        let held = vacancy_core::reorg::Engine::open(
+            &env,
+            &journals.dir.join(&report.reorganized[0].journal),
+        )
+        .unwrap();
+        let mut kept = report.clone();
+        kept.reorganized[0].note = Some("Something earlier.".into());
+        let as_kept = kept.clone();
+        assert!(
+            !tidy::refresh(&fx.env, &journals, &mut kept),
+            "nothing to save"
+        );
+        assert_eq!(kept, as_kept);
+        assert!(matches!(
+            tidy::undo(
+                &fx.env,
+                &journals,
+                &mut kept,
+                "tidy-desktop",
+                &CancelToken::new()
+            ),
+            Err(tidy::TidyError::Busy)
+        ));
+        drop(held);
+        // A note a failed open left goes once the journal reads again.
+        kept.reorganized[0].note = Some(tidy::TidyError::Busy.to_string());
+        assert!(tidy::refresh(&fx.env, &journals, &mut kept));
+        assert_eq!(kept.reorganized[0].note, None);
+        assert_eq!(kept.reorganized[0], report.reorganized[0]);
+    }
+
+    #[test]
+    fn a_report_kept_only_as_its_checkpoint_reopens_from_the_journals_and_undoes() {
+        let fx = Fx::new();
+        let before = fx.known();
+        let (report, _, checkpoints) = run(
+            &fx,
+            &["tidy-downloads".into(), "tidy-desktop".into()],
+            &CancelToken::new(),
+        );
+        // The app closed after the moves, before the final report was kept: only the checkpoint is in the history.
+        let history = fixture::app_data(&fx.root).join("runs");
+        report::save(&history, &checkpoints[0]).unwrap();
+        let mut kept = report::open(&history, &report.id).unwrap();
+        assert!(
+            kept.reorganized
+                .iter()
+                .all(|r| r.interrupted && r.moved_items == 0 && !r.undoable)
+        );
+        assert!(tidy::refresh(&fx.env, &fx.journals(), &mut kept));
+        assert_eq!(kept.moved_items, report.moved_items);
+        for (r, ran) in kept.reorganized.iter().zip(&report.reorganized) {
+            assert_eq!(r.moved_items, ran.moved_items, "{}", r.id);
+            assert!(
+                r.undoable && !r.interrupted,
+                "{}: the journal finished",
+                r.id
+            );
+            assert_eq!(r.undo, None);
+        }
+        // The list Past runs shows offers Undo for it too.
+        let listing = vacancy_core::RunListing::from(&kept);
+        assert!(listing.tidy.iter().all(|t| t.undoable && !t.interrupted));
+        for id in ["tidy-downloads", "tidy-desktop"] {
+            tidy::undo(&fx.env, &fx.journals(), &mut kept, id, &CancelToken::new()).unwrap();
+            let r = kept.reorganized.iter().find(|r| r.id == id).unwrap();
+            let u = r.undo.as_ref().unwrap();
+            assert!(u.at.is_some() && u.stuck.is_empty() && u.back == r.moved_items);
+        }
+        assert_eq!(fx.known(), before);
+    }
+
+    #[test]
+    fn undo_says_which_files_couldnt_go_back_and_which_folders_it_kept() {
+        let fx = Fx::new();
+        let (report, _, _) = run(&fx, &["tidy-downloads".into()], &CancelToken::new());
+        let home = fx.profile.home.join("Downloads");
+        let downloads = fx.sort("tidy-downloads");
+        let dest = |name: &str| {
+            let m = downloads.moves.iter().find(|m| m.name == name).unwrap();
+            home.join(&m.dest).join(&m.to)
+        };
+        // A new file takes one file's old name; another moved file is replaced where it went; and the user adds a
+        // file of their own to a folder the run made.
+        std::fs::write(home.join("drivers.7z"), b"a new download with the old name").unwrap();
+        let replaced = dest("boarding-pass.png");
+        std::fs::remove_file(&replaced).unwrap();
+        std::fs::write(&replaced, b"a different file in its place").unwrap();
+        let videos = dest("birthday.mov").parent().unwrap().to_path_buf();
+        std::fs::write(videos.join("mine.mov"), b"the user's own").unwrap();
+        let mut kept = report.clone();
+        tidy::undo(
+            &fx.env,
+            &fx.journals(),
+            &mut kept,
+            "tidy-downloads",
+            &CancelToken::new(),
+        )
+        .unwrap();
+        let r = &kept.reorganized[0];
+        let u = r.undo.as_ref().unwrap();
+        assert_eq!(u.back + u.stuck.len() as u64, r.moved_items);
+        let stuck = |name: &str| {
+            u.stuck
+                .iter()
+                .find(|k| k.path.ends_with(name))
+                .unwrap_or_else(|| panic!("{name}: {:#?}", u.stuck))
+        };
+        assert_eq!(stuck("drivers.7z").reason, "A file now has its old name");
+        assert_eq!(stuck("boarding-pass.png").kind, SkipKind::Changed);
+        // The made folder the user added to is kept, and so is its parent; neither holds a stuck file.
+        let videos_rel = videos.strip_prefix(&home).unwrap().display().to_string();
+        assert!(u.kept.contains(&videos_rel), "{:#?}", u.kept);
+        assert!(u.kept.contains(&"Videos".to_owned()));
+        assert!(!u.removed.is_empty() && u.removed.iter().all(|d| !home.join(d).exists()));
+        assert!(videos.join("mine.mov").exists());
+        assert_eq!(
+            std::fs::read(&replaced).unwrap(),
+            b"a different file in its place"
+        );
+        assert_eq!(
+            std::fs::read(home.join("drivers.7z")).unwrap(),
+            b"a new download with the old name"
+        );
+        // Undo can try again for what stayed, and an Undo that tries nothing leaves the last one as it was.
+        assert!(r.undoable);
     }
 }
