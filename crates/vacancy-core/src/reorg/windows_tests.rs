@@ -731,6 +731,30 @@ fn stable_lease_excludes_a_second_process_for_the_whole_engine_session() {
 }
 
 #[test]
+fn a_same_size_edit_under_a_future_creation_time_is_still_a_changed_source() {
+    use std::os::windows::fs::FileTimesExt;
+    use std::time::{Duration, SystemTime};
+    let (_dir, env) = fixture();
+    let source = put(&env, "a.txt");
+    let now = SystemTime::now();
+    let file = fs::OpenOptions::new().write(true).open(&source).unwrap();
+    file.set_times(
+        fs::FileTimes::new()
+            .set_created(now + Duration::from_secs(10 * 365 * 24 * 60 * 60))
+            .set_modified(now - Duration::from_secs(24 * 60 * 60)),
+    )
+    .unwrap();
+    drop(file);
+    let plan = approved(&env, &["a.txt"], &[]);
+    // Same length, new bytes: write and change times move to now, still before the future creation time.
+    fs::write(&source, b"PAYLOAD:A.TXT").unwrap();
+    let mut engine = Engine::begin(&env, &journal(&env), plan).unwrap();
+    assert_eq!(engine.run(&CancelToken::new()).unwrap().applied, 0);
+    assert_eq!(fs::read(&source).unwrap(), b"PAYLOAD:A.TXT");
+    assert!(!env.known.documents.join("a.txt").exists());
+}
+
+#[test]
 fn subprocess_tests_share_one_outside_home_base_under_ci_or_no_override() {
     // Re-run a parent test whose own crash child needs the base, once as CI does (RUNNER_TEMP only) and once with
     // neither variable (the workspace target fallback). Both must pass the resolved base down to the child.

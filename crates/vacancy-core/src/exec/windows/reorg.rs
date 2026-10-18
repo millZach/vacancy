@@ -35,9 +35,22 @@ pub(crate) struct Fingerprint {
     pub(crate) id: Id,
     pub(crate) logical: u64,
     pub(crate) allocated: u64,
+    /// Creation, last-write and change times, each kept and compared on its own. Their maximum would let a
+    /// future creation time hide a same-size edit whose write and change times stay below it.
+    #[serde(with = "signed_decimal128")]
+    pub(crate) created: i128,
+    #[serde(with = "signed_decimal128")]
+    pub(crate) written: i128,
     #[serde(with = "signed_decimal128")]
     pub(crate) changed: i128,
     pub(crate) links: u32,
+}
+
+impl Fingerprint {
+    /// The latest of the three times, for display only. Change detection compares each time.
+    pub(crate) fn latest(&self) -> i128 {
+        self.created.max(self.written).max(self.changed)
+    }
 }
 
 mod signed_decimal128 {
@@ -311,7 +324,9 @@ pub(crate) fn fingerprint(file: &PinnedFile) -> Result<Fingerprint, Fail> {
         },
         logical: u64::try_from(s.EndOfFile).map_err(|_| Fail::Unsupported)?,
         allocated: u64::try_from(s.AllocationSize).map_err(|_| Fail::Unsupported)?,
-        changed: latest(&b),
+        created: nanos(b.CreationTime),
+        written: nanos(b.LastWriteTime),
+        changed: nanos(b.ChangeTime),
         links: s.NumberOfLinks,
     })
 }

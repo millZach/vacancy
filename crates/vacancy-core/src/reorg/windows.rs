@@ -191,7 +191,7 @@ impl Inventory {
                     name: name.display(),
                     logical_bytes: info.logical,
                     allocated_bytes: info.allocated,
-                    changed_ns: info.changed,
+                    changed_ns: info.latest(),
                 });
                 captured.insert(
                     id,
