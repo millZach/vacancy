@@ -1064,3 +1064,144 @@ fn correctly_framed_unreachable_not_attempted_transitions_refuse() {
         assert!(source.exists()); assert!(!env.known.documents.join("Sorted").exists());
     }
 }
+
+#[test]
+fn move_and_nested_mkdir_intents_require_owned_manifest_parents() {
+    for skipped_parent in [false, true] {
+        let (_dir, env) = fixture(); let source = put(&env, "a.txt"); let location = journal(&env);
+        let plan = approved(&env, &["a.txt"], &["Sorted"]); let file_id = plan.data.moves[0].fingerprint.id;
+        drop(Engine::begin(&env, &location, plan).unwrap());
+        let mut store = Store::open(&location, false, &journal_parent(&env, &location).unwrap()).unwrap();
+        store.append(&Event::Started).unwrap();
+        let skipped = Event::NotAttempted { operation: Operation::Mkdir, index: 0, reason: "parent not created".into() };
+        if skipped_parent { store.append(&skipped).unwrap(); }
+        store.append(&Event::Intent { operation: Operation::Move, index: 0, identity: Some(file_id) }).unwrap();
+        store.append(&Event::Applied { operation: Operation::Move, index: 0, identity: file_id }).unwrap();
+        if !skipped_parent { store.append(&skipped).unwrap(); }
+        store.append(&Event::Finished { cancelled: false }).unwrap(); drop(store);
+        assert!(matches!(Engine::open(&env, &location), Err(Error::CorruptJournal)));
+        assert!(source.exists()); assert!(!env.known.documents.join("Sorted").exists());
+    }
+    for skipped_parent in [false, true] {
+        let (_dir, env) = fixture(); put(&env, "a.txt"); let location = journal(&env);
+        drop(Engine::begin(&env, &location, approved(&env, &["a.txt"], &["Outer", "Inner"])).unwrap());
+        let mut store = Store::open(&location, false, &journal_parent(&env, &location).unwrap()).unwrap();
+        store.append(&Event::Started).unwrap();
+        if skipped_parent { store.append(&Event::NotAttempted { operation: Operation::Mkdir, index: 0, reason: "no parent".into() }).unwrap(); }
+        store.append(&Event::Intent { operation: Operation::Mkdir, index: 1, identity: None }).unwrap(); drop(store);
+        assert!(matches!(Engine::open(&env, &location), Err(Error::CorruptJournal)));
+        assert!(!env.known.documents.join("Outer").exists());
+    }
+}
+
+#[test]
+fn rollback_phase_never_returns_to_forward_moves_mkdirs_or_finish() {
+    for scenario in 0..4 {
+        let (_dir, env) = fixture(); put(&env, "a.txt"); put(&env, "b.txt"); let location = journal(&env);
+        let plan = if scenario == 3 {
+            let inventory = Inventory::capture(&env, &CancelToken::new()).unwrap();
+            let drafts = [("a.txt", "AOwned"), ("b.txt", "ZFuture")].into_iter().map(|(name, dir)| Draft {
+                entry_id: inventory.entries().iter().find(|entry| entry.name == name).unwrap().id.clone(),
+                destination: Folder::Documents, directories: vec![dir.into()], filename: None,
+            }).collect::<Vec<_>>();
+            inventory.validate(&drafts, &CancelToken::new()).unwrap()
+        } else { approved(&env, &["a.txt", "b.txt"], &[]) };
+        let mut engine = Engine::begin(&env, &location, plan).unwrap();
+        engine.record(Event::Started).unwrap();
+        if scenario == 3 {
+            engine.record(Event::Intent { operation: Operation::Mkdir, index: 0, identity: None }).unwrap();
+            let parent = native::directory(&env.known.documents).unwrap();
+            let (dir, step) = native::mkdir(&parent.dir, &Name::text("AOwned").unwrap()).unwrap();
+            engine.record(Event::Applied { operation: Operation::Mkdir, index: 0, identity: native::Id::step(&step) }).unwrap(); drop(dir); drop(parent);
+        } else { engine.move_one(0, false).unwrap(); }
+        let second_identity = engine.state.plan.moves[1].fingerprint.id;
+        engine.undo(&CancelToken::new()).unwrap(); drop(engine);
+        let bad = match scenario {
+            0 => Event::Intent { operation: Operation::Move, index: 1, identity: Some(second_identity) },
+            1 => Event::NotAttempted { operation: Operation::Move, index: 1, reason: "forward after reverse".into() },
+            2 => Event::Finished { cancelled: true },
+            _ => Event::Intent { operation: Operation::Mkdir, index: 1, identity: None },
+        };
+        let mut store = Store::open(&location, false, &journal_parent(&env, &location).unwrap()).unwrap();
+        store.append(&bad).unwrap(); drop(store);
+        assert!(matches!(Engine::open(&env, &location), Err(Error::CorruptJournal)), "scenario {scenario}");
+        assert!(env.known.downloads.join("a.txt").exists()); assert!(env.known.downloads.join("b.txt").exists());
+        assert!(!env.known.documents.join("ZFuture").exists());
+    }
+}
+
+#[test]
+fn removed_owned_parent_cannot_authorize_a_later_undo_intent() {
+    let (_dir, env) = fixture(); put(&env, "a.txt"); let location = journal(&env);
+    let mut engine = Engine::begin(&env, &location, approved(&env, &["a.txt"], &["Sorted"])).unwrap();
+    engine.run(&CancelToken::new()).unwrap();
+    let identity = engine.state.plan.moves[0].fingerprint.id;
+    fs::rename(env.known.documents.join("Sorted/a.txt"), env.known.desktop.join("user-moved.txt")).unwrap();
+    engine.undo(&CancelToken::new()).unwrap(); assert!(!env.known.documents.join("Sorted").exists()); drop(engine);
+    let mut store = Store::open(&location, false, &journal_parent(&env, &location).unwrap()).unwrap();
+    store.append(&Event::Intent { operation: Operation::Undo, index: 0, identity: Some(identity) }).unwrap(); drop(store);
+    assert!(matches!(Engine::open(&env, &location), Err(Error::CorruptJournal)));
+    assert!(env.known.desktop.join("user-moved.txt").exists()); assert!(!env.known.downloads.join("a.txt").exists());
+}
+
+#[test]
+fn unused_or_structurally_impossible_directory_authority_refuses_before_store_creation() {
+    for scenario in 0..3 {
+        let (_dir, env) = fixture(); let source = put(&env, "a.txt");
+        let mut plan = approved(&env, &["a.txt"], &["Outer", "Inner"]);
+        match scenario {
+            0 => plan.data.directories.push(Directory { at: Place { folder: Folder::Documents, names: vec![Name::text("Unreviewed").unwrap()] }, expected: None }),
+            1 => { plan.data.directories.remove(0); },
+            _ => { plan.data.directories[1].expected = Some(plan.data.root); },
+        }
+        assert!(matches!(Engine::begin(&env, &journal(&env), plan), Err(Error::CorruptJournal)));
+        assert_eq!(fs::read_dir(&env.app_data).unwrap().count(), 0);
+        assert!(!env.known.documents.join("Outer").exists()); assert!(!env.known.documents.join("Unreviewed").exists());
+        assert!(source.exists());
+    }
+}
+
+// Opt-in native seam proof; import after frozen6, execute only via helper with fresh D TEMP/TMP.
+#[test]
+#[ignore = "requires explicit fresh second-volume fixture admission; never a drive or home plan"]
+fn cross_volume_native_rename_refuses_without_copy_delete_or_overwrite() {
+    use std::io::Write;
+    let cross_base = PathBuf::from(std::env::var_os("VACANCY_T08_CROSS_BASE").expect("explicit C fixture base required"));
+    assert_eq!(cross_base, PathBuf::from(r"C:\tmp"));
+    let real_home = PathBuf::from(std::env::var_os("USERPROFILE").expect("real home required to deny it"));
+    let base_pin = native::directory(&cross_base).expect("second fixture base must already be an ordinary no-follow directory");
+    let cross_name = Name::text(&format!("vacancy-t08-cross-{}", native::nonce().unwrap())).unwrap();
+    let cross = cross_base.join(cross_name.os());
+    assert!(!cross.exists()); // evidence/control only; FILE_CREATE below is the actual no-replace gate
+    let (destination, destination_step) = native::mkdir(&base_pin.dir, &cross_name).unwrap();
+    crate::fixture::check_root(&cross, &real_home).unwrap();
+    assert_eq!(fs::read_dir(&cross).unwrap().count(), 0);
+    let (mut sentinel, _) = native::journal_file(&destination, &Name::text("sentinel.txt").unwrap(), native::JournalOpen::Create).unwrap();
+    sentinel.write_all(b"second volume sentinel").unwrap(); sentinel.sync_all().unwrap(); drop(sentinel);
+    let (dir, env) = fixture(); let source = put(&env, "a.txt");
+    crate::fixture::check_root(dir.path(), &real_home).unwrap();
+    let before_source = crate::fixture::inventory(dir.path()).unwrap();
+    let before_destination = crate::fixture::inventory(&cross).unwrap();
+    let source_parent = native::directory(&env.known.downloads).unwrap();
+    let (source_file, fingerprint) = native::file(&source_parent.dir, &Name::text("a.txt").unwrap(), true).unwrap();
+    let destination_identity = native::Id::step(&destination_step);
+    if fingerprint.id.volume == destination_identity.volume {
+        let kept = dir.keep();
+        panic!("cross-volume proof UNAVAILABLE: native volume identities are equal; fixtures retained at {} and {}", kept.display(), cross.display());
+    }
+    assert!(matches!(native::rename(&source_file, &destination, &Name::text("a.txt").unwrap()), Err(Fail::OtherVolume)));
+    drop(source_file); drop(source_parent);
+    let after_source = crate::fixture::inventory(dir.path()).unwrap();
+    let after_destination = crate::fixture::inventory(&cross).unwrap();
+    assert_eq!(after_source, before_source); assert_eq!(after_destination, before_destination);
+    assert!(source.exists()); assert!(!cross.join("a.txt").exists());
+    let kept = dir.keep();
+    println!("T08_CROSS_VOLUME_RECEIPT {}", serde_json::json!({
+        "sourceRoot": kept, "destinationRoot": cross,
+        "sourceVolume": fingerprint.id.volume, "destinationVolume": destination_identity.volume,
+        "sourceBefore": before_source, "sourceAfter": after_source,
+        "destinationBefore": before_destination, "destinationAfter": after_destination,
+        "renameOutcome": "OtherVolume", "userDataMutations": 0,
+        "fixturePreparationOnly": true, "retainedForAudit": true
+    }));
+}
