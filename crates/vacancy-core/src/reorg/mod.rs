@@ -3,23 +3,27 @@
 mod journal;
 #[cfg(windows)]
 mod model;
-#[cfg(windows)]
-mod windows;
-#[cfg(not(windows))]
-mod unsupported;
 #[cfg(any(windows, test))]
 pub(crate) mod names;
-
+#[cfg(not(windows))]
+mod unsupported;
 #[cfg(windows)]
-pub use windows::{Engine, Inventory, ValidatedPlan};
+mod windows;
+
 #[cfg(not(windows))]
 pub use unsupported::{Engine, Inventory, ValidatedPlan};
+#[cfg(windows)]
+pub use windows::{Engine, Inventory, ValidatedPlan};
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum Folder { Downloads, Desktop, Documents }
+pub enum Folder {
+    Downloads,
+    Desktop,
+    Documents,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InventoryEntry {
@@ -42,7 +46,11 @@ pub struct Draft {
 
 /// Final reviewed names, including collision suffixes. These display strings never authorize an operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReviewedMove { pub entry_id: String, pub from: String, pub to: String }
+pub struct ReviewedMove {
+    pub entry_id: String,
+    pub from: String,
+    pub to: String,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Status {

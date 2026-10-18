@@ -601,7 +601,14 @@ fn nt_open(
 
 /// Reorganization may request conservative case-insensitive collision/lease lookup. Existing deletion opens
 /// retain their exact listed-name semantics through the zero-flags wrapper above.
-fn nt_open_flags(dir: &Handle, name: &[u16], access: u32, share: u32, options: u32, object_flags: u32) -> Result<Handle, i32> {
+fn nt_open_flags(
+    dir: &Handle,
+    name: &[u16],
+    access: u32,
+    share: u32,
+    options: u32,
+    object_flags: u32,
+) -> Result<Handle, i32> {
     let bytes = u16::try_from(name.len() * 2).map_err(|_| STATUS_OBJECT_NAME_NOT_FOUND)?;
     let object_name = UNICODE_STRING {
         Length: bytes,

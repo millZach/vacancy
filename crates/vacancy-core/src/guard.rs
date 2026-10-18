@@ -244,8 +244,19 @@ impl Guard {
     /// A nonexistent descendant has no identity to fabricate. Its existing, retained parent authorizes only
     /// contents; all deny-by-name rules still apply to the full proposed relative path.
     #[cfg(windows)]
-    pub(crate) fn judge_absent(&self, parent: &Path, chain: &[Step], relative: &Path) -> Result<(), Denied> {
-        if relative.as_os_str().is_empty() || relative.components().any(|part| !matches!(part, std::path::Component::Normal(_))) { return Err(Denied::Unclear); }
+    pub(crate) fn judge_absent(
+        &self,
+        parent: &Path,
+        chain: &[Step],
+        relative: &Path,
+    ) -> Result<(), Denied> {
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        {
+            return Err(Denied::Unclear);
+        }
         self.judge_walked(parent, chain, true)?;
         self.deny_by_name(&PathKey::of(&parent.join(relative)).ok_or(Denied::Unclear)?)
     }
