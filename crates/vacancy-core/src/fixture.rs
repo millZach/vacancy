@@ -25,6 +25,10 @@ use crate::fsid;
 use crate::snapshot::Snapshot;
 use crate::volume::{DriveKind, VolumeInfo};
 
+#[cfg(windows)]
+#[path = "fixture/windows.rs"]
+mod windows;
+
 /// The fixture profile's user name: its home is `<root>/Users/fixture`.
 pub const USER: &str = "fixture";
 
@@ -551,19 +555,7 @@ fn open_for_times(path: &Path) -> io::Result<fs::File> {
 fn link_dir(link: &Path, to: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
-        let out = std::process::Command::new("cmd")
-            .args(["/C", "mklink", "/J"])
-            .arg(link)
-            .arg(to)
-            .output()?;
-        if !out.status.success() {
-            return Err(io::Error::other(format!(
-                "mklink /J {}: {}",
-                link.display(),
-                String::from_utf8_lossy(&out.stdout)
-            )));
-        }
-        Ok(())
+        windows::junction(link, to)
     }
     #[cfg(not(windows))]
     {
