@@ -66,12 +66,15 @@ try {
   const checking = page.locator('.dup-pill[role="progressbar"]');
   if (await checking.count()) {
     await page.waitForFunction(
-      () => Number(document.querySelector('.dup-pill b')?.textContent?.replace('%', '') ?? 0) >= 20,
+      () =>
+        !!document.querySelector('.dup-pill.is-ready') ||
+        Number(document.querySelector('.dup-pill[role="progressbar"]')?.getAttribute('aria-valuenow') ?? 0) >= 20,
       null,
       { timeout },
     ).catch(() => {});
     await shot(page, '1-progress');
-    said.progress = (await checking.textContent())?.trim();
+    // A real search can finish before this line: then the pill says what it found instead.
+    said.progress = (await checking.textContent({ timeout: 1000 }).catch(() => 'done before it was read'))?.trim();
   }
 
   // Done: the pill says what it found; the plan tray lists the proposal, off by default.
