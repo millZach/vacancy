@@ -12,9 +12,9 @@ use tauri::{AppHandle, Manager, State};
 use vacancy_core::advisor::{self, AdvisorStatus};
 use vacancy_core::permissions::{self, FullDiskAccess};
 use vacancy_core::{
-    CancelToken, Env, MapFolder, Moment, Plan, PlanSummary, RunEvent, RunHistory, RunReport,
-    ScanError, ScanOptions, ScanOutcome, ScanUpdate, ScannedVolume, Snapshot, VolumeInfo, fixture,
-    report, tidy,
+    CancelToken, Env, MapFolder, Moment, Plan, PlanSummary, RunEvent, RunHistory, RunListing,
+    RunReport, ScanError, ScanOptions, ScanOutcome, ScanUpdate, ScannedVolume, Snapshot,
+    VolumeInfo, fixture, report, tidy,
 };
 
 /// What the app remembers between commands: each drive's last finished scan (which its map's drill-down reads) with
@@ -639,22 +639,25 @@ async fn run_plan(
     let report = tauri::async_runtime::spawn_blocking(move || {
         let session = worker.state::<Session>();
         let history = session.mode.history(&worker);
-        let keep = |report: &RunReport| {
-            if let Some(dir) = &history
-                && let Err(e) = report::save(dir, report)
-            {
+        let keep = |report: &RunReport| -> Result<(), String> {
+            let dir = history
+                .as_ref()
+                .ok_or_else(|| "the run history can't be found".to_owned())?;
+            report::save(dir, report).map(|_| ()).map_err(|e| {
                 eprintln!(
                     "could not keep the run in the history at {}: {e}",
                     dir.display()
                 );
-            }
+                format!("the run history couldn't be written: {e}")
+            })
         };
         let journals = session.mode.journals(&worker);
         let report = vacancy_core::execute_with(
             &plan,
             &env,
             journals.as_ref(),
-            // Kept before any file moves, so a run the app never finishes still leads to its journals.
+            // Kept before any file moves, so a run the app never finishes still leads to its journals. If it can't
+            // be kept, no file moves.
             &mut |so_far| keep(so_far),
             &|| session.mode.figures(&mount_point, None),
             &mut |event| {
@@ -663,7 +666,7 @@ async fn run_plan(
             },
             &cancel,
         );
-        keep(&report);
+        let _ = keep(&report);
         report
     })
     .await;
@@ -683,10 +686,26 @@ fn cancel_run(session: State<'_, Session>) {
 #[tauri::command]
 async fn list_runs(app: AppHandle) -> RunHistory {
     tauri::async_runtime::spawn_blocking(move || {
-        let mode = &app.state::<Session>().mode;
-        mode.history(&app)
-            .map(|dir| report::history(&dir))
-            .unwrap_or_default()
+        let session = app.state::<Session>();
+        let mode = &session.mode;
+        let Some(dir) = mode.history(&app) else {
+            return RunHistory::default();
+        };
+        let mut history = report::history(&dir);
+        // An interrupted tidy-up's kept record says nothing moved: read its journal, so the list offers Undo for
+        // what did. Not while a plan runs, whose own report is still a checkpoint.
+        if !session.running() {
+            for listing in history.runs.iter_mut() {
+                if !listing.tidy.iter().any(|t| t.interrupted) {
+                    continue;
+                }
+                if let Ok(mut kept) = report::open(&dir, &listing.id) {
+                    refresh_tidy(mode, &app, &dir, &mut kept);
+                    *listing = RunListing::from(&kept);
+                }
+            }
+        }
+        history
     })
     .await
     .unwrap_or_default()
