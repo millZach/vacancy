@@ -32,7 +32,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
-use super::{Collector, Entry, EntryKind, LinkKey, ListError, RootSpec};
+use super::{Calls, Collector, Entry, EntryKind, LinkKey, ListError, RootSpec, clock, lap};
 use crate::snapshot::{RootKind, UnixTime};
 
 /// Bytes per listing call. Bigger means fewer calls; 64 KiB is what the OS hands back comfortably.
@@ -145,6 +145,9 @@ pub(crate) struct Lister {
 #[derive(Default)]
 struct Scratch {
     name: String,
+    /// What this worker asked of the OS, for [`crate::trace`]; timed when `timed`.
+    calls: Calls,
+    timed: bool,
 }
 
 impl Default for Lister {
@@ -152,7 +155,10 @@ impl Default for Lister {
         Self {
             buf: vec![0u64; BUF_BYTES / 8],
             path: Vec::new(),
-            scratch: Scratch::default(),
+            scratch: Scratch {
+                timed: crate::trace::enabled(),
+                ..Scratch::default()
+            },
             full_only: false,
         }
     }
@@ -169,6 +175,11 @@ impl Drop for Handle {
 }
 
 impl Lister {
+    /// What this lister asked of the OS so far.
+    pub(crate) fn calls(&mut self) -> &mut Calls {
+        &mut self.scratch.calls
+    }
+
     /// Lists the folder at `dir`. `expect` is the file id its parent's listing gave it: the folder opened must
     /// have it, on the walk's volume, or it is not listed (`Changed`). That is what keeps a folder above it that
     /// was swapped for a junction after being listed from redirecting the walk: the path would lead elsewhere,
@@ -180,9 +191,35 @@ impl Lister {
         volume: &Volume,
         out: &mut Collector<'_>,
     ) -> Result<(), ListError> {
-        let handle = open_dir(dir, &mut self.path)?;
+        let timed = self.scratch.timed;
+        let opening = clock(timed);
+        let handle = open_dir(dir, &mut self.path);
+        self.scratch.calls.opens += 1;
+        lap(opening, &mut self.scratch.calls.open_ns);
+        let handle = handle?;
+        let listed = self.list_open(&handle, dir, expect, volume, out);
+        let closing = clock(timed);
+        drop(handle);
+        lap(closing, &mut self.scratch.calls.close_ns);
+        listed
+    }
+
+    /// [`Lister::list`], once the folder is open.
+    fn list_open(
+        &mut self,
+        handle: &Handle,
+        dir: &Path,
+        expect: Option<u128>,
+        volume: &Volume,
+        out: &mut Collector<'_>,
+    ) -> Result<(), ListError> {
+        let timed = self.scratch.timed;
         if let Some(expect) = expect {
-            match identity_of(&handle) {
+            let asking = clock(timed);
+            let identity = identity_of(handle);
+            self.scratch.calls.identities += 1;
+            lap(asking, &mut self.scratch.calls.identity_ns);
+            match identity {
                 Some((serial, id)) if id == expect && volume.serial.is_none_or(|s| s == serial) => {
                 }
                 Some(_) => return Err(ListError::Changed),
@@ -200,6 +237,7 @@ impl Lister {
             } else {
                 FileIdExtdDirectoryInfo
             };
+            let reading = clock(timed);
             // SAFETY: `buf` is BUF_BYTES writable, 8-byte aligned bytes; the handle is an open directory.
             let ok = unsafe {
                 GetFileInformationByHandleEx(
@@ -209,6 +247,8 @@ impl Lister {
                     BUF_BYTES as u32,
                 )
             };
+            self.scratch.calls.batches += 1;
+            lap(reading, &mut self.scratch.calls.batch_ns);
             if ok == 0 {
                 // SAFETY: reads this thread's last error.
                 let code = unsafe { GetLastError() };
@@ -229,7 +269,7 @@ impl Lister {
                 }
             }
             first = false;
-            read_batch(&self.buf, class, &handle, volume, &mut self.scratch, out);
+            read_batch(&self.buf, class, handle, volume, &mut self.scratch, out);
         }
     }
 }
@@ -356,6 +396,7 @@ fn read_batch(
         // SAFETY: Windows filled `buf` with a chain of entries of the requested class, each 8-byte aligned, linked
         // by NextEntryOffset and ending with a zero offset; every offset stays inside the buffer it was given.
         let raw = unsafe { read_entry(buf, offset, class) };
+        scratch.calls.entries += 1;
         if scratch.decode_name(raw.name) {
             if scratch.name != "." && scratch.name != ".." {
                 let entry = scratch.entry(&raw, dir, volume);
@@ -392,9 +433,15 @@ impl Scratch {
             && allocated == 0
             && raw.end_of_file > 0
             && raw.attributes & SPARSE_LIKE == 0
-            && let Some(real) = allocation_in(dir, raw.name)
         {
-            allocated = real;
+            let asking = clock(self.timed);
+            let real = allocation_in(dir, raw.name);
+            self.calls.requeries += 1;
+            lap(asking, &mut self.calls.requery_ns);
+            if let Some(real) = real {
+                self.calls.requeries_found += u64::from(real > 0);
+                allocated = real;
+            }
         }
         let identity = match kind {
             EntryKind::Dir | EntryKind::CloudDir | EntryKind::File => raw.file_id,

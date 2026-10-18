@@ -23,6 +23,7 @@ mod scan;
 mod snapshot;
 mod text;
 pub mod tools;
+pub mod trace;
 mod volume;
 
 // Shared fixture setup is compiled only into Windows unit tests, never the library API.

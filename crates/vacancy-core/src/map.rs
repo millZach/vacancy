@@ -280,6 +280,8 @@ pub fn scan_for_map_with(
     cancel: &CancelToken,
 ) -> Result<ScannedVolume, ScanError> {
     let mut next_preview = Duration::ZERO;
+    let (mut previews, mut previewing, mut updates, mut updating) =
+        (0u32, Duration::ZERO, 0u32, Duration::ZERO);
     let snapshot = scan(
         volume,
         &ScanOptions::default(),
@@ -290,18 +292,41 @@ pub fn scan_for_map_with(
                     .preview(|partial| categorize_until(partial, env, &|| cancel.is_cancelled()));
                 next_preview =
                     progress.elapsed + (started.elapsed() * 10).max(Duration::from_millis(700));
+                previews += 1;
+                previewing += started.elapsed();
                 categories
             });
+            let sending = Instant::now();
             on_update(scan_update(progress, preview.flatten().as_ref()));
+            updates += 1;
+            updating += sending.elapsed();
         },
         cancel,
     )?;
+    if crate::trace::enabled() {
+        crate::trace::note(
+            "map.previews",
+            format_args!(
+                "{previews} previews, {:.1} ms with the walk held",
+                previewing.as_secs_f64() * 1e3
+            ),
+        );
+        crate::trace::note(
+            "map.updates",
+            format_args!(
+                "{updates} updates, {:.1} ms building and sending them",
+                updating.as_secs_f64() * 1e3
+            ),
+        );
+    }
+    let building = Instant::now();
     // Building the map takes a moment on a big drive; a cancel during it stops it and means no map.
     let (categories, proposals, overview) =
         build_map_with(&snapshot, env, moment, volume, figures, &|| {
             cancel.is_cancelled()
         })
         .ok_or(ScanError::Cancelled)?;
+    crate::trace::took("map.build", building);
     if cancel.is_cancelled() {
         return Err(ScanError::Cancelled);
     }
@@ -327,14 +352,21 @@ fn build_map_with(
     if stop() {
         return None;
     }
+    let step = Instant::now();
     let categories = categorize_until(snapshot, env, stop)?;
+    crate::trace::took("map.categorize", step);
+    let step = Instant::now();
     let mut proposals = propose_until(snapshot, &categories, env, moment, stop)?;
+    crate::trace::took("map.propose", step);
+    let step = Instant::now();
     for hint in crate::hints::discover_until(env, snapshot, moment.now, stop)? {
         if stop() {
             return None;
         }
         proposals.append_hint(&hint);
     }
+    crate::trace::took("map.hints", step);
+    let step = Instant::now();
     let claims: Vec<(CategoryId, &[ItemRef])> = proposals
         .list()
         .iter()
@@ -342,6 +374,8 @@ fn build_map_with(
         .map(|(i, p)| (p.category, proposals.targets(i)))
         .collect();
     let categories = categories.carve(snapshot, &claims, stop)?;
+    crate::trace::took("map.carve", step);
+    let step = Instant::now();
     let scanned = snapshot.stats().bytes;
     let info = figures(snapshot).unwrap_or_else(|| VolumeInfo {
         name: volume.display().to_string(),
@@ -353,7 +387,10 @@ fn build_map_with(
         used_bytes: scanned,
         free_bytes: 0,
     });
+    crate::trace::took("map.figures", step);
+    let step = Instant::now();
     let overview = overview_until(snapshot, &categories, &proposals, info, stop)?;
+    crate::trace::took("map.overview", step);
     // A cancel that came during the last step still means no map.
     if stop() {
         return None;

@@ -174,6 +174,7 @@ pub(crate) fn scan_inner(
     };
     let volume = std::path::absolute(volume).map_err(fail)?;
     let roots = platform::roots(&volume).map_err(fail)?;
+    crate::trace::took("scan.roots", started);
     let threads = options
         .threads
         .map(NonZeroUsize::get)
@@ -207,16 +208,29 @@ pub(crate) fn scan_inner(
         current: Mutex::new(tasks.first().map(|t| t.path.clone()).unwrap_or_default()),
         before_enter: hooks.before_enter,
         after_open: hooks.after_open,
+        tracing: crate::trace::enabled(),
     };
 
-    std::thread::scope(|threads| {
-        let walker = threads.spawn(|| {
+    std::thread::scope(|scope| {
+        let walker = scope.spawn(|| {
+            let walking = Instant::now();
             pool.scope(|s| {
                 for task in tasks {
                     let shared = &shared;
                     s.spawn(move |s| walk(s, shared, task));
                 }
             });
+            if crate::trace::enabled() {
+                crate::trace::took("scan.walk", walking);
+                crate::trace::note("scan.threads", threads);
+                let mut calls = Calls::default();
+                for worker in
+                    pool.broadcast(|_| WORKER.with_borrow_mut(|w| std::mem::take(w.lister.calls())))
+                {
+                    calls.add(&worker);
+                }
+                calls.trace();
+            }
         });
         let mut current = PathBuf::new();
         let mut report = |current: &mut PathBuf| {
@@ -256,7 +270,110 @@ pub(crate) fn scan_inner(
         .builder
         .into_inner()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    Ok(builder.finish(started.elapsed()))
+    let finishing = Instant::now();
+    let snapshot = builder.finish(started.elapsed());
+    crate::trace::took("scan.finish", finishing);
+    crate::trace::took("scan.total", started);
+    if crate::trace::enabled() {
+        let s = snapshot.stats();
+        crate::trace::note(
+            "scan.stats",
+            format_args!(
+                "{} files, {} folders, {} bytes, {} unreadable, {} changed",
+                s.files, s.folders, s.bytes, s.unreadable, s.changed
+            ),
+        );
+    }
+    Ok(snapshot)
+}
+
+/// What the listers asked of the OS, and how long it took, for [`crate::trace`]. Counted always (it costs nothing);
+/// timed only while tracing. Times are summed over the workers, so they add up to more than the walk took.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Calls {
+    /// Folders the walk asked a lister for, and the time the listers took over them (opening, checking, reading
+    /// and closing).
+    pub(crate) folders: u64,
+    pub(crate) folder_ns: u64,
+    /// Folder opens, failed ones too.
+    pub(crate) opens: u64,
+    pub(crate) open_ns: u64,
+    /// Identity queries on opened folders.
+    pub(crate) identities: u64,
+    pub(crate) identity_ns: u64,
+    /// Listing calls, the last one of each folder (which says there are no more) included.
+    pub(crate) batches: u64,
+    pub(crate) batch_ns: u64,
+    /// Entries read from listings.
+    pub(crate) entries: u64,
+    /// Files whose listing showed no allocation, asked again by handle; and how many of them then had some.
+    pub(crate) requeries: u64,
+    pub(crate) requery_ns: u64,
+    pub(crate) requeries_found: u64,
+    /// Closing folder handles.
+    pub(crate) close_ns: u64,
+    /// Waiting for, and then holding, the snapshot's lock to record a listing.
+    pub(crate) commit_wait_ns: u64,
+    pub(crate) commit_ns: u64,
+}
+
+impl Calls {
+    fn add(&mut self, o: &Self) {
+        self.folders += o.folders;
+        self.folder_ns += o.folder_ns;
+        self.opens += o.opens;
+        self.open_ns += o.open_ns;
+        self.identities += o.identities;
+        self.identity_ns += o.identity_ns;
+        self.batches += o.batches;
+        self.batch_ns += o.batch_ns;
+        self.entries += o.entries;
+        self.requeries += o.requeries;
+        self.requery_ns += o.requery_ns;
+        self.requeries_found += o.requeries_found;
+        self.close_ns += o.close_ns;
+        self.commit_wait_ns += o.commit_wait_ns;
+        self.commit_ns += o.commit_ns;
+    }
+
+    fn trace(&self) {
+        use crate::trace::note;
+        note("scan.folders_listed", self.folders);
+        note("scan.entries", self.entries);
+        note("scan.requeries_found", self.requeries_found);
+        let rows = [
+            ("list", self.folders, self.folder_ns),
+            ("open", self.opens, self.open_ns),
+            ("identity", self.identities, self.identity_ns),
+            ("batch", self.batches, self.batch_ns),
+            ("requery", self.requeries, self.requery_ns),
+            ("close", self.opens, self.close_ns),
+            ("commit_wait", self.folders, self.commit_wait_ns),
+            ("commit", self.folders, self.commit_ns),
+        ];
+        for (name, count, ns) in rows {
+            note(
+                &format!("scan.calls.{name}"),
+                format_args!(
+                    "{count} calls, {:.0} ms summed, {:.1} us each",
+                    ns as f64 / 1e6,
+                    ns as f64 / 1e3 / count.max(1) as f64
+                ),
+            );
+        }
+    }
+}
+
+/// The time now, when `on`: for [`lap`].
+pub(crate) fn clock(on: bool) -> Option<Instant> {
+    on.then(Instant::now)
+}
+
+/// Adds the time since `start`, when there is one, to `ns`.
+pub(crate) fn lap(start: Option<Instant>, ns: &mut u64) {
+    if let Some(start) = start {
+        *ns += u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+    }
 }
 
 /// Two per core, from 8 to 32. A first scan mostly waits on the disk (each folder's records are read once), so
@@ -300,6 +417,8 @@ struct Shared<'a> {
     current: Mutex<PathBuf>,
     before_enter: Option<&'a (dyn Fn(&Path) + Sync)>,
     after_open: Option<&'a (dyn Fn(&Path) + Sync)>,
+    /// Whether to time the walk for [`crate::trace`].
+    tracing: bool,
 }
 
 /// Why a folder could not be listed.
@@ -548,9 +667,13 @@ fn walk<'s>(s: &rayon::Scope<'s>, shared: &'s Shared<'s>, task: Task) {
             cancel: shared.cancel,
             after_open: shared.after_open,
         };
+        let listing = clock(shared.tracing);
         let listed = w
             .lister
             .list(&task.path, task.expect, &task.volume, &mut collector);
+        let calls = w.lister.calls();
+        calls.folders += 1;
+        lap(listing, &mut calls.folder_ns);
         let flag = match listed {
             Ok(()) => None,
             Err(ListError::Gone | ListError::Cancelled) => return Vec::new(),
@@ -571,7 +694,13 @@ fn walk<'s>(s: &rayon::Scope<'s>, shared: &'s Shared<'s>, task: Task) {
         if w.listing.flags.contains(DirFlags::UNREADABLE) {
             shared.unreadable.fetch_add(1, Ordering::Relaxed);
         }
-        let ids = lock(&shared.builder).commit(task.dir, &w.listing);
+        let waiting = clock(shared.tracing);
+        let mut builder = lock(&shared.builder);
+        lap(waiting, &mut w.lister.calls().commit_wait_ns);
+        let committing = clock(shared.tracing);
+        let ids = builder.commit(task.dir, &w.listing);
+        drop(builder);
+        lap(committing, &mut w.lister.calls().commit_ns);
         shared
             .files
             .fetch_add(u64::from(w.listing.own_files), Ordering::Relaxed);

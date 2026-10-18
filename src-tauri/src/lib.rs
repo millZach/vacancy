@@ -451,7 +451,10 @@ async fn scan_volume(
     app: AppHandle,
     session: State<'_, Session>,
 ) -> Result<ScanOutcome, String> {
+    let command = std::time::Instant::now();
+    vacancy_core::trace::note("app.scan_volume", "called");
     let env = env_for(&app, &mount_point).await?;
+    vacancy_core::trace::took("app.env_for", command);
     let (generation, token) = {
         // Under the run's lock, which a run takes to check that no scan is running: never both at once.
         let run = lock(&session.run);
@@ -464,7 +467,9 @@ async fn scan_volume(
     let drive = mount_point.clone();
     let scanned = tauri::async_runtime::spawn_blocking(move || {
         // Which apps run is read as the scan starts; the executor skips anything busy when the plan runs.
+        let detecting = std::time::Instant::now();
         let moment = Moment::detect();
+        vacancy_core::trace::took("app.moment", detecting);
         let mode = &app.state::<Session>().mode;
         vacancy_core::scan_for_map_with(
             &root,
@@ -489,10 +494,13 @@ async fn scan_volume(
                 spent: false,
             };
             if session.scans.finish(&mount_point, generation, scanned) {
-                Ok(ScanOutcome::Done {
+                let outcome = ScanOutcome::Done {
                     overview,
                     proposals,
-                })
+                };
+                vacancy_core::trace::json_size("app.outcome", &outcome);
+                vacancy_core::trace::took("app.scan_volume", command);
+                Ok(outcome)
             } else {
                 Ok(ScanOutcome::Cancelled)
             }

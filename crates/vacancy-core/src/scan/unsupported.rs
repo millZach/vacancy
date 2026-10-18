@@ -3,7 +3,7 @@
 use std::io;
 use std::path::Path;
 
-use super::{Collector, ListError, RootSpec};
+use super::{Calls, Collector, ListError, RootSpec};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Volume;
@@ -19,9 +19,15 @@ pub(crate) fn roots(_path: &Path) -> io::Result<Vec<RootSpec>> {
 }
 
 #[derive(Default)]
-pub(crate) struct Lister;
+pub(crate) struct Lister {
+    calls: Calls,
+}
 
 impl Lister {
+    pub(crate) fn calls(&mut self) -> &mut Calls {
+        &mut self.calls
+    }
+
     pub(crate) fn list(
         &mut self,
         _dir: &Path,

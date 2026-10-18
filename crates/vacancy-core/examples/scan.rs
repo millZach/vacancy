@@ -2,15 +2,20 @@
 //! rules propose and the process's peak memory. Read-only: nothing is deleted. Used to measure the scanner on a real drive:
 //!
 //! ```text
-//! cargo run --release -p vacancy-core --example scan -- C:\ [--threads N] [--list <folder>]...
+//! cargo run --release -p vacancy-core --example scan -- C:\ [--threads N] [--list <folder>]... [--map]
 //! ```
+//!
+//! `--map` scans the way the app does (previews while scanning, then the map built and encoded as the IPC would),
+//! and prints how long the map took after the walk. Set `VACANCY_SCAN_TRACE=-` to see every step's time and the
+//! walk's calls to the OS (see `vacancy_core::trace`).
 
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use vacancy_core::{
-    CancelToken, Env, ItemRef, Moment, ScanOptions, categorize, propose, scan, volume_info,
+    CancelToken, Env, ItemRef, Moment, ScanOptions, ScanOutcome, categorize, propose, scan,
+    scan_for_map, volume_info,
 };
 
 fn main() {
@@ -18,14 +23,21 @@ fn main() {
     let mut path = PathBuf::from(".");
     let mut options = ScanOptions::default();
     let mut list: Vec<PathBuf> = Vec::new();
+    let mut map = false;
     while let Some(arg) = args.next() {
-        if arg == "--threads" {
+        if arg == "--map" {
+            map = true;
+        } else if arg == "--threads" {
             options.threads = args.next().and_then(|n| n.parse::<NonZeroUsize>().ok());
         } else if arg == "--list" {
             list.extend(args.next().map(PathBuf::from));
         } else {
             path = PathBuf::from(arg);
         }
+    }
+    if map {
+        map_like_the_app(&path);
+        return;
     }
     let mut last = Duration::ZERO;
     let snapshot = scan(
@@ -154,6 +166,58 @@ fn main() {
             own.files
         );
     }
+    peak_memory();
+}
+
+/// Scans for the map, as the app's Scan button does, and prints the walk's and the map's times.
+fn map_like_the_app(path: &std::path::Path) {
+    let started = std::time::Instant::now();
+    let env = Env::detect(path);
+    let detected = started.elapsed();
+    let mut updates = 0u64;
+    let mut update_bytes = 0usize;
+    let scanned = scan_for_map(
+        path,
+        &env,
+        &Moment::detect(),
+        &mut |update| {
+            // What the app's channel does with each update: encode it as JSON.
+            updates += 1;
+            update_bytes += serde_json::to_vec(&update).map(|v| v.len()).unwrap_or(0);
+        },
+        &CancelToken::new(),
+    )
+    .expect("scan");
+    let mapped = started.elapsed();
+    let encoding = std::time::Instant::now();
+    let outcome = ScanOutcome::Done {
+        overview: Box::new(scanned.overview.clone()),
+        proposals: scanned.proposals.list().to_vec(),
+    };
+    let json = serde_json::to_vec(&outcome).map(|v| v.len()).unwrap_or(0);
+    let encoded = encoding.elapsed();
+    let s = scanned.snapshot.stats();
+    println!("path            {}", path.display());
+    println!("env detected    {:.1} ms", detected.as_secs_f64() * 1e3);
+    println!("walk            {:.2} s", s.elapsed.as_secs_f64());
+    println!(
+        "map after walk  {:.0} ms",
+        (mapped - detected - s.elapsed).as_secs_f64() * 1e3
+    );
+    println!(
+        "outcome JSON    {json} bytes, encoded in {:.1} ms",
+        encoded.as_secs_f64() * 1e3
+    );
+    println!("updates         {updates}, {update_bytes} bytes of JSON");
+    println!("total           {:.2} s", started.elapsed().as_secs_f64());
+    println!("files           {}", s.files);
+    println!("folders         {}", s.folders);
+    println!("bytes           {}", s.bytes);
+    println!("unreadable      {}", s.unreadable);
+    println!("changed         {}", s.changed);
+    println!("links skipped   {}", s.links_skipped);
+    println!("hard links      {} extra names merged", s.hard_links_merged);
+    println!("proposals       {}", scanned.proposals.list().len());
     peak_memory();
 }
 

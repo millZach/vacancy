@@ -19,7 +19,7 @@ use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use super::{Collector, Entry, EntryKind, LinkKey, ListError, RootSpec};
+use super::{Calls, Collector, Entry, EntryKind, LinkKey, ListError, RootSpec};
 use crate::snapshot::{RootKind, UnixTime};
 
 /// The file system a walk stays on: its device and, on macOS, where it is mounted.
@@ -139,9 +139,16 @@ impl Drop for Dir {
 #[derive(Default)]
 pub(crate) struct Lister {
     path: Vec<u8>,
+    /// What this lister did, for [`crate::trace`]: on Unix, only what the walk counts.
+    calls: Calls,
 }
 
 impl Lister {
+    /// What this lister did so far.
+    pub(crate) fn calls(&mut self) -> &mut Calls {
+        &mut self.calls
+    }
+
     /// Lists the folder at `dir`. `expect` is the device and inode its parent's listing gave it: the folder
     /// opened must have them, or it is not listed (`Changed`). That is what keeps a folder above it that was
     /// swapped for a symlink after being listed from redirecting the walk: the path would lead elsewhere, and
