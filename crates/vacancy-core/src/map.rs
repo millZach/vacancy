@@ -534,6 +534,8 @@ pub fn fast_scan_for_map(
     // Both stages report through the one callback.
     let sink = std::cell::RefCell::new(&mut *on_update);
     let read = crate::fast::read_index(letter, owner, cancel, |stream| {
+        // The prompt was answered and the reader is there: the HUD can show the read from now.
+        (sink.borrow_mut())(stage(FastStage::Reading, None, 0, 0));
         crate::fast::snapshot_from_stream(
             stream,
             &expect.expect,
