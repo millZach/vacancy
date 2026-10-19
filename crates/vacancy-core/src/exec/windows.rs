@@ -374,6 +374,75 @@ pub(crate) fn delete_file(
     Ok((std.NumberOfLinks <= 1).then_some(e.alloc))
 }
 
+/// A file held open so that it stays where it is while something beside it is deleted: the copy a duplicate group
+/// keeps. Held without `FILE_SHARE_DELETE`, like every folder on the way to it, so nobody can delete, rename or
+/// move it (or a folder above it) while it is held.
+pub(crate) struct Held {
+    _parent: Parent,
+    file: Handle,
+}
+
+impl Held {
+    /// It is still there under its name: held this way it can't have gone, and this asks its handle once more.
+    pub(crate) fn still_there(&self) -> bool {
+        standard(&self.file).is_some_and(|s| !s.DeletePending && s.NumberOfLinks > 0)
+    }
+}
+
+/// Holds the file at `path` (see [`Held`]): walked to without following a link, opened by name in its held folder
+/// without following it, and it must be `expect` (volume and file id), an ordinary file (or one the Windows Overlay
+/// Filter or Data Deduplication keeps), unchanged since `threshold`, at `logical` length and `alloc` allocated.
+pub(crate) fn hold_file(
+    path: &Path,
+    expect: Identity,
+    logical: u64,
+    alloc: u64,
+    threshold: i128,
+) -> Result<Held, Fail> {
+    use windows_sys::Win32::Storage::FileSystem::FILE_READ_DATA;
+    let name = path.file_name().ok_or(Fail::Gone)?;
+    let parent = walk_to_parent(path, true)?;
+    let wide = name_of(name)?;
+    // With data access: a handle with attribute access only isn't checked against others' sharing, so it would
+    // hold nothing.
+    let file = nt_open(
+        &parent.dir.handle,
+        &wide,
+        FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        FILE_NON_DIRECTORY_FILE,
+    )
+    .map_err(|status| match status {
+        STATUS_FILE_IS_A_DIRECTORY => Fail::Changed,
+        s => open_fail(s),
+    })?;
+    let (volume, id) = identity(&file).ok_or(Fail::Unsupported)?;
+    if Identity::new(volume, id) != expect {
+        return Err(Fail::Changed);
+    }
+    let (attributes, tag) = attribute_tag(&file).ok_or(Fail::Failed("no attributes".into()))?;
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        && (tag & NAME_SURROGATE != 0 || (tag != TAG_WOF && tag != TAG_DEDUP))
+    {
+        return Err(Fail::Changed);
+    }
+    let times = basic(&file).ok_or(Fail::Failed("no times".into()))?;
+    if latest(&times) >= threshold {
+        return Err(Fail::Changed);
+    }
+    let std = standard(&file).ok_or_else(|| Fail::Failed("its size can't be read".into()))?;
+    if std.DeletePending
+        || u64::try_from(std.EndOfFile).ok() != Some(logical)
+        || u64::try_from(std.AllocationSize).ok() != Some(alloc)
+    {
+        return Err(Fail::Changed);
+    }
+    Ok(Held {
+        _parent: parent,
+        file,
+    })
+}
+
 /// Points where the tests make a query fail that never fails on its own.
 pub(crate) mod test_hooks {
     use std::cell::Cell;

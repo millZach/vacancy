@@ -692,8 +692,7 @@ mod sys {
     /// [`read_file`], asking that reads through the handle leave the last-access time alone (`SetFileTime` with
     /// all ones), where the file lets its attributes be written; otherwise a plain [`read_file`].
     pub(super) fn read_file_quietly(dir: &Dir, name: &OsStr) -> Option<(std::fs::File, Identity)> {
-        use std::os::windows::fs::MetadataExt;
-        use std::os::windows::io::FromRawHandle;
+        use std::os::windows::io::{AsRawHandle, FromRawHandle};
         use windows_sys::Win32::Foundation::FILETIME;
         use windows_sys::Win32::Storage::FileSystem::{
             FILE_READ_DATA, FILE_WRITE_ATTRIBUTES, SetFileTime,
@@ -717,10 +716,33 @@ mod sys {
         std::mem::forget(handle);
         // SAFETY: ownership of the fresh NtOpenFile handle is transferred exactly once to File.
         let file = unsafe { std::fs::File::from_raw_handle(raw) };
-        if file.metadata().ok()?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        if !plain_data(file.as_raw_handle()) {
             return None;
         }
         Some((file, identity))
+    }
+
+    /// Whether an open file is data Vacancy may read: not a reparse point, or one the Windows Overlay Filter
+    /// compresses (CompactOS) or Data Deduplication keeps, which read like any file. Links and cloud placeholders
+    /// aren't.
+    fn plain_data(handle: HANDLE) -> bool {
+        const TAG_WOF: u32 = 0x8000_0017;
+        const TAG_DEDUP: u32 = 0x8000_0013;
+        // SAFETY: an all-zero FILE_ATTRIBUTE_TAG_INFO is valid.
+        let mut info: FILE_ATTRIBUTE_TAG_INFO = unsafe { mem::zeroed() };
+        // SAFETY: `info` is writable and sized as passed; the handle is open.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                FileAttributeTagInfo,
+                (&raw mut info).cast(),
+                mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+            )
+        };
+        ok != 0
+            && (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+                || info.ReparseTag == TAG_WOF
+                || info.ReparseTag == TAG_DEDUP)
     }
 
     pub(super) fn create_directory(dir: &Dir, name: &OsStr) -> Option<(std::fs::File, Identity)> {

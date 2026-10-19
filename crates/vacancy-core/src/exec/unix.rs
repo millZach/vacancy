@@ -233,6 +233,77 @@ fn to_entry(name: &OsStr, st: &libc::stat) -> Entry {
 }
 
 /// The entry `name` in `parent`, looked at without following it.
+/// A file held open while something beside it is deleted: the copy a duplicate group keeps. POSIX can't stop
+/// anyone deleting or moving a file another process holds, so this keeps a descriptor to it and its verified
+/// folder, and [`Held::still_there`] looks again, by name in that folder, right before each unlink beside it. The
+/// window left is the one ADR 0005 names for every unlink on macOS: the width of a system call.
+pub(crate) struct Held {
+    parent: Parent,
+    name: CString,
+    file: Fd,
+    dev_ino: (u64, u64),
+}
+
+impl Held {
+    /// The name still leads to the held file, in the same folder, still where the walk found it, and the file
+    /// still has a name.
+    pub(crate) fn still_there(&self) -> bool {
+        let now = fstatat(&self.parent.dir, &self.name);
+        let held = fstat(&self.file);
+        matches!((now, held), (Ok(now), Ok(held))
+            if dev_ino(&now) == self.dev_ino && dev_ino(&held) == self.dev_ino && held.st_nlink > 0)
+    }
+}
+
+/// Holds the file at `path` (see [`Held`]): walked to without following a link, opened by name in its verified
+/// folder without following it, and it must be `expect` (device and inode), an ordinary file, unchanged since
+/// `threshold`, at `logical` length and `alloc` allocated.
+#[allow(clippy::unnecessary_cast)]
+pub(crate) fn hold_file(
+    path: &Path,
+    expect: Identity,
+    logical: u64,
+    alloc: u64,
+    threshold: i128,
+) -> Result<Held, Fail> {
+    let name = path.file_name().ok_or(Fail::Gone)?;
+    let parent = walk_to_parent(path, false)?;
+    let c = c_name(name)?;
+    // SAFETY: `c` is NUL-terminated and the folder is open. NOFOLLOW refuses a link; NONBLOCK a FIFO.
+    let fd = unsafe {
+        libc::openat(
+            parent.dir.fd.0,
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(match errno() {
+            libc::ENOENT => Fail::Gone,
+            libc::ELOOP => Fail::Link,
+            libc::EACCES | libc::EPERM => Fail::Refused,
+            e => Fail::Failed(format!("error {e}")),
+        });
+    }
+    let file = Fd(fd);
+    let st = fstat(&file)?;
+    let (dev, ino) = dev_ino(&st);
+    if Identity::new(dev, u128::from(ino)) != expect
+        || st.st_mode & libc::S_IFMT != libc::S_IFREG
+        || changed_of(&st) >= threshold
+        || st.st_size as u64 != logical
+        || (st.st_blocks as u64).saturating_mul(512) != alloc
+    {
+        return Err(Fail::Changed);
+    }
+    Ok(Held {
+        parent,
+        name: c,
+        file,
+        dev_ino: (dev, ino),
+    })
+}
+
 pub(crate) fn entry(parent: &Dir, name: &OsStr) -> Result<Entry, Fail> {
     let c = c_name(name)?;
     Ok(to_entry(name, &fstatat(parent, &c)?))

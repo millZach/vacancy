@@ -33,6 +33,24 @@ pub(crate) fn walk_to_parent(_path: &Path, _pin: bool) -> Result<Parent, Fail> {
     Err(Fail::Unsupported)
 }
 
+pub(crate) struct Held;
+
+impl Held {
+    pub(crate) fn still_there(&self) -> bool {
+        false
+    }
+}
+
+pub(crate) fn hold_file(
+    _path: &Path,
+    _expect: crate::fsid::Identity,
+    _logical: u64,
+    _alloc: u64,
+    _threshold: i128,
+) -> Result<Held, Fail> {
+    Err(Fail::Unsupported)
+}
+
 pub(crate) fn entry(_parent: &Dir, _name: &OsStr) -> Result<Entry, Fail> {
     Err(Fail::Unsupported)
 }
