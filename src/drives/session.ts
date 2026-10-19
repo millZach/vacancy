@@ -314,11 +314,13 @@ export function reduce(s: Session, a: Action): Session {
       return onSearch(s, a.mountPoint, a.run, (scan) => {
         // Once its plan has run, a scan's map stays the one the run started from.
         if (a.outcome.status === 'cancelled' || ranPlan(scan)) return { ...scan, duplicates: { phase: 'stopped' } };
-        const ids = new Set(a.outcome.proposals.map((p) => p.id));
+        const ids = new Set([...a.outcome.proposals.map((p) => p.id), ...a.outcome.tidy.map((t) => t.id)]);
         return {
           ...scan,
           overview: a.outcome.overview,
           proposals: a.outcome.proposals,
+          // The sorts again, with the extra copies marked as deleted by duplicates (delete wins over sort).
+          tidy: a.outcome.tidy,
           plan: scan.plan.filter((id) => ids.has(id)),
           duplicates: { phase: 'done', found: a.outcome.duplicates },
         };

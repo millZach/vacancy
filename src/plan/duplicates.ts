@@ -1,5 +1,5 @@
 // The duplicate finder as the plan sees it: which groups are in, what they add up to, and how to say it.
-import type { DuplicateGroup, FileKind } from '../bridge';
+import type { DuplicateGroup, FileKind, TidyProposal } from '../bridge';
 
 /** The duplicates proposal's id, as the core names it. */
 export const DUPLICATES = 'duplicates';
@@ -39,4 +39,28 @@ export function countLine(groups: readonly DuplicateGroup[]): string {
     other ? `${n(other)} other ${other === 1 ? 'file' : 'files'}` : null,
   ].filter((p): p is string => p !== null);
   return parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts.at(-1)}` : (parts[0] ?? 'No files');
+}
+
+/**
+ * The sorts as a plan with duplicate files runs them: the core marks every extra copy's move as deleted by
+ * duplicates, but an unticked group deletes nothing, so its extra copies are sorted like any file (delete wins over
+ * sort only while a delete that takes the file is in the plan).
+ */
+export function sortable(
+  tidy: readonly TidyProposal[],
+  groups: readonly DuplicateGroup[],
+  skipped: readonly string[],
+): TidyProposal[] {
+  const kept = new Set(
+    groups.filter((g) => skipped.includes(g.id)).flatMap((g) => g.extras.map((e) => e.path.toLowerCase())),
+  );
+  if (kept.size === 0) return [...tidy];
+  return tidy.map((t) => ({
+    ...t,
+    moves: t.moves.map((m) =>
+      m.deletedBy.includes(DUPLICATES) && kept.has(`${t.path}\\${m.name}`.toLowerCase())
+        ? { ...m, deletedBy: m.deletedBy.filter((id) => id !== DUPLICATES) }
+        : m,
+    ),
+  }));
 }

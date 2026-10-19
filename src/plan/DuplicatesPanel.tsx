@@ -191,6 +191,20 @@ function Notes({ found, platform }: { found: Duplicates; platform: Platform }) {
           on disk, so {found.hardLinked === 1 ? 'it isn’t a duplicate and stays' : 'they aren’t duplicates and stay'}.
         </li>
       )}
+      {found.cloned > 0 && (
+        <li>
+          <Info size={12} aria-hidden />
+          {formatCount(found.cloned)} {found.cloned === 1 ? 'file shares' : 'files share'} its data with a copy (a
+          clone), so deleting {found.cloned === 1 ? 'it' : 'them'} would free next to nothing. Left alone.
+        </li>
+      )}
+      {found.notLocal > 0 && (
+        <li>
+          <Info size={12} aria-hidden />
+          {formatCount(found.notLocal)} {found.notLocal === 1 ? 'file isn’t' : 'files aren’t'} all on this disk, so
+          Vacancy didn’t read {found.notLocal === 1 ? 'it' : 'them'}: reading would download {found.notLocal === 1 ? 'it' : 'them'}.
+        </li>
+      )}
       <li>
         <Info size={12} aria-hidden />
         {platform === 'macos'
@@ -199,7 +213,7 @@ function Notes({ found, platform }: { found: Duplicates; platform: Platform }) {
       </li>
       <li>
         <Info size={12} aria-hidden />
-        Only exact copies over 1 MB in {scope}. Files another proposal already deletes aren’t counted twice.
+        Only exact copies of 1 MB or more in {scope}. Files another proposal already deletes aren’t counted twice.
       </li>
       <li>
         <Info size={12} aria-hidden />

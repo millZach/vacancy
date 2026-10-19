@@ -322,7 +322,17 @@ describe('the duplicate search after a scan', () => {
       ...fixtures.windows.proposals,
       { ...fixtures.windows.proposals[0]!, id: 'duplicates', title: 'Duplicate files', defaultOn: false },
     ],
-    duplicates: { proposal: 'duplicates', groups: [], folders: ['Pictures'], compared: 2, hardLinked: 0, changed: 0 },
+    tidy: [],
+    duplicates: {
+      proposal: 'duplicates',
+      groups: [],
+      folders: ['Pictures'],
+      compared: 2,
+      hardLinked: 0,
+      changed: 0,
+      notLocal: 0,
+      cloned: 0,
+    },
   };
 
   it('starts checking when the scan is done, and redraws the map when it ends, keeping the plan', () => {
@@ -352,6 +362,25 @@ describe('the duplicate search after a scan', () => {
     const r = scanOf(ran, C.mountPoint);
     expect(r.phase === 'done' && r.duplicates.phase).toBe('stopped');
     expect(run(ran, { type: 'dupsEnded', mountPoint: C.mountPoint, run: 2, outcome: found })).toBe(ran);
+  });
+
+  it('takes the sorts the search marked, and keeps a ticked sort in the plan', () => {
+    const tidy = fixtures.windows.tidy;
+    expect(tidy.length).toBeGreaterThan(0);
+    const scanEnded = { ...done(C), tidy };
+    let s = run(
+      start,
+      { type: 'scanStarted', mountPoint: C.mountPoint, run: 1 },
+      { type: 'scanEnded', mountPoint: C.mountPoint, run: 1, outcome: scanEnded, at: 1 },
+    );
+    s = run(s, { type: 'plan', mountPoint: C.mountPoint, id: tidy[0]!.id, on: true });
+    const marked = tidy.map((t, i) =>
+      i === 0 ? { ...t, moves: t.moves.map((m) => ({ ...m, deletedBy: [...m.deletedBy, 'duplicates'] })) } : t,
+    );
+    const ended = run(s, { type: 'dupsEnded', mountPoint: C.mountPoint, run: 1, outcome: { ...found, tidy: marked } });
+    const e = scanOf(ended, C.mountPoint);
+    expect(e.phase === 'done' && e.tidy[0]!.moves.every((m) => m.deletedBy.includes('duplicates'))).toBe(true);
+    expect(e.phase === 'done' && e.plan.includes(tidy[0]!.id)).toBe(true);
   });
 
   it('keeps the groups the user unticks, and lets them be ticked again', () => {

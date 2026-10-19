@@ -13,6 +13,8 @@ import {
 } from '../bridge';
 import { DrivesProvider } from '../drives/DrivesProvider';
 import { ConfirmDialog } from '../run/ConfirmDialog';
+import { activeMoves, goingInPlan } from '../tidy/model';
+import { sortable } from './duplicates';
 import { SummaryPanel } from '../summary/Summary';
 import { plan as basePlan, report as baseReport } from '../test/run';
 
@@ -177,6 +179,26 @@ describe('the duplicate search after a scan', () => {
     await userEvent.click(within(tray).getByRole('button', { name: /^Free / }));
     await userEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: /permanently$/ }));
     await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'Finding duplicates' })).toBeNull());
+  });
+});
+
+describe('duplicates and Tidy up', () => {
+  const t = fixtures.windows.tidy[0]!;
+  const [a, b] = t.moves as [(typeof t.moves)[number], (typeof t.moves)[number]];
+  const tidy = [{ ...t, moves: [{ ...a, deletedBy: ['duplicates'] }, { ...b, deletedBy: ['duplicates'] }] }];
+  const copy = (name: string) => ({ path: `${t.path}\\${name}`, name, folder: t.name, dir: t.name, bytes: 1, modified: null, tile: 'x' });
+  const groups = [
+    { id: 'g0', kind: 'photo' as const, name: 'k0', bytes: 1, freed: 1, keep: copy('k0'), extras: [copy(a.name)], reason: '' },
+    { id: 'g1', kind: 'photo' as const, name: 'k1', bytes: 1, freed: 1, keep: copy('k1'), extras: [copy(b.name)], reason: '' },
+  ];
+
+  it('leaves the extra copies a plan deletes out of the sort, and sorts an unticked group’s', () => {
+    const plan = ['duplicates', t.id];
+    const shown = sortable(tidy, groups, ['g1'])[0]!;
+    expect(goingInPlan(shown, plan).map((m) => m.name)).toEqual([a.name]);
+    expect(activeMoves(shown, plan).map((m) => m.name)).toContain(b.name);
+    // Without duplicates in the plan both are sorted.
+    expect(activeMoves(shown, [t.id]).map((m) => m.name)).toEqual(expect.arrayContaining([a.name, b.name]));
   });
 });
 

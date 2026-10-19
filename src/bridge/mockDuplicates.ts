@@ -2,6 +2,7 @@
 // tiles carved out of the folders holding the extra copies, and the "Duplicate files" proposal, shaped the way the
 // core answers `find_duplicates`. Nothing reads a disk; names, sizes and folders only, never contents.
 import type {
+  TidyProposal,
   DuplicateCopy,
   DuplicateGroup,
   Duplicates,
@@ -222,9 +223,11 @@ export function mockDuplicates(platform: Platform, overview: Overview, home: str
     title: 'Duplicate files',
     summary: `${countLine(extras.map((x) => x.kind))} have an exact copy elsewhere, in ${groups.length} groups. Vacancy keeps one copy of each.`,
     why:
-      `Byte-for-byte copies of files over 1 MB in ${folders.slice(0, -1).join(', ')} and ${folders.at(-1)}. Vacancy keeps one copy of each group: the oldest, ` +
-      'preferring one outside Downloads that isn’t named like a copy (“copy”, “- Copy”, “(1)”). Before each extra copy goes, it checks the kept copy is ' +
-      'still there and unchanged. Untick a group to keep every copy of it. Copies in cloud-sync folders and in a Photos library are left alone.',
+      `Byte-for-byte copies of files of 1 MB or more in ${folders.slice(0, -1).join(', ')} and ${folders.at(-1)}. Vacancy keeps one copy of each group: the ` +
+      'tidiest (one outside Downloads that isn’t named like a copy: “copy”, “- Copy”, “(1)”), and the oldest among those. Before each extra copy goes, it ' +
+      'checks the kept copy is still there and unchanged, and holds it while the copy is deleted. Untick a group to keep every copy of it. Copies in ' +
+      'cloud-sync folders and in a Photos library are left alone, and so are files that aren’t all on this disk. The space is what the extra copies take ' +
+      'up: up to that much comes back, less where a drive shares copied files’ data.',
     bytes: extras.reduce((s, x) => s + x.e.bytes, 0),
     itemCount: extras.length,
     placeCount: extras.length,
@@ -246,7 +249,32 @@ export function mockDuplicates(platform: Platform, overview: Overview, home: str
       compared: groups.reduce((n, g) => n + g.extras.length + 1, 0) + 37,
       hardLinked: platform === 'macos' ? 9 : 18,
       changed: 0,
+      notLocal: 0,
+      cloned: 0,
     },
     changedGroup: groups.find((g) => g.kind === 'document')?.id ?? null,
   };
+}
+
+/** The sorts again, each move of an extra copy marked as deleted by duplicates, as the core marks them. */
+export function coverDuplicates(tidy: TidyProposal[], found: MockDuplicates): TidyProposal[] {
+  const extras = new Set(found.duplicates.groups.flatMap((g) => g.extras.map((e) => e.path.toLowerCase())));
+  return tidy.map((t) => ({
+    ...t,
+    moves: t.moves.map((m) => {
+      const others = m.deletedBy.filter((id) => id !== DUPLICATES);
+      const sep = t.path.includes('\\') ? '\\' : '/';
+      const mine = extras.has(`${t.path}${sep}${m.name}`.toLowerCase());
+      return { ...m, deletedBy: mine ? [...others, DUPLICATES].sort() : others };
+    }),
+  }));
+}
+
+/** The extra copies of the groups the user hasn't unticked, by lower-cased path: what a plan with duplicates deletes. */
+export function deletedExtras(found: MockDuplicates | null, skipped: readonly string[]): Set<string> {
+  return new Set(
+    (found?.duplicates.groups ?? [])
+      .filter((g) => !skipped.includes(g.id))
+      .flatMap((g) => g.extras.map((e) => e.path.toLowerCase())),
+  );
 }
