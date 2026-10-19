@@ -1,6 +1,6 @@
 # 0007: Fast scan reads the file index with admin
 
-Date: 2026-10-18. Status: proposed (ticket 11, issue #24).
+Date: 2026-10-18. Status: accepted (Zach, ticket 11, issue #24).
 
 A normal scan opens every folder as the user (ADR 0004). On this laptop's C: (4.5 million files) a first scan after a restart waits on the disk for 46 to 216 seconds; a warm one takes 10 to 14 (`.zstack/vacancy-v1/scan-tune/results.md`). Reading NTFS's file index, the Master File Table (MFT), takes one long sequential read instead, but needs admin: only administrators may read a volume's raw sectors. Zach chose (2026-10-18, prototype `prototype/fast-scan` variant A) to offer it per scan as "Fast scan (asks for admin)", with Windows' admin prompt every time and nothing remembered; folders the account can't open as totals only; and the normal scan, with a note saying why, whenever the fast scan can't run.
 
