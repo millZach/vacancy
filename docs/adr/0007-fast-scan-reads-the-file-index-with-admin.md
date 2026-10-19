@@ -122,6 +122,7 @@ A fast scan's map should match a normal scan of the same drive except for:
 
 - files that changed between the two scans;
 - locked folders: only fast scan counts them;
+- where a file with several names is counted: in the folder of the name a scan meets first. The normal scan's threads race for it; the fast scan meets the shallower name first (a pnpm store before the project linking into it). Totals are the same; a folder's own bytes, and a proposal's, can differ by such files. The executor counts a file freed only when its last name goes, so a run's freed bytes never depend on it;
 - what listings get wrong and the index doesn't: a file still open for writing lists its size from the last time its folder entry was updated; the index has its current size. A folder holding such a file has digests that differ from a listing's, so a target containing it is skipped as changed at execution. That errs towards keeping.
 
 `.zstack/vacancy-v1/t24-uac-check.ps1` compares the two on C: and writes the differences.
