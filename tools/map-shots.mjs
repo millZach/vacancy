@@ -139,6 +139,12 @@ try {
     await page.locator('.tray-row-title').first().click();
     await settle(page, 400);
     await shot(page, '8-plan-why');
+    // The first row may be the duplicates proposal, whose why is its own panel: back to the plan first.
+    const back = page.getByRole('button', { name: 'Back to the plan' });
+    if (await back.count()) {
+      await back.click();
+      await settle(page, 300);
+    }
 
     // Free the plan. Over CDP that deletes for real, so only with --run (an app in fixture mode).
     const free = page.locator('.tray-cta');
