@@ -14,6 +14,7 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror.workspace = true
 ts-rs.workspace = true
+vacancy-index.workspace = true
 unicode-normalization = "0.1"
 
 [target.'cfg(windows)'.dependencies]
@@ -29,6 +30,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_Kernel",
   "Win32_System_JobObjects",
   "Win32_System_Pipes",
+  "Win32_System_ProcessStatus",
   "Win32_System_Threading",
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_Storage_FileSystem",
@@ -46,6 +48,7 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+vacancy-index = { workspace = true, features = ["testkit"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { version = "0.61", features = [

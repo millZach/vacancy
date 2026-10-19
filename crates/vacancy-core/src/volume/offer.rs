@@ -44,6 +44,7 @@ mod tests {
             total_bytes: 100,
             used_bytes: 40,
             free_bytes: 60,
+            file_system: String::new(),
         }
     }
 

@@ -3,4 +3,4 @@
 /**
  * What an item on the map is.
  */
-export type ItemKind = "folder" | "file" | "files" | "more" | "hidden" | "proposal";
+export type ItemKind = "folder" | "file" | "files" | "more" | "hidden" | "records" | "proposal";

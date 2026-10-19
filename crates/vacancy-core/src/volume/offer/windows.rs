@@ -187,6 +187,7 @@ pub(crate) fn describe(d: &WindowsDrive) -> VolumeInfo {
         total_bytes: d.total_bytes,
         used_bytes: d.total_bytes - free,
         free_bytes: free,
+        file_system: d.file_system.clone(),
     }
 }
 

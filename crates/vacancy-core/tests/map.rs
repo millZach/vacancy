@@ -21,6 +21,7 @@ fn volume(used: u64, free: u64) -> VolumeInfo {
         total_bytes: used + free,
         used_bytes: used,
         free_bytes: free,
+        file_system: String::new(),
     }
 }
 

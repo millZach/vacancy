@@ -716,6 +716,7 @@ fn proposals_are_carved_out_of_the_map() {
         total_bytes: scanned + MIB,
         used_bytes: scanned,
         free_bytes: MIB,
+        file_system: String::new(),
     };
     let scanned_map = vacancy_core::scan_for_map(
         fx.root(),

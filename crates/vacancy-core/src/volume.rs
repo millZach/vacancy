@@ -47,6 +47,10 @@ pub struct VolumeInfo {
     /// Bytes free.
     #[ts(type = "number")]
     pub free_bytes: u64,
+    /// The file system, as the OS names it: `NTFS`, `exFAT`, `apfs`. Empty when unknown, and in runs kept before
+    /// Vacancy recorded it. Windows' fast scan needs NTFS.
+    #[serde(default)]
+    pub file_system: String,
 }
 
 /// How a drive is attached to the computer.
@@ -92,6 +96,11 @@ pub fn volume_info(path: &Path) -> Result<VolumeInfo, VolumeError> {
         source,
     })?;
     imp::volume_info(path)
+}
+
+/// The file system of the volume holding `path` (`NTFS`, `apfs`), or empty if the OS won't say.
+pub fn file_system_of(path: &Path) -> String {
+    imp::file_system_of(path)
 }
 
 /// The volume the OS runs from: the Windows drive (usually `C:`), or `/` on macOS.

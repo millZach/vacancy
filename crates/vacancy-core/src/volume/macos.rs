@@ -36,6 +36,10 @@ pub(super) fn volume_info(path: &Path) -> Result<VolumeInfo, VolumeError> {
     Ok(rules::describe(&mount(&st, Arbitration::new().as_ref())))
 }
 
+pub(super) fn file_system_of(path: &Path) -> String {
+    volume_info(path).map(|v| v.file_system).unwrap_or_default()
+}
+
 pub(super) fn system_volume() -> Result<VolumeInfo, VolumeError> {
     super::volume_info(Path::new("/"))
 }

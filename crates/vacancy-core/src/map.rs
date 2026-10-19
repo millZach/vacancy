@@ -5,6 +5,10 @@
 //! The overview is reconciled with the volume. The OS's used figure (what Explorer and Finder show) is the truth;
 //! when the scan counted less, the difference (folders Vacancy may not open, restore points or snapshots, swap,
 //! the file system's own records) is shown as one item in System rather than spread over guesses.
+//!
+//! A fast scan (Windows, with admin: see [`crate::fast`]) counts what a normal scan can't: folders this account
+//! may not open, as totals only in a "Locked folders" block with no names, and NTFS's own records, as one item in
+//! System. Only what it still couldn't account for is left as the unseen item.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -78,6 +82,98 @@ pub struct ScanSummary {
     /// How long the scan took.
     #[ts(type = "number")]
     pub duration_ms: u64,
+    /// How the drive was read. Runs kept before fast scan existed read as normal.
+    #[serde(default)]
+    pub method: ScanMethod,
+    /// Why a fast scan that was asked for ran as a normal scan, if it did.
+    #[serde(default)]
+    pub fallback: Option<FastFallback>,
+    /// Fast scan only: the folders this account can't open, as totals by why, never with a name from inside them.
+    /// Nothing in them is proposed or deleted.
+    #[serde(default)]
+    pub locked: Vec<LockedGroup>,
+    /// Fast scan only: bytes NTFS keeps for itself (the file index, its log, folder indexes, alternate streams),
+    /// shown as one item in System.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub records_bytes: u64,
+}
+
+/// How a scan read the drive.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum ScanMethod {
+    /// Folder by folder, as this account.
+    #[default]
+    Normal,
+    /// From the drive's file index, read with admin (Windows, NTFS).
+    Fast,
+}
+
+/// Why a fast scan that was asked for ran as a normal scan instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum FastFallback {
+    /// Windows' admin prompt was answered No, or closed.
+    Declined,
+    /// The drive isn't NTFS (an exFAT or FAT USB stick): it has no file index to read. No prompt was shown.
+    NotNtfs,
+    /// The helper that reads the index couldn't be started, or stopped before it was ready.
+    HelperFailed,
+    /// The index couldn't be read (a drive BitLocker has locked, a damaged index) or didn't add up.
+    IndexUnreadable,
+}
+
+/// Where a fast scan is, for the HUD.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum FastStage {
+    /// Waiting for Windows' admin prompt to be answered.
+    Asking,
+    /// Reading the drive's file index.
+    Reading,
+    /// Sorting what the index holds into categories.
+    Sorting,
+}
+
+/// Why a folder is locked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum LockedKind {
+    /// In another account's home folder.
+    OtherAccounts,
+    /// Anywhere else: restore points, app packages and other folders Windows keeps to itself.
+    WindowsOnly,
+}
+
+/// Folders this account can't open, for one reason: totals only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LockedGroup {
+    pub kind: LockedKind,
+    /// Allocated bytes.
+    #[ts(type = "number")]
+    pub bytes: u64,
+    #[ts(type = "number")]
+    pub files: u64,
+    /// Folders, each locked folder and every folder inside it.
+    #[ts(type = "number")]
+    pub folders: u64,
+}
+
+/// How a drive was read, and what only a fast scan counts: kept with the scan, so the map drawn again later (after
+/// the duplicate finder) says the same.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HowScanned {
+    pub method: ScanMethod,
+    pub fallback: Option<FastFallback>,
+    pub locked: Vec<LockedGroup>,
+    pub records_bytes: u64,
 }
 
 /// A category on the map.
@@ -115,6 +211,8 @@ pub enum ItemKind {
     More,
     /// Used space the scan could not see.
     Hidden,
+    /// NTFS's own records, which only a fast scan counts.
+    Records,
     /// What a cleanup proposal would remove, gathered from wherever it is.
     Proposal,
 }
@@ -205,6 +303,25 @@ pub struct ScanUpdate {
     pub elapsed_ms: u64,
     /// The categories so far, when this update carries a preview of the map.
     pub categories: Option<Vec<CategoryTotal>>,
+    /// How the drive is being read.
+    pub method: ScanMethod,
+    /// Why a fast scan that was asked for is running as a normal scan, if it is.
+    pub fallback: Option<FastFallback>,
+    /// A fast scan's stage.
+    pub stage: Option<FastStage>,
+    /// While a fast scan reads the index: records read, of how many.
+    pub index: Option<IndexRead>,
+}
+
+/// How far reading the file index has got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct IndexRead {
+    #[ts(type = "number")]
+    pub done: u64,
+    #[ts(type = "number")]
+    pub total: u64,
 }
 
 /// How a scan ended.
@@ -247,6 +364,8 @@ pub struct ScannedVolume {
     pub tidy: crate::tidy::Tidy,
     /// The overview map.
     pub overview: Overview,
+    /// How the drive was read.
+    pub how: HowScanned,
 }
 
 impl ScannedVolume {
@@ -258,12 +377,15 @@ impl ScannedVolume {
             tiles.iter().map(|t| (t.category, t.targets)).collect();
         let carved = self.categories.recarve(&self.snapshot, &claims, &|| false);
         debug_assert!(carved, "carving that is never stopped finishes");
-        self.overview = overview(
+        self.overview = overview_until(
             &self.snapshot,
             &self.categories,
             &self.proposals,
             self.overview.volume.clone(),
-        );
+            &self.how,
+            &|| false,
+        )
+        .expect("an overview that is never stopped finishes");
     }
 }
 
@@ -316,6 +438,19 @@ pub fn scan_for_map_with(
     on_update: &mut dyn FnMut(ScanUpdate),
     cancel: &CancelToken,
 ) -> Result<ScannedVolume, ScanError> {
+    normal_scan(volume, env, moment, figures, None, on_update, cancel)
+}
+
+/// The normal scan for the map, saying in every update why it runs instead of a fast scan, if it does.
+fn normal_scan(
+    volume: &Path,
+    env: &Env,
+    moment: &Moment,
+    figures: &dyn Fn(&Snapshot) -> Option<VolumeInfo>,
+    fallback: Option<FastFallback>,
+    on_update: &mut dyn FnMut(ScanUpdate),
+    cancel: &CancelToken,
+) -> Result<ScannedVolume, ScanError> {
     let mut next_preview = Duration::ZERO;
     let snapshot = scan(
         volume,
@@ -329,13 +464,233 @@ pub fn scan_for_map_with(
                     progress.elapsed + (started.elapsed() * 10).max(Duration::from_millis(700));
                 categories
             });
-            on_update(scan_update(progress, preview.flatten().as_ref()));
+            let mut update = scan_update(progress, preview.flatten().as_ref());
+            update.fallback = fallback;
+            on_update(update);
         },
         cancel,
     )?;
+    let how = HowScanned {
+        fallback,
+        ..HowScanned::default()
+    };
+    finish_map(snapshot, env, moment, volume, figures, how, cancel)
+}
+
+/// Scans a drive for the map with a fast scan where it can (Windows, NTFS): Windows asks the user for admin, and
+/// a small reader started with it reads the drive's file index (see [`crate::fast`] and ADR 0007). Where it can't,
+/// it runs the normal scan, saying why in every update and on the map: the prompt was declined or closed, the drive
+/// isn't NTFS (no prompt is shown then), the reader couldn't start, or the index couldn't be read.
+///
+/// `owner` is the app's window, which Windows' admin prompt belongs to. `figures` is as for
+/// [`scan_for_map_with`]. In fixture mode `volume` is the fixture folder: the reader reads its volume's index, and
+/// only the folder's part of it is kept.
+pub fn fast_scan_for_map(
+    volume: &Path,
+    env: &Env,
+    moment: &Moment,
+    figures: &dyn Fn(&Snapshot) -> Option<VolumeInfo>,
+    owner: Option<isize>,
+    on_update: &mut dyn FnMut(ScanUpdate),
+    cancel: &CancelToken,
+) -> Result<ScannedVolume, ScanError> {
+    let fallback = |reason: FastFallback, on_update: &mut dyn FnMut(ScanUpdate)| {
+        normal_scan(
+            volume,
+            env,
+            moment,
+            figures,
+            Some(reason),
+            on_update,
+            cancel,
+        )
+    };
+    let ntfs = cfg!(windows) && crate::volume::file_system_of(volume).eq_ignore_ascii_case("NTFS");
+    if !ntfs {
+        return fallback(FastFallback::NotNtfs, on_update);
+    }
+    let Some(expect) = fast_expect(volume) else {
+        return fallback(FastFallback::IndexUnreadable, on_update);
+    };
+    let Some(letter) = expect.root_letter else {
+        return fallback(FastFallback::NotNtfs, on_update);
+    };
+    let started = Instant::now();
+    let stage = |stage: FastStage, index: Option<IndexRead>, files: u64, folders: u64| ScanUpdate {
+        files,
+        folders,
+        bytes: 0,
+        unreadable: 0,
+        current_path: String::new(),
+        elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        categories: None,
+        method: ScanMethod::Fast,
+        fallback: None,
+        stage: Some(stage),
+        index,
+    };
+    on_update(stage(FastStage::Asking, None, 0, 0));
+    let mut next_preview = Duration::ZERO;
+    // Both stages report through the one callback.
+    let sink = std::cell::RefCell::new(&mut *on_update);
+    let read = crate::fast::read_index(letter, owner, cancel, |stream| {
+        crate::fast::snapshot_from_stream(
+            stream,
+            &expect.expect,
+            &ScanOptions::default(),
+            &mut |p| {
+                (sink.borrow_mut())(stage(
+                    FastStage::Reading,
+                    Some(IndexRead {
+                        done: p.records_done,
+                        total: p.records_total,
+                    }),
+                    p.files,
+                    p.folders,
+                ));
+            },
+            &mut |progress| {
+                let preview = (progress.elapsed >= next_preview).then(|| {
+                    let t = Instant::now();
+                    let categories = progress.preview(|partial| {
+                        categorize_until(partial, env, &|| cancel.is_cancelled())
+                    });
+                    next_preview =
+                        progress.elapsed + (t.elapsed() * 10).max(Duration::from_millis(700));
+                    categories
+                });
+                let mut update = scan_update(progress, preview.flatten().as_ref());
+                update.method = ScanMethod::Fast;
+                update.stage = Some(FastStage::Sorting);
+                update.elapsed_ms =
+                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                (sink.borrow_mut())(update);
+            },
+            cancel,
+        )
+    });
+    let snapshot = match read {
+        Err(crate::fast::Launch::Declined) => {
+            return fallback(FastFallback::Declined, on_update);
+        }
+        Err(crate::fast::Launch::Failed(why)) => {
+            if cancel.is_cancelled() {
+                return Err(ScanError::Cancelled);
+            }
+            eprintln!("fast scan: the reader didn't start: {why}");
+            return fallback(FastFallback::HelperFailed, on_update);
+        }
+        Ok(Err(crate::fast::FastError::Cancelled)) => return Err(ScanError::Cancelled),
+        Ok(Err(e)) => {
+            if cancel.is_cancelled() {
+                return Err(ScanError::Cancelled);
+            }
+            eprintln!("fast scan: {e}");
+            return fallback(FastFallback::IndexUnreadable, on_update);
+        }
+        Ok(Ok(snapshot)) => snapshot,
+    };
+    let fast = snapshot.fast().cloned().unwrap_or_default();
+    let how = HowScanned {
+        method: ScanMethod::Fast,
+        fallback: None,
+        locked: locked_groups(&snapshot, &fast.locked, env),
+        records_bytes: fast.records_bytes,
+    };
+    finish_map(snapshot, env, moment, volume, figures, how, cancel)
+}
+
+/// What a fast scan of `volume` is read against, from the app's own view of it.
+struct FastExpect {
+    expect: crate::fast::Expect,
+    root_letter: Option<char>,
+}
+
+fn fast_expect(volume: &Path) -> Option<FastExpect> {
+    let info = volume_info(volume).ok()?;
+    let id = crate::fsid::identity(volume)?;
+    let mount = Path::new(&info.mount_point);
+    let whole = same_path(mount, volume);
+    let letter = info
+        .mount_point
+        .chars()
+        .next()
+        .filter(|c| c.is_ascii_alphabetic() && info.mount_point.get(1..2) == Some(":"));
+    Some(FastExpect {
+        expect: crate::fast::Expect {
+            root: volume.to_path_buf(),
+            volume_serial: id.volume(),
+            subtree: (!whole).then_some(id.scan_key() as u64),
+            capacity: info.total_bytes,
+        },
+        root_letter: letter,
+    })
+}
+
+/// Whether two paths name the same place, ignoring case and a trailing separator (Windows).
+fn same_path(a: &Path, b: &Path) -> bool {
+    let norm = |p: &Path| {
+        p.display()
+            .to_string()
+            .trim_end_matches(['\\', '/'])
+            .to_lowercase()
+    };
+    norm(a) == norm(b)
+}
+
+/// Sorts a fast scan's locked folders by why they are locked: those in another account's home folder (under the
+/// folder that holds this account's home, but not in it), and the rest.
+fn locked_groups(
+    snapshot: &Snapshot,
+    locked: &[crate::snapshot::LockedFolder],
+    env: &Env,
+) -> Vec<LockedGroup> {
+    let profiles = env.home.parent();
+    let lower = |p: &Path| p.display().to_string().to_lowercase();
+    let home = format!("{}\\", lower(&env.home).trim_end_matches('\\'));
+    let mut groups: Vec<LockedGroup> = Vec::new();
+    for l in locked {
+        let path = lower(&snapshot.path(l.dir));
+        let others = profiles.is_some_and(|p| {
+            let p = format!("{}\\", lower(p).trim_end_matches('\\'));
+            path.starts_with(&p) && path.len() > p.len() && !format!("{path}\\").starts_with(&home)
+        });
+        let kind = if others {
+            LockedKind::OtherAccounts
+        } else {
+            LockedKind::WindowsOnly
+        };
+        match groups.iter_mut().find(|g| g.kind == kind) {
+            Some(g) => {
+                g.bytes = g.bytes.saturating_add(l.bytes);
+                g.files = g.files.saturating_add(l.files);
+                g.folders = g.folders.saturating_add(l.folders);
+            }
+            None => groups.push(LockedGroup {
+                kind,
+                bytes: l.bytes,
+                files: l.files,
+                folders: l.folders,
+            }),
+        }
+    }
+    groups.sort_by_key(|g| std::cmp::Reverse(g.bytes));
+    groups
+}
+
+/// Everything after the scan itself: categories, proposals, the overview against the drive's figures, Tidy up.
+pub(crate) fn finish_map(
+    snapshot: Snapshot,
+    env: &Env,
+    moment: &Moment,
+    volume: &Path,
+    figures: &dyn Fn(&Snapshot) -> Option<VolumeInfo>,
+    how: HowScanned,
+    cancel: &CancelToken,
+) -> Result<ScannedVolume, ScanError> {
     // Building the map takes a moment on a big drive; a cancel during it stops it and means no map.
     let (categories, proposals, overview) =
-        build_map_with(&snapshot, env, moment, volume, figures, &|| {
+        build_map_with(&snapshot, env, moment, volume, figures, &how, &|| {
             cancel.is_cancelled()
         })
         .ok_or(ScanError::Cancelled)?;
@@ -353,6 +708,7 @@ pub fn scan_for_map_with(
         proposals,
         tidy,
         overview,
+        how,
     })
 }
 
@@ -365,6 +721,7 @@ fn build_map_with(
     moment: &Moment,
     volume: &Path,
     figures: &dyn Fn(&Snapshot) -> Option<VolumeInfo>,
+    how: &HowScanned,
     stop: &dyn Fn() -> bool,
 ) -> Option<(Categories, Proposals, Overview)> {
     if stop() {
@@ -392,8 +749,9 @@ fn build_map_with(
         total_bytes: scanned,
         used_bytes: scanned,
         free_bytes: 0,
+        file_system: String::new(),
     });
-    let overview = overview_until(snapshot, &categories, &proposals, info, stop)?;
+    let overview = overview_until(snapshot, &categories, &proposals, info, how, stop)?;
     // A cancel that came during the last step still means no map.
     if stop() {
         return None;
@@ -401,41 +759,58 @@ fn build_map_with(
     Some((categories, proposals, overview))
 }
 
-/// The overview map of a finished scan. `volume` is the OS's view of the volume, read when the scan finished.
-/// `proposals` names the proposal tiles of categories carved with them (none for uncarved categories).
+/// The overview map of a finished normal scan. `volume` is the OS's view of the volume, read when the scan
+/// finished. `proposals` names the proposal tiles of categories carved with them (none for uncarved categories).
 pub fn overview(
     snapshot: &Snapshot,
     categories: &Categories,
     proposals: &Proposals,
     volume: VolumeInfo,
 ) -> Overview {
-    overview_until(snapshot, categories, proposals, volume, &|| false)
-        .expect("an overview that is never stopped finishes")
+    overview_until(
+        snapshot,
+        categories,
+        proposals,
+        volume,
+        &HowScanned::default(),
+        &|| false,
+    )
+    .expect("an overview that is never stopped finishes")
 }
 
-/// [`overview`], giving up (`None`) as soon as `stop` says so.
+/// [`overview`] for a scan read as `how` says, giving up (`None`) as soon as `stop` says so.
 fn overview_until(
     snapshot: &Snapshot,
     categories: &Categories,
     proposals: &Proposals,
     volume: VolumeInfo,
+    how: &HowScanned,
     stop: &dyn Fn() -> bool,
 ) -> Option<Overview> {
     let stats = snapshot.stats();
+    let fast = how.method == ScanMethod::Fast;
     let scanned = categories.list().iter().map(|c| c.bytes).sum::<u64>();
-    let hidden = volume.used_bytes.saturating_sub(scanned);
-    let over = scanned.saturating_sub(volume.used_bytes);
+    let locked = how.locked.iter().map(|g| g.bytes).sum::<u64>();
+    let counted = scanned
+        .saturating_add(locked)
+        .saturating_add(how.records_bytes);
+    let hidden = volume.used_bytes.saturating_sub(counted);
+    let over = counted.saturating_sub(volume.used_bytes);
     let mut unreadable: Vec<String> = Vec::new();
-    for dir in snapshot.dirs() {
-        if dir.index() % CHECK_EVERY == 0 && stop() {
-            return None;
-        }
-        if snapshot.flags(dir).contains(DirFlags::UNREADABLE) {
-            unreadable.push(snapshot.path(dir).display().to_string());
+    // A fast scan's unreadable folders are its locked ones, counted in their block: they are never named.
+    if !fast {
+        for dir in snapshot.dirs() {
+            if dir.index() % CHECK_EVERY == 0 && stop() {
+                return None;
+            }
+            if snapshot.flags(dir).contains(DirFlags::UNREADABLE) {
+                unreadable.push(snapshot.path(dir).display().to_string());
+            }
         }
     }
     unreadable.sort_by_key(|p| (Path::new(p).components().count(), p.clone()));
     unreadable.truncate(UNREADABLE_SAMPLES);
+    let unreadable_count = if fast { 0 } else { stats.unreadable };
     let mac = categories.platform() == Platform::MacOs;
     let tiles = proposals.tiles();
 
@@ -451,10 +826,22 @@ fn overview_until(
             stop,
         )?;
         let mut bytes = cat.bytes;
-        if cat.id == CategoryId::System && hidden > 0 {
-            items.push(hidden_item(hidden, stats.unreadable, &unreadable, mac));
+        if cat.id == CategoryId::System {
+            if how.records_bytes > 0 {
+                items.push(records_item(how.records_bytes));
+                bytes += how.records_bytes;
+            }
+            if hidden > 0 {
+                items.push(hidden_item(
+                    hidden,
+                    unreadable_count,
+                    &unreadable,
+                    mac,
+                    fast,
+                ));
+                bytes += hidden;
+            }
             items.sort_by_key(|i| std::cmp::Reverse(i.bytes));
-            bytes += hidden;
         }
         if bytes > 0 {
             list.push(MapCategory {
@@ -478,11 +865,15 @@ fn overview_until(
             scanned_bytes: scanned,
             hidden_bytes: hidden,
             over_count_bytes: over,
-            unreadable: stats.unreadable,
+            unreadable: unreadable_count,
             unreadable_samples: unreadable,
             links_skipped: stats.links_skipped,
             hard_links_merged: stats.hard_links_merged,
             duration_ms: u64::try_from(stats.elapsed.as_millis()).unwrap_or(u64::MAX),
+            method: how.method,
+            fallback: how.fallback,
+            locked: how.locked.clone(),
+            records_bytes: how.records_bytes,
         },
         categories: list,
     })
@@ -542,6 +933,10 @@ pub fn scan_update(progress: &ScanProgress<'_>, preview: Option<&Categories>) ->
                 })
                 .collect()
         }),
+        method: ScanMethod::Normal,
+        fallback: None,
+        stage: None,
+        index: None,
     }
 }
 
@@ -700,7 +1095,7 @@ fn map_item(
 /// The proposals a map is drawn with, and their tiles ([`Proposals::tiles`]).
 type Shown<'a> = (&'a Proposals, &'a [Tile<'a>]);
 
-fn hidden_item(bytes: u64, unreadable: u64, samples: &[String], mac: bool) -> MapItem {
+fn hidden_item(bytes: u64, unreadable: u64, samples: &[String], mac: bool, fast: bool) -> MapItem {
     let examples = samples
         .iter()
         .filter_map(|p| Path::new(p).file_name())
@@ -725,10 +1120,14 @@ fn hidden_item(bytes: u64, unreadable: u64, samples: &[String], mac: bool) -> Ma
             "macOS counts this as used, but Vacancy can't see it: {folders}swap, local Time Machine snapshots and \
              macOS's other system volumes."
         )
+    } else if fast {
+        "Windows counts this as used, but the drive's file index doesn't account for it: files that changed while \
+         it was read, and space Windows keeps outside any file."
+            .to_owned()
     } else {
         format!(
             "Windows counts this as used, but Vacancy can't see it: {folders}restore points and the file system's \
-             own records."
+             own records. A fast scan counts this space, as totals only."
         )
     };
     MapItem {
@@ -742,6 +1141,27 @@ fn hidden_item(bytes: u64, unreadable: u64, samples: &[String], mac: bool) -> Ma
         kind: ItemKind::Hidden,
         browsable: false,
         note: Some(note),
+        proposal: None,
+    }
+}
+
+/// NTFS's own records, as a fast scan counted them.
+fn records_item(bytes: u64) -> MapItem {
+    MapItem {
+        id: "records".to_owned(),
+        name: "File system records".to_owned(),
+        path: String::new(),
+        bytes,
+        files: 0,
+        count: 0,
+        last_used: None,
+        kind: ItemKind::Records,
+        browsable: false,
+        note: Some(
+            "The drive's own file index, its log, folder indexes and the other records NTFS keeps beside files. \
+             Fast scan reads them; Windows keeps them up to date."
+                .to_owned(),
+        ),
         proposal: None,
     }
 }
@@ -819,6 +1239,7 @@ mod tests {
             total_bytes: 1 << 40,
             used_bytes: snapshot.stats().bytes,
             free_bytes: (1 << 40) - snapshot.stats().bytes,
+            file_system: String::new(),
         };
         let checks = Cell::new(0);
         let none = Proposals::default();
@@ -827,6 +1248,7 @@ mod tests {
             &categories,
             &none,
             volume(),
+            &HowScanned::default(),
             &stopper(&checks, 0),
         )
         .expect("the overview");
@@ -845,6 +1267,7 @@ mod tests {
                     &categories,
                     &none,
                     volume(),
+                    &HowScanned::default(),
                     &stopper(&checks, at)
                 )
                 .is_none()
@@ -896,6 +1319,7 @@ mod tests {
             &categories,
             &proposals,
             volume(),
+            &HowScanned::default(),
             &stopper(&checks, 0),
         )
         .expect("the overview");
@@ -910,6 +1334,7 @@ mod tests {
             &moment,
             fx.path(),
             &|_| Some(volume()),
+            &HowScanned::default(),
             &stopper(&checks, 0),
         )
         .expect("the map");
@@ -922,6 +1347,7 @@ mod tests {
                 &moment,
                 fx.path(),
                 &|_| Some(volume()),
+                &HowScanned::default(),
                 &stopper(&checks, all)
             )
             .is_none(),
