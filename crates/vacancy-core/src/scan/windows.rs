@@ -18,7 +18,7 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_CANT_ACCESS_FILE, ERROR_DIRECTORY,
     ERROR_FILE_NOT_FOUND, ERROR_INVALID_LEVEL, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES,
     ERROR_NOT_SUPPORTED, ERROR_PATH_NOT_FOUND, ERROR_PRIVILEGE_NOT_HELD, ERROR_SHARING_VIOLATION,
-    GetLastError, HANDLE, INVALID_HANDLE_VALUE, UNICODE_STRING,
+    GetLastError, HANDLE, INVALID_HANDLE_VALUE, RtlNtStatusToDosError, UNICODE_STRING,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ATTRIBUTE_COMPRESSED, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_OFFLINE,
@@ -165,11 +165,25 @@ impl Default for Lister {
 }
 
 /// Closes a handle when dropped.
-struct Handle(HANDLE);
+#[derive(Debug)]
+pub(crate) struct Handle(HANDLE);
+
+// SAFETY: a kernel handle may be used and closed from any thread.
+unsafe impl Send for Handle {}
+// SAFETY: as above; the scanner only passes it to the OS, which serializes what needs it.
+unsafe impl Sync for Handle {}
+
+/// An open folder its subfolders are opened in.
+pub(crate) type Anchor = Handle;
+
+/// Whether the walk keeps each folder open for its subfolders to be opened in: yes on Windows (see [`open_in`]).
+pub(crate) fn opens_in_parent() -> bool {
+    true
+}
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        // SAFETY: the handle came from CreateFileW and is closed only here.
+        // SAFETY: the handle came from CreateFileW or NtOpenFile and is closed only here.
         unsafe { CloseHandle(self.0) };
     }
 }
@@ -180,28 +194,38 @@ impl Lister {
         &mut self.scratch.calls
     }
 
-    /// Lists the folder at `dir`. `expect` is the file id its parent's listing gave it: the folder opened must
-    /// have it, on the walk's volume, or it is not listed (`Changed`). That is what keeps a folder above it that
-    /// was swapped for a junction after being listed from redirecting the walk: the path would lead elsewhere,
-    /// and elsewhere has another id.
+    /// Lists the folder at `dir` and returns it, still open, for its subfolders to be opened in. With `parent`
+    /// (the folder its parent's listing came from, still open) it is opened by name inside that folder, so no
+    /// folder above it swapped for a junction after being listed can redirect the walk; without (a root), by path.
+    /// `expect` is the file id its parent's listing gave it: the folder opened must have it, on the walk's volume,
+    /// or it is not listed (`Changed`). That catches the folder itself being replaced (by a junction, which opens
+    /// as itself, or another folder) after its parent was listed.
     pub(crate) fn list(
         &mut self,
         dir: &Path,
+        parent: Option<&Anchor>,
         expect: Option<u128>,
         volume: &Volume,
         out: &mut Collector<'_>,
-    ) -> Result<(), ListError> {
+    ) -> Result<Anchor, ListError> {
         let timed = self.scratch.timed;
         let opening = clock(timed);
-        let handle = open_dir(dir, &mut self.path);
+        let handle = match (parent, dir.file_name()) {
+            (Some(parent), Some(name)) => open_in(parent, name, &mut self.path),
+            _ => open_dir(dir, &mut self.path),
+        };
         self.scratch.calls.opens += 1;
         lap(opening, &mut self.scratch.calls.open_ns);
         let handle = handle?;
-        let listed = self.list_open(&handle, dir, expect, volume, out);
-        let closing = clock(timed);
-        drop(handle);
-        lap(closing, &mut self.scratch.calls.close_ns);
-        listed
+        match self.list_open(&handle, dir, expect, volume, out) {
+            Ok(()) => Ok(handle),
+            Err(e) => {
+                let closing = clock(timed);
+                drop(handle);
+                lap(closing, &mut self.scratch.calls.close_ns);
+                Err(e)
+            }
+        }
     }
 
     /// [`Lister::list`], once the folder is open.
@@ -274,9 +298,57 @@ impl Lister {
     }
 }
 
-/// Opens a folder for listing. FILE_FLAG_OPEN_REPARSE_POINT never follows a link at the last step: if the folder
-/// itself was swapped for a junction, this opens the junction, which lists empty. Links further up the path are
-/// caught by the identity check in [`Lister::list`].
+/// Opens the folder `name` in the open folder `parent`: the same open as [`open_dir`] (`FILE_OPEN_REPARSE_POINT`,
+/// backup intent, every share mode), but by name relative to `parent`'s handle (`NtOpenFile` with `RootDirectory`),
+/// exactly as listed (case-sensitively). Only `parent` is consulted, so nothing above it is looked up again, and a
+/// folder above it renamed or replaced by a junction since it was listed can't send the open elsewhere.
+///
+/// It is also cheaper than opening by path: NTFS resolves one name instead of the whole path, which under many
+/// threads contends on every folder above. Warm, opens in `C:\Windows` took 131 us instead of 266 us each.
+fn open_in(parent: &Handle, name: &OsStr, buf: &mut Vec<u16>) -> Result<Handle, ListError> {
+    const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
+    const FILE_OPEN_FOR_BACKUP_INTENT: u32 = 0x0000_4000;
+    const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    buf.clear();
+    buf.extend(name.encode_wide());
+    let bytes = u16::try_from(buf.len() * 2).map_err(|_| ListError::Failed)?;
+    let object_name = UNICODE_STRING {
+        Length: bytes,
+        MaximumLength: bytes,
+        Buffer: buf.as_mut_ptr(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: parent.0,
+        ObjectName: &object_name,
+        Attributes: 0,
+        SecurityDescriptor: ptr::null(),
+        SecurityQualityOfService: ptr::null(),
+    };
+    // SAFETY: an all-zero IO_STATUS_BLOCK is valid.
+    let mut status_block: IO_STATUS_BLOCK = unsafe { mem::zeroed() };
+    let mut handle: HANDLE = ptr::null_mut();
+    // SAFETY: every pointer is valid for the call: `object_name` borrows `buf`, which outlives it, and `parent`
+    // is an open folder handle.
+    let status = unsafe {
+        NtOpenFile(
+            &mut handle,
+            FILE_LIST_DIRECTORY | SYNCHRONIZE,
+            &attributes,
+            &mut status_block,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT,
+        )
+    };
+    if status < 0 || handle.is_null() {
+        // SAFETY: a pure conversion of a status code.
+        return Err(list_error(unsafe { RtlNtStatusToDosError(status) }));
+    }
+    Ok(Handle(handle))
+}
+
+/// Opens a folder for listing, by path: the walk's roots. FILE_FLAG_OPEN_REPARSE_POINT never follows a link at the
+/// last step: if the folder itself was swapped for a junction, this opens the junction, which lists empty.
 fn open_dir(dir: &Path, buf: &mut Vec<u16>) -> Result<Handle, ListError> {
     verbatim(dir, buf);
     buf.push(0);
@@ -555,7 +627,11 @@ fn is_cloud(tag: u32) -> bool {
 /// Why a folder would not open.
 fn open_error() -> ListError {
     // SAFETY: reads this thread's last error.
-    let code = unsafe { GetLastError() };
+    list_error(unsafe { GetLastError() })
+}
+
+/// What a Win32 error from opening a folder means for the walk.
+fn list_error(code: u32) -> ListError {
     match code {
         ERROR_ACCESS_DENIED
         | ERROR_PRIVILEGE_NOT_HELD

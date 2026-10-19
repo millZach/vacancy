@@ -5,7 +5,8 @@
 //! - It never follows a link. Symlinks, junctions, mount points and every other reparse point that names somewhere
 //!   else are recorded and skipped, judged from the listing itself before descending. Folders are opened without
 //!   following links (`FILE_FLAG_OPEN_REPARSE_POINT`, `O_NOFOLLOW`), so a folder swapped for a link mid-scan is not
-//!   followed either.
+//!   followed either. On Windows each subfolder is opened by name inside its parent's open handle, so a folder above
+//!   it swapped for a link can't redirect the walk; on macOS it is opened by path and its identity checked.
 //! - It never crosses into another file system: on Windows only reparse points lead elsewhere; on macOS every
 //!   folder's device and mount point are compared with its root's, which also stops at firmlinks into the Data
 //!   volume (it has the same device number as the system volume).
@@ -156,6 +157,9 @@ pub(crate) struct Hooks<'h> {
     pub(crate) before_enter: Option<&'h (dyn Fn(&Path) + Sync)>,
     /// Just after a folder is opened and checked, before its entries are read.
     pub(crate) after_open: Option<&'h (dyn Fn(&Path) + Sync)>,
+    /// Where the scan reports, once it is over, how many folders it still held open for their subfolders (none,
+    /// or one leaked) and the most it held at once.
+    pub(crate) held: Option<&'h [AtomicU64; 2]>,
 }
 
 /// [`scan`], with [`Hooks`].
@@ -191,6 +195,7 @@ pub(crate) fn scan_inner(
         .map(|root| Task {
             dir: builder.add_root(root.real.clone(), root.shown, root.kind, root.volume.id()),
             path: root.real,
+            parent: None,
             expect: None,
             volume: root.volume,
         })
@@ -209,6 +214,8 @@ pub(crate) fn scan_inner(
         before_enter: hooks.before_enter,
         after_open: hooks.after_open,
         tracing: crate::trace::enabled(),
+        held: Arc::new(AtomicU64::new(0)),
+        held_peak: AtomicU64::new(0),
     };
 
     std::thread::scope(|scope| {
@@ -223,6 +230,10 @@ pub(crate) fn scan_inner(
             if crate::trace::enabled() {
                 crate::trace::took("scan.walk", walking);
                 crate::trace::note("scan.threads", threads);
+                crate::trace::note(
+                    "scan.held_open_peak",
+                    shared.held_peak.load(Ordering::Relaxed),
+                );
                 let mut calls = Calls::default();
                 for worker in
                     pool.broadcast(|_| WORKER.with_borrow_mut(|w| std::mem::take(w.lister.calls())))
@@ -263,6 +274,10 @@ pub(crate) fn scan_inner(
         }
     });
 
+    if let Some([now, peak]) = hooks.held {
+        now.store(shared.held.load(Ordering::SeqCst), Ordering::SeqCst);
+        peak.store(shared.held_peak.load(Ordering::SeqCst), Ordering::SeqCst);
+    }
     if cancel.is_cancelled() {
         return Err(ScanError::Cancelled);
     }
@@ -399,7 +414,9 @@ pub(crate) struct RootSpec {
 struct Task {
     dir: DirId,
     path: PathBuf,
-    /// The identity its parent's listing recorded; the folder opened at `path` must have it.
+    /// Its parent, still open, which it is opened in (roots are opened by path).
+    parent: Option<Arc<Held>>,
+    /// The identity its parent's listing recorded; the folder opened must have it.
     expect: Option<u128>,
     volume: platform::Volume,
 }
@@ -419,6 +436,23 @@ struct Shared<'a> {
     after_open: Option<&'a (dyn Fn(&Path) + Sync)>,
     /// Whether to time the walk for [`crate::trace`].
     tracing: bool,
+    /// Folders held open for their subfolders, now and at most.
+    held: Arc<AtomicU64>,
+    held_peak: AtomicU64,
+}
+
+/// A listed folder kept open for its subfolders to be opened in. Closed, and uncounted, when the last of them
+/// has been opened, or dropped unopened by a cancel.
+#[derive(Debug)]
+struct Held {
+    anchor: platform::Anchor,
+    count: Arc<AtomicU64>,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.count.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Why a folder could not be listed.
@@ -644,7 +678,7 @@ struct Worker {
 }
 
 /// Lists one folder, records it, and queues its subfolders.
-fn walk<'s>(s: &rayon::Scope<'s>, shared: &'s Shared<'s>, task: Task) {
+fn walk<'s>(s: &rayon::Scope<'s>, shared: &'s Shared<'s>, mut task: Task) {
     if shared.cancel.is_cancelled() {
         return;
     }
@@ -668,18 +702,30 @@ fn walk<'s>(s: &rayon::Scope<'s>, shared: &'s Shared<'s>, task: Task) {
             after_open: shared.after_open,
         };
         let listing = clock(shared.tracing);
-        let listed = w
-            .lister
-            .list(&task.path, task.expect, &task.volume, &mut collector);
+        let listed = w.lister.list(
+            &task.path,
+            task.parent.as_deref().map(|held| &held.anchor),
+            task.expect,
+            &task.volume,
+            &mut collector,
+        );
+        // The parent is closed once its last subfolder has been opened.
+        let closing = clock(shared.tracing);
+        drop(task.parent.take());
         let calls = w.lister.calls();
+        lap(closing, &mut calls.close_ns);
         calls.folders += 1;
         lap(listing, &mut calls.folder_ns);
-        let flag = match listed {
-            Ok(()) => None,
-            Err(ListError::Gone | ListError::Cancelled) => return Vec::new(),
-            Err(ListError::OtherVolume) => Some(DirFlags::OTHER_VOLUME),
-            Err(ListError::Changed) => Some(DirFlags::CHANGED),
-            Err(ListError::Denied | ListError::Failed) => Some(DirFlags::UNREADABLE),
+        let (flag, anchor) = match listed {
+            Ok(anchor) => (None, Some(anchor)),
+            Err(e) => (Some(e), None),
+        };
+        let flag = match flag {
+            None => None,
+            Some(ListError::Gone | ListError::Cancelled) => return Vec::new(),
+            Some(ListError::OtherVolume) => Some(DirFlags::OTHER_VOLUME),
+            Some(ListError::Changed) => Some(DirFlags::CHANGED),
+            Some(ListError::Denied | ListError::Failed) => Some(DirFlags::UNREADABLE),
         };
         if shared.cancel.is_cancelled() {
             return Vec::new();
@@ -710,6 +756,18 @@ fn walk<'s>(s: &rayon::Scope<'s>, shared: &'s Shared<'s>, task: Task) {
         shared
             .folders
             .fetch_add(w.listing.subdirs.len() as u64, Ordering::Relaxed);
+        let entered = w.listing.subdirs.iter().any(|sub| sub.flags.entered());
+        // Kept open for its subfolders to be opened in; closed now if there are none.
+        let anchor = anchor
+            .filter(|_| entered && platform::opens_in_parent())
+            .map(|anchor| {
+                let now = shared.held.fetch_add(1, Ordering::Relaxed) + 1;
+                shared.held_peak.fetch_max(now, Ordering::Relaxed);
+                Arc::new(Held {
+                    anchor,
+                    count: Arc::clone(&shared.held),
+                })
+            });
         w.listing
             .subdirs
             .iter()
@@ -718,6 +776,7 @@ fn walk<'s>(s: &rayon::Scope<'s>, shared: &'s Shared<'s>, task: Task) {
             .map(|(sub, id)| Task {
                 dir: DirId(id),
                 path: task.path.join(w.listing.dir_name(sub)),
+                parent: anchor.clone(),
                 expect: sub.identity,
                 volume: task.volume.clone(),
             })
@@ -819,13 +878,144 @@ mod tests {
         assert!(swapped.load(Ordering::SeqCst), "the hook ran");
         let total = snap.tree(snap.roots()[0].dir).bytes;
         assert!(total < MIB, "the outside tree is not counted: {total}");
-        assert_eq!(snap.stats().changed, 1);
         let inner = snap
             .dirs()
             .find(|&d| snap.name(d) == "inner")
             .expect("the queued folder is recorded");
-        assert!(snap.flags(inner).contains(DirFlags::CHANGED));
-        assert_eq!(snap.children(inner).len(), 0, "never listed");
+        if platform::opens_in_parent() {
+            // Opened inside the folder its parent listed (now `cache-moved`), never through the link.
+            assert_eq!(snap.stats().changed, 0);
+            assert!(!snap.flags(inner).contains(DirFlags::CHANGED));
+            assert_eq!(snap.own(inner).files, 1, "the folder that was listed");
+            assert!(snap.own(inner).bytes < MIB);
+        } else {
+            assert_eq!(snap.stats().changed, 1);
+            assert!(snap.flags(inner).contains(DirFlags::CHANGED));
+            assert_eq!(snap.children(inner).len(), 0, "never listed");
+        }
+    }
+
+    /// A folder is listed, then (before it is opened) swapped itself for a link to a tree outside the scan. The
+    /// link is never followed: on Windows it opens as itself and has another identity (changed); on macOS
+    /// `O_NOFOLLOW` refuses it (gone). Either way the outside tree is not counted.
+    #[test]
+    fn never_follows_a_folder_that_became_a_link_before_it_was_opened() {
+        let fx = tempfile::tempdir().unwrap();
+        let root = fx.path().join("scanned");
+        let outside = fx.path().join("outside");
+        write(
+            &root.join("cache").join("inner").join("blob.bin"),
+            64 * 1024,
+        );
+        write(&outside.join("secret.bin"), 4 * MIB as usize);
+        let swapped = AtomicBool::new(false);
+        let hook = |path: &Path| {
+            if path.ends_with(Path::new("cache").join("inner"))
+                && !swapped.swap(true, Ordering::SeqCst)
+            {
+                let inner = root.join("cache").join("inner");
+                fs::rename(&inner, root.join("cache").join("inner-moved"))
+                    .expect("move the listed folder");
+                link_dir(&inner, &outside);
+                assert!(
+                    inner.join("secret.bin").exists(),
+                    "the queued folder now leads outside the scan"
+                );
+            }
+        };
+
+        let snap = scan_inner(
+            &root,
+            &ScanOptions::default(),
+            &mut |_| {},
+            &CancelToken::new(),
+            &Hooks {
+                before_enter: Some(&hook),
+                ..Hooks::default()
+            },
+        )
+        .expect("scan");
+
+        assert!(swapped.load(Ordering::SeqCst), "the hook ran");
+        let total = snap.tree(snap.roots()[0].dir).bytes;
+        assert!(total < MIB, "the outside tree is not counted: {total}");
+        let inner = snap
+            .dirs()
+            .find(|&d| snap.name(d) == "inner")
+            .expect("the queued folder is recorded");
+        assert_eq!(snap.own(inner).files, 0, "never listed");
+        #[cfg(windows)]
+        {
+            assert_eq!(snap.stats().changed, 1);
+            assert!(snap.flags(inner).contains(DirFlags::CHANGED));
+        }
+    }
+
+    /// Every folder that has subfolders is held open until they are opened in it, and closed after: a scan of a
+    /// tree leaves nothing open, and a scan that is cancelled part way closes what it held too.
+    #[cfg(windows)]
+    #[test]
+    fn folders_held_open_for_their_subfolders_are_closed() {
+        let fx = tempfile::tempdir().unwrap();
+        for a in 0..20 {
+            for b in 0..20 {
+                fs::create_dir_all(
+                    fx.path()
+                        .join(format!("a{a}"))
+                        .join(format!("b{b}"))
+                        .join("c"),
+                )
+                .unwrap();
+            }
+        }
+        let options = ScanOptions {
+            threads: NonZeroUsize::new(4),
+            ..ScanOptions::default()
+        };
+        let held = [AtomicU64::new(u64::MAX), AtomicU64::new(0)];
+        let snap = scan_inner(
+            fx.path(),
+            &options,
+            &mut |_| {},
+            &CancelToken::new(),
+            &Hooks {
+                held: Some(&held),
+                ..Hooks::default()
+            },
+        )
+        .expect("scan");
+        assert_eq!(snap.stats().folders, 1 + 20 + 400 + 400);
+        assert_eq!(held[0].load(Ordering::SeqCst), 0, "nothing left open");
+        let peak = held[1].load(Ordering::SeqCst);
+        assert!(peak >= 1, "folders were held open for their subfolders");
+        assert!(peak <= 421, "at most every folder with subfolders: {peak}");
+
+        let cancel = CancelToken::new();
+        let seen = AtomicU64::new(0);
+        let stop = |_: &Path| {
+            if seen.fetch_add(1, Ordering::SeqCst) == 100 {
+                cancel.cancel();
+            }
+        };
+        let held = [AtomicU64::new(u64::MAX), AtomicU64::new(0)];
+        let result = scan_inner(
+            fx.path(),
+            &options,
+            &mut |_| {},
+            &cancel,
+            &Hooks {
+                before_enter: Some(&stop),
+                held: Some(&held),
+                ..Hooks::default()
+            },
+        );
+        assert!(matches!(result, Err(ScanError::Cancelled)));
+        assert_eq!(
+            held[0].load(Ordering::SeqCst),
+            0,
+            "a cancelled scan closes what it held"
+        );
+        assert!(held[1].load(Ordering::SeqCst) >= 1);
     }
 
     /// A file compressed by the Windows Overlay Filter lists as empty, so its size is asked again by handle. If its
@@ -931,7 +1121,7 @@ mod tests {
         };
         assert!(
             lister
-                .list(fx.path(), None, &roots[0].volume, &mut collector)
+                .list(fx.path(), None, None, &roots[0].volume, &mut collector)
                 .is_ok()
         );
         assert_eq!(listing.own_files, 3000);
@@ -946,7 +1136,7 @@ mod tests {
             cancel: &cancel,
             after_open: None,
         };
-        let result = lister.list(fx.path(), None, &roots[0].volume, &mut collector);
+        let result = lister.list(fx.path(), None, None, &roots[0].volume, &mut collector);
         assert!(matches!(result, Err(ListError::Cancelled)), "{result:?}");
         assert!(
             listing.own_files < 3000,

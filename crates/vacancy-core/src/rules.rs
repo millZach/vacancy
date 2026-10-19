@@ -261,8 +261,10 @@ pub(crate) fn propose_until(
     moment: &Moment,
     stop: &dyn Fn() -> bool,
 ) -> Option<Proposals> {
+    let step = std::time::Instant::now();
     let guard = Guard::new(env, &env.root);
     let guarded = Guarded::new(snapshot, categories, guard, stop)?;
+    crate::trace::took("propose.guarded", step);
     let k = &env.known;
     let mut personal: Vec<&Path> = vec![
         &env.root,
@@ -286,7 +288,9 @@ pub(crate) fn propose_until(
         .map(|k| (k, false))
         .collect();
     personal.extend(PathKey::of(&k.downloads).map(|k| (k, true)));
+    let step = std::time::Instant::now();
     let keep = kept_data(snapshot, stop)?;
+    crate::trace::took("propose.kept_data", step);
     let mut engine = Engine {
         snap: snapshot,
         keep,
@@ -310,7 +314,19 @@ pub(crate) fn propose_until(
     // Each proposal travels with its targets and kind as one entry, so sorting can't separate them.
     let mut entries: Vec<(Proposal, Vec<ItemRef>, ActionKind, bool)> = Vec::new();
     for rule in catalog::rules(env) {
+        let step = std::time::Instant::now();
+        let checked = engine.guarded.checked.get();
         let found = engine.run(&rule)?;
+        if crate::trace::enabled() {
+            crate::trace::note(
+                &format!("propose.rule.{}", rule.id),
+                format_args!(
+                    "{:.1} ms, {} Guard checks",
+                    crate::trace::ms(step),
+                    engine.guarded.checked.get() - checked
+                ),
+            );
+        }
         if found.bytes == 0 {
             continue;
         }
@@ -364,6 +380,8 @@ pub(crate) struct Guarded<'a> {
     holds_app: Vec<bool>,
     /// Walks candidates' chains for the Guard, keeping the folders they are in open for their siblings.
     walker: RefCell<fsid::Walker>,
+    /// For [`crate::trace`]: how many paths were put to the Guard.
+    pub(crate) checked: std::cell::Cell<u64>,
 }
 
 impl<'a> Guarded<'a> {
@@ -417,6 +435,7 @@ impl<'a> Guarded<'a> {
             holds,
             holds_app,
             walker: RefCell::new(fsid::Walker::default()),
+            checked: std::cell::Cell::new(0),
         })
     }
 
@@ -425,6 +444,7 @@ impl<'a> Guarded<'a> {
     /// listed. One found with another identity (a volume mounted over it, another folder put in its place) is not
     /// what the scan measured, and is dropped.
     fn passes(&self, path: &Path, contents: bool, scanned: DirId, from_end: usize) -> bool {
+        self.checked.set(self.checked.get() + 1);
         let Ok(chain) = self
             .guard
             .check_with(&mut self.walker.borrow_mut(), path, contents)

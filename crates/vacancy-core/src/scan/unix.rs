@@ -135,6 +135,15 @@ impl Drop for Dir {
     }
 }
 
+/// What a walk keeps of a listed folder for its subfolders: nothing on Unix, where folders are opened by path.
+#[derive(Debug)]
+pub(crate) struct Anchor;
+
+/// Whether subfolders are opened relative to their parent: not on Unix.
+pub(crate) fn opens_in_parent() -> bool {
+    false
+}
+
 /// A scan worker's state. Nothing to reuse on Unix beyond the path buffer.
 #[derive(Default)]
 pub(crate) struct Lister {
@@ -153,7 +162,20 @@ impl Lister {
     /// opened must have them, or it is not listed (`Changed`). That is what keeps a folder above it that was
     /// swapped for a symlink after being listed from redirecting the walk: the path would lead elsewhere, and
     /// elsewhere is another inode.
+    ///
+    /// Folders are opened by path here: `parent` is not used.
     pub(crate) fn list(
+        &mut self,
+        dir: &Path,
+        _parent: Option<&Anchor>,
+        expect: Option<u128>,
+        volume: &Volume,
+        out: &mut Collector<'_>,
+    ) -> Result<Anchor, ListError> {
+        self.list_path(dir, expect, volume, out).map(|()| Anchor)
+    }
+
+    fn list_path(
         &mut self,
         dir: &Path,
         expect: Option<u128>,
@@ -362,7 +384,9 @@ mod tests {
             cancel: &cancel,
             after_open: None,
         };
-        Lister::default().list(Path::new(dir), None, volume, &mut collector)
+        Lister::default()
+            .list(Path::new(dir), None, None, volume, &mut collector)
+            .map(|_| ())
     }
 
     /// The firmlinks from the system volume lead into the Data volume, which has the same device number: the walk
