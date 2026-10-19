@@ -223,7 +223,7 @@ export function mockDuplicates(platform: Platform, overview: Overview, home: str
     title: 'Duplicate files',
     summary: `${countLine(extras.map((x) => x.kind))} have an exact copy elsewhere, in ${groups.length} groups. Vacancy keeps one copy of each.`,
     why:
-      `Byte-for-byte copies of files of 1 MB or more in ${folders.slice(0, -1).join(', ')} and ${folders.at(-1)}. Vacancy keeps one copy of each group: the ` +
+      `Byte-for-byte copies of files of 1 MB or more, in length and on disk, in ${folders.slice(0, -1).join(', ')} and ${folders.at(-1)}. Vacancy keeps one copy of each group: the ` +
       'tidiest (one outside Downloads that isn’t named like a copy: “copy”, “- Copy”, “(1)”), and the oldest among those. Before each extra copy goes, it ' +
       'checks the kept copy is still there and unchanged, and holds it while the copy is deleted. Untick a group to keep every copy of it. Copies in ' +
       'cloud-sync folders and in a Photos library are left alone, and so are files that aren’t all on this disk. The space is what the extra copies take ' +
