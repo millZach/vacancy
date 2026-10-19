@@ -16,7 +16,7 @@ Only `vacancy-index-reader.exe`, a small program bundled beside the app. It:
 - never creates, writes, moves or deletes a file, never writes to the volume, and talks to nothing but the pipe;
 - exits after 30 minutes whatever happens, and as soon as the pipe breaks.
 
-It loads its DLLs from System32 only: linked with `/DEPENDENTLOADFLAG:0x800` (`LOAD_LIBRARY_SEARCH_SYSTEM32`) and calling `SetDefaultDllDirectories` first. Its folder may be writable by the user (the per-user install), so a DLL dropped beside it must never load. It carries a version resource ("Vacancy scan helper"), so Windows' prompt names it. It is unsigned for now (Zach, 2026-10-18): the prompt says "Unknown publisher".
+It loads its DLLs from System32 only: linked with `/DEPENDENTLOADFLAG:0x800` (`LOAD_LIBRARY_SEARCH_SYSTEM32`), calling `SetDefaultDllDirectories` first, and built with the C runtime linked in (`+crt-static`), so it imports only Windows' own DLLs (kernel32, advapi32, ntdll, bcryptprimitives and the API sets), never `VCRUNTIME140.dll`. Its folder may be writable by the user (the per-user install), so a DLL dropped beside it must never load. It carries a version resource ("Vacancy scan helper"), so Windows' prompt names it. It is unsigned for now (Zach, 2026-10-18): the prompt says "Unknown publisher".
 
 Deleting stays in the app, unelevated, exactly as before: the planner, the Guard and the executor never see admin.
 

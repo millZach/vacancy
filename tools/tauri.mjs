@@ -5,7 +5,9 @@
 //   app (vacancy-index-reader-<target triple>.exe), and passes src-tauri/tauri.reader.conf.json so the installers
 //   carry it. The reader's SHA-256 goes to the app's build as VACANCY_READER_SHA256: the app only starts the reader
 //   it came with (see ADR 0007).
-// - `dev`: builds the reader in debug beside the dev app (target/debug), where a debug app looks for it.
+// - `dev`: builds the reader in debug and copies it beside the dev app (target/debug), where a debug app looks for it.
+// The reader is built with the C runtime linked in (its own target folder, target/reader), so it imports only
+// Windows' own DLLs.
 // - Anything else, and every command on macOS (which has no fast scan), goes straight to the CLI.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -39,8 +41,11 @@ const extra = [];
 if (windows && command === 'build') {
   const target = triple();
   const explicit = args.includes('--target');
-  run('cargo', ['build', '--release', '--locked', '-p', 'vacancy-index', '--bin', 'vacancy-index-reader', ...(explicit ? ['--target', target] : [])]);
-  const built = join(root, 'target', ...(explicit ? [target] : []), 'release', 'vacancy-index-reader.exe');
+  // The C runtime linked in: the reader imports only Windows' own DLLs, which load from System32 alone, so no DLL
+  // beside it (in a folder the user can write to) is ever loaded. Its own target folder keeps the app's build cache.
+  const readerEnv = { ...process.env, RUSTFLAGS: '-C target-feature=+crt-static', CARGO_TARGET_DIR: join(root, 'target', 'reader') };
+  run('cargo', ['build', '--release', '--locked', '-p', 'vacancy-index', '--bin', 'vacancy-index-reader', ...(explicit ? ['--target', target] : [])], readerEnv);
+  const built = join(root, 'target', 'reader', ...(explicit ? [target] : []), 'release', 'vacancy-index-reader.exe');
   const bundled = join(root, 'src-tauri', 'binaries', `vacancy-index-reader-${target}.exe`);
   mkdirSync(dirname(bundled), { recursive: true });
   copyFileSync(built, bundled);
@@ -48,7 +53,17 @@ if (windows && command === 'build') {
   console.log(`tauri.mjs: bundling ${bundled} (sha256 ${env.VACANCY_READER_SHA256})`);
   extra.push('--config', join('src-tauri', 'tauri.reader.conf.json'));
 } else if (windows && command === 'dev') {
-  run('cargo', ['build', '-p', 'vacancy-index', '--bin', 'vacancy-index-reader']);
+  // Beside the dev app, where a debug app looks for it (the C runtime linked in, as in a release).
+  run('cargo', ['build', '-p', 'vacancy-index', '--bin', 'vacancy-index-reader'], {
+    ...process.env,
+    RUSTFLAGS: '-C target-feature=+crt-static',
+    CARGO_TARGET_DIR: join(root, 'target', 'reader'),
+  });
+  mkdirSync(join(root, 'target', 'debug'), { recursive: true });
+  copyFileSync(
+    join(root, 'target', 'reader', 'debug', 'vacancy-index-reader.exe'),
+    join(root, 'target', 'debug', 'vacancy-index-reader.exe'),
+  );
 }
 
 const cli = join(root, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
