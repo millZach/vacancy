@@ -3856,6 +3856,16 @@ dependencies = [
  "thiserror 2.0.21",
  "ts-rs",
  "unicode-normalization",
+ "vacancy-index",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "vacancy-index"
+version = "0.1.0"
+dependencies = [
+ "embed-resource",
+ "flate2",
  "windows-sys 0.61.2",
 ]
 

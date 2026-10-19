@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/vacancy-core", "src-tauri"]
+members = ["crates/vacancy-core", "crates/vacancy-index", "src-tauri"]
 resolver = "3"
 
 [workspace.package]
@@ -11,6 +11,7 @@ publish = false
 
 [workspace.dependencies]
 vacancy-core = { path = "crates/vacancy-core" }
+vacancy-index = { path = "crates/vacancy-index" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 ts-rs = "12"

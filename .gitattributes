@@ -2,3 +2,6 @@
 *.sh text eol=lf
 # ts-rs writes LF on every OS; keep the checked-in copy LF so the CI staleness check compares like with like.
 src/bindings/** text eol=lf
+# Fast scan's NTFS test image (gzipped) and what a listing of it shows; the script that makes them runs in Linux.
+crates/vacancy-index/tests/fixtures/*.gz binary
+crates/vacancy-index/tests/fixtures/*.tsv text eol=lf
