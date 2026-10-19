@@ -8,6 +8,8 @@ dist/
 target/
 src-tauri/target/
 src-tauri/gen/schemas/
+# Fast scan's reader, copied here by tools/tauri.mjs for bundling
+src-tauri/binaries/
 
 # Prototypes and test output
 prototypes/**/node_modules/

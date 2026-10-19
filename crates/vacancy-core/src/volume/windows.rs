@@ -105,6 +105,14 @@ pub(super) fn volume_info(path: &Path) -> Result<VolumeInfo, VolumeError> {
     Ok(rules::describe(&drive))
 }
 
+pub(super) fn file_system_of(path: &Path) -> String {
+    let _quiet = QuietErrors::new();
+    let Ok(root) = volume_root(path) else {
+        return String::new();
+    };
+    label_and_file_system(&to_wide(OsStr::new(&root))).2
+}
+
 pub(super) fn system_volume() -> Result<VolumeInfo, VolumeError> {
     let windows_dir = system_dir().map_err(|source| VolumeError::Io {
         path: "%SystemRoot%".into(),

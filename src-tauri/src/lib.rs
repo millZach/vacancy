@@ -483,9 +483,13 @@ async fn open_guide(guide: vacancy_core::hints::GuideId, app: AppHandle) -> Resu
 /// Scans a volume, read-only, streaming the HUD's numbers to `on_update`, and returns the overview map with the
 /// cleanups proposed for it (or "cancelled"). The map and the proposals' targets are kept as this drive's, beside
 /// other drives'. A scan already running, on any drive, is cancelled first.
+///
+/// `fast` (Windows): a fast scan, reading the drive's file index with admin (Windows asks the user each time), or
+/// the normal scan with the reason in every update when it can't. Ignored elsewhere: macOS has no fast scan.
 #[tauri::command]
 async fn scan_volume(
     mount_point: String,
+    fast: Option<bool>,
     on_update: Channel<ScanUpdate>,
     app: AppHandle,
     session: State<'_, Session>,
@@ -501,21 +505,24 @@ async fn scan_volume(
     };
     let root = PathBuf::from(&mount_point);
     let drive = mount_point.clone();
+    let fast = fast == Some(true) && cfg!(windows);
+    let owner = owner_window(&app);
     let scanned = tauri::async_runtime::spawn_blocking(move || {
         // Which apps run is read as the scan starts; the executor skips anything busy when the plan runs.
         let moment = Moment::detect();
         let mode = &app.state::<Session>().mode;
-        vacancy_core::scan_for_map_with(
-            &root,
-            &env,
-            &moment,
-            &|snap| mode.figures(&drive, Some(snap)),
-            &mut |update| {
-                // The UI may have gone away mid-scan; the scan finishes either way.
-                let _ = on_update.send(update);
-            },
-            &token,
-        )
+        let figures = |snap: &Snapshot| mode.figures(&drive, Some(snap));
+        // The UI may have gone away mid-scan; the scan finishes either way.
+        let mut send = |update| {
+            let _ = on_update.send(update);
+        };
+        if fast {
+            vacancy_core::fast_scan_for_map(
+                &root, &env, &moment, &figures, owner, &mut send, &token,
+            )
+        } else {
+            vacancy_core::scan_for_map_with(&root, &env, &moment, &figures, &mut send, &token)
+        }
     })
     .await;
     match scanned {
@@ -554,6 +561,18 @@ async fn scan_volume(
             Err(e.to_string())
         }
     }
+}
+
+/// The app's window, which Windows' admin prompt for a fast scan belongs to.
+#[cfg(windows)]
+fn owner_window(app: &AppHandle) -> Option<isize> {
+    let window = app.get_webview_window("main")?;
+    window.hwnd().ok().map(|h| h.0 as isize)
+}
+
+#[cfg(not(windows))]
+fn owner_window(_app: &AppHandle) -> Option<isize> {
+    None
 }
 
 /// [`Mode::env_for`], on a blocking thread: a drive slow to answer must not hold up the async workers.
@@ -951,6 +970,7 @@ mod tests {
             total_bytes: 1000,
             used_bytes: 500,
             free_bytes: 500,
+            file_system: String::new(),
         }
     }
 

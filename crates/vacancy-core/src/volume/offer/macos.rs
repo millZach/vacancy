@@ -102,6 +102,7 @@ pub(crate) fn describe(m: &MacMount) -> VolumeInfo {
         total_bytes: m.total_bytes,
         used_bytes: m.total_bytes - free,
         free_bytes: free,
+        file_system: m.file_system.clone(),
     }
 }
 

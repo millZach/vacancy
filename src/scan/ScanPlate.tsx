@@ -1,10 +1,11 @@
-import { Check, Map as MapIcon, ScanLine, ShieldAlert } from 'lucide-react';
+import { Check, Hourglass, Map as MapIcon, ScanLine, ShieldAlert, Zap } from 'lucide-react';
 import { useId, useRef, type KeyboardEvent, type ReactNode, type Ref } from 'react';
 import { DriveIcon, DriveStatus, DriveTags, UsageBar } from '../drives/bits';
 import type { DriveItem, ReadyDrives } from '../drives/context';
 import { reclaimableOf } from '../drives/session';
 import { useNow } from '../drives/useNow';
 import { formatBytes } from '../format';
+import { fastFine } from './fast';
 import './scan.css';
 
 interface Props {
@@ -14,7 +15,12 @@ interface Props {
   advisorNote: ReactNode;
   /** Why the last scan of this drive failed, if it did. */
   failure: string | null;
-  onScan: (button: HTMLButtonElement) => void;
+  /** Offer a fast scan beside the normal one (Windows). */
+  offerFast: boolean;
+  /** A fast scan was asked for and Windows' admin prompt is up: nothing is scanning yet, and the buttons wait. */
+  asking: boolean;
+  /** Starts a scan from a button: the normal one, or a fast one. */
+  onScan: (button: HTMLButtonElement, options?: { fast: boolean }) => void;
   /** The plate's content, which the dot field keeps calm around. */
   contentRef: Ref<HTMLDivElement>;
 }
@@ -22,10 +28,20 @@ interface Props {
 /**
  * Before a scan: the plate floating on the dot field. With several drives it asks which one to scan, with a card per
  * drive, the drive on screen lit; with one, it is that drive's plate. It starts the scan, or for a drive scanned
- * already, goes back to its map or scans again. On a Mac without Full Disk Access it says what will be missing and
- * opens the setting.
+ * already, goes back to its map or scans again. On Windows a second button asks for a fast scan, with one line under
+ * both saying what admin is used for; while Windows' admin prompt is up the plate stays, its buttons waiting. On a
+ * Mac without Full Disk Access it says what will be missing and opens the setting.
  */
-export function ScanPlate({ drives, onOpenFullDiskAccess, advisorNote, failure, onScan, contentRef }: Props) {
+export function ScanPlate({
+  drives,
+  onOpenFullDiskAccess,
+  advisorNote,
+  failure,
+  offerFast,
+  asking,
+  onScan,
+  contentRef,
+}: Props) {
   const { list, current, machineName } = drives;
   const v = current.volume;
   const several = list.length > 1;
@@ -49,7 +65,13 @@ export function ScanPlate({ drives, onOpenFullDiskAccess, advisorNote, failure, 
             </p>
           </>
         )}
-        <PlateActions drive={current} onScan={onScan} onOpenMap={drives.openMap} />
+        <PlateActions drive={current} offerFast={offerFast} asking={asking} onScan={onScan} onOpenMap={drives.openMap} />
+        {offerFast && <p className="fast-fine">{fastFine(v)}</p>}
+        {asking && (
+          <p className="plate-wait" role="status">
+            <Hourglass size={13} aria-hidden /> Waiting for Windows’ admin prompt…
+          </p>
+        )}
         {failure !== null && (
           <p className="plate-cap plate-error" role="alert">
             The scan stopped: {failure}
@@ -132,30 +154,54 @@ function DriveCards({ drives }: { drives: ReadyDrives }) {
   );
 }
 
-/** Scan the drive; or, for a drive scanned already, go back to its map without scanning again, or scan again. */
+/**
+ * Scan the drive; or, for a drive scanned already, go back to its map without scanning again, or scan again. On
+ * Windows, or ask for a fast scan: each one asks Windows for admin again.
+ */
 function PlateActions({
   drive,
+  offerFast,
+  asking,
   onScan,
   onOpenMap,
 }: {
   drive: DriveItem;
-  onScan: (button: HTMLButtonElement) => void;
+  offerFast: boolean;
+  asking: boolean;
+  onScan: (button: HTMLButtonElement, options?: { fast: boolean }) => void;
   onOpenMap: () => void;
 }) {
-  if (drive.scan.phase !== 'done')
-    return (
-      <button type="button" className="cta cta--lg" onClick={(e) => onScan(e.currentTarget)}>
-        <ScanLine size={16} aria-hidden /> Scan {drive.volume.name}
-      </button>
-    );
+  const done = drive.scan.phase === 'done';
+  const scan = (
+    <button type="button" className="cta cta--lg" disabled={asking} onClick={(e) => onScan(e.currentTarget)}>
+      <ScanLine size={16} aria-hidden /> Scan {drive.volume.name}
+    </button>
+  );
+  if (!done && !offerFast) return scan;
   return (
     <div className="plate-actions">
-      <button type="button" className="cta cta--lg" onClick={onOpenMap}>
-        <MapIcon size={16} aria-hidden /> Open its map
-      </button>
-      <button type="button" className="btn btn--lg" onClick={(e) => onScan(e.currentTarget)}>
-        <ScanLine size={14} aria-hidden /> Scan again
-      </button>
+      {done ? (
+        <>
+          <button type="button" className="cta cta--lg" onClick={onOpenMap}>
+            <MapIcon size={16} aria-hidden /> Open its map
+          </button>
+          <button type="button" className="btn btn--lg" onClick={(e) => onScan(e.currentTarget)}>
+            <ScanLine size={14} aria-hidden /> Scan again
+          </button>
+        </>
+      ) : (
+        scan
+      )}
+      {offerFast && (
+        <button
+          type="button"
+          className="btn btn--lg fast-btn"
+          disabled={asking}
+          onClick={(e) => onScan(e.currentTarget, { fast: true })}
+        >
+          <Zap size={14} aria-hidden /> Fast scan <span className="fast-btn-ask">(asks for admin)</span>
+        </button>
+      )}
     </div>
   );
 }

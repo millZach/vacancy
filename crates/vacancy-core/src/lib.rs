@@ -8,6 +8,7 @@ pub mod advisor;
 mod categorize;
 pub mod duplicates;
 mod exec;
+pub mod fast;
 pub mod fixture;
 mod fsid;
 mod guard;
@@ -47,9 +48,10 @@ pub use exec::{
 pub use guard::{Denied, Guard};
 pub use machine::machine_name;
 pub use map::{
-    CategoryTotal, ItemKind, MapCategory, MapError, MapFolder, MapItem, Overview, ScanOutcome,
-    ScanSummary, ScanUpdate, ScannedVolume, browse, overview, scan_for_map, scan_for_map_with,
-    scan_update,
+    CategoryTotal, FastFallback, FastStage, HowScanned, IndexRead, ItemKind, LockedGroup,
+    LockedKind, MapCategory, MapError, MapFolder, MapItem, Overview, ScanMethod, ScanOutcome,
+    ScanSummary, ScanUpdate, ScannedVolume, browse, fast_scan_for_map, overview, scan_for_map,
+    scan_for_map_with, scan_update,
 };
 pub use plan::{
     Plan, PlanError, PlanStep, PlanSummary, PlannedDuplicates, PlannedTile, plan, plan_with,
@@ -66,4 +68,6 @@ pub use snapshot::{
     DirFlags, DirId, FileId, FileInfo, Markers, Root, RootKind, ScanStats, Snapshot, Totals,
     UnixTime,
 };
-pub use volume::{DriveKind, VolumeError, VolumeInfo, list_volumes, system_volume, volume_info};
+pub use volume::{
+    DriveKind, VolumeError, VolumeInfo, file_system_of, list_volumes, system_volume, volume_info,
+};

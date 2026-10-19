@@ -90,7 +90,8 @@ jobs:
       - name: Build the Windows installers
         if: runner.os == 'Windows'
         run: |
-          npx tauri build --bundles "$WINDOWS_BUNDLES" -- --locked
+          # Through tools/tauri.mjs, which builds fast scan's reader, bundles it and pins its hash.
+          npm run tauri -- build --bundles "$WINDOWS_BUNDLES" -- --locked
           mkdir -p out
           cp target/release/bundle/nsis/*-setup.exe "out/Vacancy-$VERSION-windows-x64-setup.exe"
           if compgen -G 'target/release/bundle/msi/*.msi' > /dev/null; then

@@ -8,14 +8,20 @@ import type {
   CategoryId,
   CategoryTotal,
   ItemKind,
+  LockedGroup,
+  LockedKind,
   MapFolder,
   MapItem,
   Overview,
   VolumeInfo,
 } from '../bridge';
+import { formatCount } from '../format';
 
-/** What a tile is: a scanned item, the free space, or (while scanning) a category's bytes so far. */
-export type LeafKind = ItemKind | 'free' | 'scanned';
+/**
+ * What a tile is: a scanned item, the free space, (while scanning) a category's bytes so far, or (after a fast scan)
+ * the total of folders this account can't open.
+ */
+export type LeafKind = ItemKind | 'free' | 'scanned' | 'locked';
 
 export interface Leaf {
   id: string;
@@ -77,6 +83,8 @@ export interface Rect {
 export const HEADER = 24;
 export const FREE_ID = 'free';
 export const PENDING_ID = 'pending';
+/** The Locked folders block of a fast scan's map. */
+export const LOCKED_ID = 'locked';
 export const regionKey = (regionId: string) => `r:${regionId}`;
 
 function leaf(item: MapItem, regionId: string): Leaf {
@@ -169,14 +177,79 @@ function soleLeaf(id: string, regionId: string, kind: 'free' | 'scanned', name: 
   };
 }
 
-/** The overview: one region per category, biggest first, then free space. */
+/**
+ * The overview: one region per category, biggest first, then (after a fast scan) the Locked folders block, then
+ * free space. Locked folders are in no category, so categories, locked folders and free space add up to the drive.
+ */
 export function overviewModel(overview: Overview): AtlasModel {
   const regions: Region[] = overview.categories
     .filter((c) => c.bytes > 0)
     .map((c) => categoryRegion(c, c.blurb, shaded(c.items.map((i) => leaf(i, c.id)))))
     .sort((a, b) => b.bytes - a.bytes);
+  const locked = lockedRegion(overview.scan.locked);
+  if (locked) regions.push(locked);
   regions.push(freeRegion(overview.freeBytes));
   return finish(regions, overview.volume);
+}
+
+/** What each kind of locked folder is called on the map, and why it is locked. */
+const LOCKED_KINDS: Record<LockedKind, { name: string; why: string }> = {
+  otherAccounts: {
+    name: 'Other accounts on this PC',
+    why: 'Files that belong to another account. Only that account, or Windows, can open them.',
+  },
+  windowsOnly: {
+    name: 'Folders only Windows opens',
+    why: 'Restore points, app packages and other folders Windows keeps to itself.',
+  },
+};
+
+const folders = (n: number) => `${formatCount(n)} ${n === 1 ? 'folder' : 'folders'}`;
+
+/** A fast scan's locked folders, together: their bytes and how many folders. */
+export function lockedTotals(groups: readonly LockedGroup[]): { bytes: number; folders: number } {
+  const shown = groups.filter((g) => g.bytes > 0);
+  return { bytes: shown.reduce((n, g) => n + g.bytes, 0), folders: shown.reduce((n, g) => n + g.folders, 0) };
+}
+
+/**
+ * The Locked folders block: folders this account can't open, which a fast scan counted from the file index. One
+ * tile per reason, with its total only: no names, no paths, never opened, never a proposal. Null when there are none.
+ */
+export function lockedRegion(groups: readonly LockedGroup[]): Region | null {
+  const shown = groups.filter((g) => g.bytes > 0);
+  if (shown.length === 0) return null;
+  const totals = lockedTotals(shown);
+  const leaves = shown
+    .map((g): Leaf => ({
+      id: `locked:${g.kind}`,
+      regionId: LOCKED_ID,
+      kind: 'locked',
+      name: LOCKED_KINDS[g.kind].name,
+      path: '',
+      bytes: g.bytes,
+      lastUsed: null,
+      browsable: false,
+      note: `${LOCKED_KINDS[g.kind].why} Fast scan counted ${folders(g.folders)} here and shows their total only.`,
+      proposal: null,
+      shade: 0,
+      vacant: 0,
+    }))
+    .sort((a, b) => b.bytes - a.bytes)
+    .map((l, i) => ({ ...l, shade: i % 3 }));
+  return {
+    id: LOCKED_ID,
+    // System's hue, drawn colourless (map.css): the block belongs to no category.
+    category: 'system',
+    categoryName: 'Locked folders',
+    name: 'Locked folders',
+    bytes: totals.bytes,
+    protected: true,
+    blurb: `Totals only: ${folders(totals.folders)} your account can’t open. Vacancy shows no names from inside them, and can’t propose or delete anything there.`,
+    free: false,
+    pending: false,
+    leaves,
+  };
 }
 
 /**

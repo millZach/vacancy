@@ -22,7 +22,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::snapshot::{Builder, DirFlags, DirId, Listing, Markers, RootKind, Snapshot, UnixTime};
 
-mod links;
+pub(crate) mod links;
 #[cfg(unix)]
 #[path = "scan/unix.rs"]
 mod platform;
@@ -105,7 +105,7 @@ pub struct ScanProgress<'a> {
     pub current: &'a Path,
     /// Time since the scan started.
     pub elapsed: Duration,
-    builder: &'a Mutex<Builder>,
+    pub(crate) builder: &'a Mutex<Builder>,
 }
 
 impl ScanProgress<'_> {
@@ -424,7 +424,25 @@ pub(crate) struct Collector<'a> {
     after_open: Option<&'a (dyn Fn(&Path) + Sync)>,
 }
 
-impl Collector<'_> {
+impl<'a> Collector<'a> {
+    /// A collector filling `listing`, for listers outside a scan's walk (fast scan's index stream).
+    pub(crate) fn new(
+        listing: &'a mut Listing,
+        links: &'a LinkSet,
+        keep_from: u64,
+        now: UnixTime,
+        cancel: &'a CancelToken,
+    ) -> Self {
+        Self {
+            listing,
+            links,
+            keep_from,
+            now,
+            cancel,
+            after_open: None,
+        }
+    }
+
     pub(crate) fn add(&mut self, e: &Entry<'_>) {
         let listing = &mut *self.listing;
         // Every name the folder lists, hard links and all, before anything is merged or skipped.
@@ -606,7 +624,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn unix_now() -> UnixTime {
+pub(crate) fn unix_now() -> UnixTime {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))

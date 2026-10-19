@@ -1,0 +1,40 @@
+[package]
+name = "vacancy-index"
+description = "Reads an NTFS volume's file index (the MFT) for Vacancy's fast scan: the record parser, the stream the elevated reader sends, and the reader itself. Metadata only: never a file's contents."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+# The elevated reader. On Windows it is bundled beside the app; elsewhere it only says it isn't supported.
+name = "vacancy-index-reader"
+path = "src/bin/vacancy-index-reader.rs"
+
+[features]
+# Synthetic NTFS volumes, for other crates' tests.
+testkit = []
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_IO",
+  "Win32_System_Ioctl",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+] }
+
+[lints]
+workspace = true
+
+[build-dependencies]
+# The reader's version resource and manifest on Windows (build.rs does nothing elsewhere).
+embed-resource = "3"
+
+[dev-dependencies]
+flate2 = "1"

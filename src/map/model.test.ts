@@ -1,13 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { fixtures } from '../bridge';
+import { fastOverview } from '../bridge/mockFast';
 import {
   FREE_ID,
+  LOCKED_ID,
   PENDING_ID,
   VACANT_SHARE,
   folderModel,
   freedModel,
   layoutAtlas,
   layoutRegions,
+  lockedRegion,
+  lockedTotals,
   overviewModel,
   regionKey,
   scanModel,
@@ -228,5 +232,69 @@ describe('the scale square', () => {
     expect(s.gb).toBe(0.2);
     expect(scaleSquare(9e9, W * H)!.gb).toBeLessThan(0.01);
     expect(scaleSquare(0, W * H)).toBeNull();
+  });
+});
+
+describe('a fast scan’s map', () => {
+  const overview = fastOverview(structuredClone(fixtures.windows.overview), 1);
+  const model = overviewModel(overview);
+  const locked = model.regionById.get(LOCKED_ID)!;
+
+  it('has a Locked folders block before free space, one totals-only tile per reason', () => {
+    expect(model.regions.at(-2)!.id).toBe(LOCKED_ID);
+    expect(model.regions.at(-1)!.id).toBe(FREE_ID);
+    expect(locked.name).toBe('Locked folders');
+    expect(locked.protected).toBe(true);
+    expect(locked.bytes).toBeCloseTo(25.7e9);
+    expect(locked.blurb).toBe(
+      'Totals only: 1,287 folders your account can’t open. Vacancy shows no names from inside them, and can’t propose or delete anything there.',
+    );
+    expect(locked.leaves.map((l) => [l.name, l.kind])).toEqual([
+      ['Other accounts on this PC', 'locked'],
+      ['Folders only Windows opens', 'locked'],
+    ]);
+    expect(locked.leaves[0]!.note).toBe(
+      'Files that belong to another account. Only that account, or Windows, can open them. Fast scan counted 1,204 folders here and shows their total only.',
+    );
+    expect(locked.leaves[1]!.note).toBe(
+      'Restore points, app packages and other folders Windows keeps to itself. Fast scan counted 83 folders here and shows their total only.',
+    );
+  });
+
+  it('names nothing inside them, opens nothing and proposes nothing', () => {
+    for (const l of locked.leaves) {
+      expect(l.path).toBe('');
+      expect(l.browsable).toBe(false);
+      expect(l.proposal).toBeNull();
+      expect(l.lastUsed).toBeNull();
+    }
+  });
+
+  it('still adds up to the drive: categories, locked folders and free space', () => {
+    const sum = model.regions.reduce((n, r) => n + r.bytes, 0);
+    expect(sum).toBeCloseTo(overview.volume.totalBytes, -3);
+    const categories = overview.categories.reduce((n, c) => n + c.bytes, 0);
+    expect(categories + lockedTotals(overview.scan.locked).bytes).toBeCloseTo(overview.volume.usedBytes, -3);
+  });
+
+  it('counts the file index’s records in System, with a note, where the unseen space was', () => {
+    const system = model.regionById.get('system')!;
+    const records = system.leaves.find((l) => l.kind === 'records')!;
+    expect(records.name).toBe('File system records');
+    expect(records.note).toContain('Fast scan reads them');
+    expect(records.browsable).toBe(false);
+    expect(system.leaves.some((l) => l.kind === 'hidden')).toBe(false);
+  });
+
+  it('lays the block out like any region, its tiles inside it', () => {
+    const rects = layoutRegions(model.regions, W, H);
+    everyTileInItsRegion(model, rects);
+    expect(area(rects.get(regionKey(LOCKED_ID))!)).toBeGreaterThan(0);
+  });
+
+  it('has no block after a normal scan, nor for empty groups', () => {
+    expect(overviewModel(fixtures.windows.overview).regionById.has(LOCKED_ID)).toBe(false);
+    expect(lockedRegion([{ kind: 'windowsOnly', bytes: 0, files: 0, folders: 0 }])).toBeNull();
+    expect(lockedRegion([{ kind: 'windowsOnly', bytes: 1e9, files: 3, folders: 1 }])!.blurb).toContain('1 folder your');
   });
 });

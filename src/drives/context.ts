@@ -36,8 +36,11 @@ export interface ReadyDrives {
   openMap: () => void;
   /** The drive on screen, from its map to its scan screen. */
   showScanScreen: () => void;
-  /** Scans the drive on screen, read-only. A scan already running is replaced. */
-  scan: () => void;
+  /**
+   * Scans the drive on screen, read-only. A scan already running is replaced. With `fast` (Windows), asks for a fast
+   * scan: Windows asks for admin, every time, and the normal scan runs where it can't be done.
+   */
+  scan: (options?: { fast?: boolean }) => void;
   /** Stops the scan of the drive on screen. */
   cancelScan: () => void;
   /** Puts a proposal in the plan of the drive on screen, or takes it out. */

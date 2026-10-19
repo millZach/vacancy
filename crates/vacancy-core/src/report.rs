@@ -623,6 +623,7 @@ mod tests {
                 total_bytes: 100,
                 used_bytes: 50,
                 free_bytes: 50,
+                file_system: String::new(),
             },
             free_bytes: 50,
             scan: ScanSummary {
@@ -636,6 +637,10 @@ mod tests {
                 links_skipped: 0,
                 hard_links_merged: 0,
                 duration_ms: 10,
+                method: crate::map::ScanMethod::Normal,
+                fallback: None,
+                locked: Vec::new(),
+                records_bytes: 0,
             },
             categories: vec![MapCategory {
                 id: CategoryId::Caches,

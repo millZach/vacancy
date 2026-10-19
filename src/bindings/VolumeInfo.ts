@@ -37,4 +37,9 @@ usedBytes: number,
 /**
  * Bytes free.
  */
-freeBytes: number, };
+freeBytes: number, 
+/**
+ * The file system, as the OS names it: `NTFS`, `exFAT`, `apfs`. Empty when unknown, and in runs kept before
+ * Vacancy recorded it. Windows' fast scan needs NTFS.
+ */
+fileSystem: string, };

@@ -337,6 +337,30 @@ pub struct Snapshot {
     keep_files_from: u64,
     /// When the scan began. Anything modified or changed since then is not what the scan saw.
     started: SystemTime,
+    /// What only a fast scan counts; `None` for a normal scan.
+    fast: Option<FastFacts>,
+}
+
+/// What only a fast scan (Windows' file index, read with admin) counts: the folders this account can't open, as
+/// totals with no names, and the bytes NTFS keeps for itself.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FastFacts {
+    /// Each folder the account can't open, as its parent listed it: in the snapshot it is flagged
+    /// [`DirFlags::UNREADABLE`], exactly as a normal scan records a folder it may not open.
+    pub locked: Vec<LockedFolder>,
+    /// The file index, its log, folder indexes, alternate streams and NTFS's other records.
+    pub records_bytes: u64,
+}
+
+/// A folder this account can't open, with what is in it. Nothing in it is in the snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LockedFolder {
+    pub dir: DirId,
+    /// Allocated bytes of the files only found in locked folders, each once.
+    pub bytes: u64,
+    pub files: u64,
+    /// Folders, this one included.
+    pub folders: u64,
 }
 
 impl Snapshot {
@@ -478,6 +502,11 @@ impl Snapshot {
     /// what the scan saw.
     pub fn started(&self) -> SystemTime {
         self.started
+    }
+
+    /// What a fast scan counted beyond the folders it lists, or `None` for a normal scan.
+    pub fn fast(&self) -> Option<&FastFacts> {
+        self.fast.as_ref()
     }
 
     /// Which marker files and folders it holds.
@@ -691,8 +720,14 @@ impl Builder {
                 stats: ScanStats::default(),
                 keep_files_from,
                 started,
+                fast: None,
             },
         }
+    }
+
+    /// Records what a fast scan counted beyond its listing.
+    pub(crate) fn set_fast(&mut self, fast: FastFacts) {
+        self.snap.fast = Some(fast);
     }
 
     pub(crate) fn snapshot(&self) -> &Snapshot {

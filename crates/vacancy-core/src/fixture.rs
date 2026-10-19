@@ -181,6 +181,8 @@ pub fn volume(root: &Path, capacity: u64, snapshot: &Snapshot) -> VolumeInfo {
         total_bytes: capacity,
         used_bytes: used,
         free_bytes: capacity - used,
+        // The volume the fixture folder is on: fast scan reads that volume's index and keeps the fixture's part.
+        file_system: crate::volume::file_system_of(root),
     }
 }
 
