@@ -37,8 +37,10 @@ pub(crate) fn utf16_at(b: &[u8], at: usize, units: usize) -> Option<Vec<u16>> {
     let bytes = slice(b, at, units.checked_mul(2)?)?;
     Some(
         bytes
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| u16::from_le_bytes(c))
             .collect(),
     )
 }

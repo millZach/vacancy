@@ -90,8 +90,10 @@ impl Entry<'_> {
     /// The name, as UTF-16 units.
     pub fn name_units(&self) -> impl ExactSizeIterator<Item = u16> + '_ {
         self.name
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| u16::from_le_bytes(c))
     }
 
     /// Writes the name into `out` (cleared first).
