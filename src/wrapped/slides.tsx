@@ -7,6 +7,8 @@ import { formatBytes, formatCount, formatDuration, NBSP } from '../format';
 import { asSentence } from '../run/progress';
 import { HeroNumber } from '../summary/HeroNumber';
 import { AdviceText } from '../plan/AdviceText';
+import { MovedCard } from '../tidy/Recap';
+import type { OnUndo } from '../tidy/Undo';
 import { KeyFob, Letterboard, NeonSign } from './bits';
 import {
   biggestWin,
@@ -163,18 +165,20 @@ export function CategoriesSlide({ report: r }: SlideProps) {
   );
 }
 
-/** 5. Folders the run reorganized. Shown only when it moved something. */
-export function MovedSlide({ report: r }: SlideProps) {
+/**
+ * 5. Folders the run reorganized, each with where its files went, how many stayed, and Undo. Shown only when it
+ * moved something. Moves free nothing, and the slide says so.
+ */
+export function MovedSlide({ report: r, onUndo }: SlideProps & { onUndo?: OnUndo | undefined }) {
   return (
     <div className="sl">
       <h1 className="sl-title">{count(r.movedItems, 'file')} found a home.</h1>
-      <p className="sl-sub">Every move was recorded, so each one can be undone.</p>
+      <p className="sl-sub">
+        Moving deletes nothing, so it freed no space. Every move was recorded: Undo puts each file back where it was.
+      </p>
       <ul className="moved">
         {r.reorganized.map((m) => (
-          <li key={m.id} className="moved-card">
-            <b>{m.folder}</b>
-            <span>{count(m.movedItems, 'file')} moved</span>
-          </li>
+          <MovedCard key={m.id} report={r} record={m} onUndo={onUndo} />
         ))}
       </ul>
     </div>

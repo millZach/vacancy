@@ -1,6 +1,7 @@
 import { ChevronLeft, ChevronRight, Pause, Play } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type Ref } from 'react';
 import { useBridge, type RunReport } from '../bridge';
+import type { OnUndo } from '../tidy/Undo';
 import { Wordmark } from '../design/Wordmark';
 import { slidesFor, type SlideId } from './deck';
 import { countdown, slideMotion, tokenMs, useReducedMotion, whenDone, type Countdown } from './motion';
@@ -27,6 +28,8 @@ interface Props {
   onHandoff: (how: Handoff) => void;
   /** The overlay, which the finish fades as a whole. */
   overlayRef?: Ref<HTMLDivElement>;
+  /** Undoes one folder's Tidy up, from the Moved slide. */
+  onUndo?: OnUndo;
 }
 
 /** A control the space bar already works: Space presses it rather than pausing the slides. */
@@ -40,7 +43,7 @@ function isControl(target: EventTarget | null): boolean {
  * skips to the recap; resting the pointer on a slide holds it. Slides glide in and out, or with reduced motion only
  * fade. Screen readers hear each slide's position and name, and its contents once the slides are paused.
  */
-export function Wrapped({ report, leaving, entering, onHandoff, overlayRef }: Props) {
+export function Wrapped({ report, leaving, entering, onHandoff, overlayRef, onUndo }: Props) {
   const { platform } = useBridge();
   const reduce = useReducedMotion();
   const slides = useMemo(() => slidesFor(report), [report]);
@@ -138,7 +141,7 @@ export function Wrapped({ report, leaving, entering, onHandoff, overlayRef }: Pr
     disk: () => <DiskSlide report={report} />,
     win: () => <WinSlide report={report} />,
     categories: () => <CategoriesSlide report={report} />,
-    moved: () => <MovedSlide report={report} />,
+    moved: () => <MovedSlide report={report} onUndo={onUndo} />,
     kept: () => <KeptSlide report={report} />,
     checkout: () => <CheckoutSlide report={report} onMap={() => onHandoff('fly')} />,
   };
@@ -170,7 +173,7 @@ export function Wrapped({ report, leaving, entering, onHandoff, overlayRef }: Pr
             role="group"
             aria-roledescription="slide"
             aria-label={`${shown + 1} of ${slides.length}: ${slide.label}`}
-            tabIndex={slide.id === 'kept' ? 0 : undefined}
+            tabIndex={slide.id === 'kept' || slide.id === 'moved' ? 0 : undefined}
             onPointerEnter={() => setHover(true)}
             onPointerLeave={() => setHover(false)}
             onFocus={() => setReading(true)}

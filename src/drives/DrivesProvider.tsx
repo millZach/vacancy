@@ -245,6 +245,7 @@ function drivesValue(
     showSummary: () => dispatch({ type: 'showSummary', mountPoint: session.current }),
     summarySeen: () => dispatch({ type: 'summarySeen', mountPoint: session.current }),
     leaveRun: () => dispatch({ type: 'leaveRun', mountPoint: session.current }),
+    reportUpdated: (report) => dispatch({ type: 'reportUpdated', report }),
     dismissGone: () => dispatch({ type: 'dismissGone' }),
   };
 }

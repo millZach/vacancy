@@ -218,6 +218,8 @@ pub enum ScanOutcome {
         overview: Box<Overview>,
         /// The cleanups the rules propose, biggest first. Their tiles are on the map.
         proposals: Vec<Proposal>,
+        /// The folders Tidy up can sort (Windows; none on macOS, nor on a drive without the known folders).
+        tidy: Vec<crate::tidy::TidyProposal>,
     },
     /// It was cancelled; there is no map.
     Cancelled,
@@ -241,6 +243,8 @@ pub struct ScannedVolume {
     pub categories: Categories,
     /// The cleanups proposed.
     pub proposals: Proposals,
+    /// The Tidy up sorts proposed, with what planning them needs.
+    pub tidy: crate::tidy::Tidy,
     /// The overview map.
     pub overview: Overview,
 }
@@ -338,10 +342,16 @@ pub fn scan_for_map_with(
     if cancel.is_cancelled() {
         return Err(ScanError::Cancelled);
     }
+    // A fresh bounded inventory of the known folders, read now (names, sizes and dates only).
+    let tidy = crate::tidy::propose(&snapshot, &proposals, env, cancel);
+    if cancel.is_cancelled() {
+        return Err(ScanError::Cancelled);
+    }
     Ok(ScannedVolume {
         snapshot,
         categories,
         proposals,
+        tidy,
         overview,
     })
 }

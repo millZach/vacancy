@@ -1,6 +1,6 @@
 import type { Fixture, PastRun, RunSkip } from './fixtures';
-import { DUPLICATES, mockDuplicates, type MockDuplicates } from './mockDuplicates';
-import { makePlan, pastReport, play, type MockPlan, type Playback } from './mockRun';
+import { coverDuplicates, DUPLICATES, mockDuplicates, type MockDuplicates } from './mockDuplicates';
+import { makePlan, mockUndo, pastReport, play, type MockPlan, type Playback } from './mockRun';
 import type {
   Bridge,
   AdvisorStatus,
@@ -14,6 +14,7 @@ import type {
   RunReport,
   ScanOutcome,
   ScanUpdate,
+  TidyProposal,
   VolumeInfo,
 } from './types';
 
@@ -40,8 +41,8 @@ export interface MockOptions {
   /** How many kept runs the history says it couldn't read. Default: none. */
   unreadableRuns?: number;
   /**
-   * Cleanup runs also report the fixture's reorganizations as done, to preview the finish's Moved slide before
-   * reorganizations arrive (ticket 08). Reminder-only runs never inject moves.
+   * Cleanup runs whose plan has no Tidy up of its own also report the fixture's preview reorganizations as done, to
+   * see the finish's Moved slide. Reminder-only runs never inject moves.
    */
   moves?: boolean;
   /** Start with the fixture's past runs in the history. Default: yes. */
@@ -87,12 +88,12 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
   const system = fixture.volumes[0]!;
   let volumes = [...fixture.volumes];
   /**
-   * Drives with a finished scan, which `browse` can open, with the map, proposals and skips their runs work from,
-   * and the duplicates found on them once the mock finder is done.
+   * Drives with a finished scan, which `browse` can open, with the map, proposals, sorts and skips their runs work
+   * from, and the duplicates found on them once the mock finder is done.
    */
   const mapped = new Map<
     string,
-    { map: Overview; proposals: Proposal[]; skips: RunSkip[]; dups: MockDuplicates | null }
+    { map: Overview; proposals: Proposal[]; skips: RunSkip[]; tidy: TidyProposal[]; dups: MockDuplicates | null }
   >();
   /** The mock duplicate finder running now, on one drive. */
   let finding: { mountPoint: string; timer: number; finish: (outcome: DuplicatesOutcome) => void } | null = null;
@@ -152,6 +153,8 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
       const map = onDrive(structuredClone(fixture.overview), system, volume);
       const proposals = proposalsOnDrive(structuredClone(fixture.proposals), system, volume);
       const skips = skipsOnDrive(structuredClone(fixture.runSkips), system, volume);
+      // Tidy up sorts the home's folders: only the system drive has them.
+      const tidy = volume.mountPoint === system.mountPoint ? structuredClone(fixture.tidy) : [];
       const paths = map.categories.flatMap((c) => c.items.map((i) => i.path)).filter(Boolean);
       // Interleaved, so the ticker jumps around the disk the way a real walk does.
       const ticker = paths.map((p, i) => paths[(i * 7) % paths.length] ?? p);
@@ -162,13 +165,13 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
           if (running) clearInterval(running.timer);
           running = null;
           if (outcome.status === 'done')
-            mapped.set(mountPoint, { map: structuredClone(map), proposals: structuredClone(proposals), skips, dups: null });
+            mapped.set(mountPoint, { map: structuredClone(map), proposals: structuredClone(proposals), skips, tidy, dups: null });
           resolve(outcome);
         };
         const tick = () => {
           const t = total <= 0 ? 1 : Math.min(1, (Date.now() - started) / total);
           onUpdate(update(map, ticker, t, Date.now() - started));
-          if (t >= 1) finish({ status: 'done', overview: map, proposals });
+          if (t >= 1) finish({ status: 'done', overview: map, proposals, tidy });
         };
         running = { mountPoint, timer: window.setInterval(tick, total <= 0 ? 0 : 100), finish };
       });
@@ -212,12 +215,24 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
             scan.map = found.overview;
             scan.proposals = [...scan.proposals.filter((p) => p.id !== DUPLICATES), found.proposal].sort((a, b) => b.bytes - a.bytes);
             scan.dups = found;
+            // Delete wins over sort: a sort's move of an extra copy is marked as deleted by duplicates.
+            scan.tidy = coverDuplicates(scan.tidy, found);
           }
           finish({
             status: 'done',
             overview: scan.map,
             proposals: scan.proposals,
-            duplicates: found?.duplicates ?? { proposal: null, groups: [], folders: [], compared: 0, hardLinked: 0, changed: 0 },
+            tidy: scan.tidy,
+            duplicates: found?.duplicates ?? {
+              proposal: null,
+              groups: [],
+              folders: [],
+              compared: 0,
+              hardLinked: 0,
+              changed: 0,
+              notLocal: 0,
+              cloned: 0,
+            },
           });
         };
         finding = { mountPoint, timer: window.setInterval(tick, total <= 0 ? 0 : 100), finish };
@@ -230,7 +245,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
       if (ran.has(mountPoint)) return failure(`this scan of ${mountPoint} already ran a plan: scan again first`);
       let plan: MockPlan;
       try {
-        plan = makePlan(`plan-${++made}`, mountPoint, scan.map, scan.proposals, ids, scan.skips, {
+        plan = makePlan(`plan-${++made}`, mountPoint, scan.map, scan.proposals, ids, scan.skips, scan.tidy, fixture.tidyScripts, {
           found: scan.dups,
           skipped: skippedGroups,
         });
@@ -277,6 +292,19 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
       const run = history.find((r) => r.id === id);
       return run ? answer(run) : failure(`This run can’t be opened: the history has no run ${id}.`);
     },
+    undoTidy: (runId, tidyId) => {
+      if (options.fail !== undefined) return failure(options.fail);
+      if (fixture.platform !== 'windows') return failure('Tidy up isn’t available on this computer.');
+      if (playing) return failure('A plan is running. Undo when it has finished.');
+      const run = history.find((r) => r.id === runId);
+      if (!run) return failure(`This run can’t be opened: the history has no run ${runId}.`);
+      try {
+        mockUndo(run, tidyId, fixture.tidyScripts);
+      } catch (error) {
+        return failure(error instanceof Error ? error.message : String(error));
+      }
+      return new Promise((resolve) => setTimeout(() => resolve(structuredClone(run)), options.delayMs ?? 400));
+    },
     // Browser fixtures never open host apps or claim an external launch succeeded.
     openHint: () => failure('External advice can’t be opened from this fixture preview. No app was launched.'),
     openGuide: () => failure('Vendor references can’t be opened from this fixture preview. No app was launched.'),
@@ -303,6 +331,15 @@ function listing(r: RunReport): RunListing {
     deletedItems: r.deletedItems,
     movedItems: r.movedItems,
     cancelled: r.cancelled,
+    tidy: r.reorganized.map((m) => ({
+      id: m.id,
+      folder: m.folder,
+      movedItems: m.movedItems,
+      undoable: m.undoable,
+      back: m.undo?.back ?? null,
+      stuck: m.undo?.stuck.length ?? 0,
+      interrupted: m.interrupted,
+    })),
   };
 }
 

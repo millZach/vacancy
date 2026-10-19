@@ -23,6 +23,7 @@ mod rules;
 mod scan;
 mod snapshot;
 mod text;
+pub mod tidy;
 pub mod tools;
 mod volume;
 
@@ -39,7 +40,10 @@ pub use duplicates::{
     DuplicateCopy, DuplicateGroup, DuplicateProgress, DuplicateStage, Duplicates,
     DuplicatesOutcome, FileKind,
 };
-pub use exec::{Deleted, RunEvent, RunProgress, Skipped, StepFinished, StepStarted, execute};
+pub use exec::{
+    Deleted, MoveProgress, RunEvent, RunProgress, Skipped, StepFinished, StepStarted, execute,
+    execute_with,
+};
 pub use guard::{Denied, Guard};
 pub use machine::machine_name;
 pub use map::{
@@ -52,7 +56,7 @@ pub use plan::{
 };
 pub use report::{
     CategoryFreed, DuplicatePair, DuplicatesDone, LeftForYou, Outcome, Reorganized, RunHistory,
-    RunListing, RunReport, Skip, SkipKind, StepReport, TileFreed,
+    RunListing, RunReport, Skip, SkipKind, StepKind, StepReport, TidyListing, TileFreed, Undone,
 };
 pub use rules::{
     ActionKind, Moment, Proposal, ProposalAction, ProposalSource, Proposals, Risk, propose,

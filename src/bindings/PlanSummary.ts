@@ -28,7 +28,7 @@ items: number,
  */
 places: number, 
 /**
- * Folder moves it makes, which can be undone. None until reorganizations arrive (ticket 08).
+ * Folder moves it makes (Tidy up), which free nothing and can be undone.
  */
 moves: number, 
 /**
@@ -40,6 +40,11 @@ steps: Array<PlanStep>,
  * as skipped when the plan runs.
  */
 refused: Array<Skip>, 
+/**
+ * Files of the plan's sorts left out while planning (changed since the review, or their reviewed name taken):
+ * not in `moves`, and reported with the sort when the plan runs.
+ */
+movesRefused: Array<Skip>, 
 /**
  * Advice in the selection that Vacancy can't carry out itself, by proposal id.
  */

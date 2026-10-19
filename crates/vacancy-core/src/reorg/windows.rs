@@ -1,6 +1,6 @@
 use super::{
-    Draft, DroppedDraft, Error, Folder, InventoryEntry, MAX_COMPONENTS, MAX_ENTRIES, ReviewedMove,
-    Status,
+    Draft, DroppedDraft, Error, Folder, InventoryEntry, Ledger, LedgerDirectory, LedgerMove,
+    MAX_COMPONENTS, MAX_ENTRIES, OpState, PlannedDirectory, ReviewedMove, Status,
     journal::Store,
     model::{Directory, Event, Move, Operation, Place, Plan, Receipt, Root, State},
     names::Name,
@@ -24,6 +24,8 @@ pub struct Inventory {
     captured: BTreeMap<String, (Place, native::Fingerprint)>,
     entries: Vec<InventoryEntry>,
     truncated: bool,
+    /// Regular files listed after the cap, counted in the same listing pass (one-folder captures only).
+    later: u64,
 }
 
 /// Opaque approval capability. No public fields, Deserialize, mutable move-list accessor or path constructor.
@@ -40,6 +42,19 @@ impl ValidatedPlan {
     /// Drafts validation left out, each with its reason. None of them is in the plan.
     pub fn dropped(&self) -> &[DroppedDraft] {
         &self.dropped
+    }
+    /// The directories the plan's moves go into, outermost first, as display components below their known folder,
+    /// and whether each already existed at validation (an existing one is never created or removed by the run).
+    pub fn directories(&self) -> Vec<PlannedDirectory> {
+        self.data
+            .directories
+            .iter()
+            .map(|dir| PlannedDirectory {
+                folder: dir.at.folder,
+                names: dir.at.names.iter().map(Name::display).collect(),
+                existing: dir.expected.is_some(),
+            })
+            .collect()
     }
 }
 
@@ -100,6 +115,15 @@ fn chain(parent: &Parent) -> Vec<native::Id> {
 fn changed(_: Fail) -> Error {
     Error::Changed
 }
+/// Why a move's source couldn't be opened for its rename: an app has it open, it is gone, or it isn't what was
+/// approved. Said apart so the app can tell the user which.
+fn source_open(fail: Fail) -> Error {
+    match fail {
+        Fail::InUse(_) => Error::InUse,
+        Fail::Gone => Error::Gone,
+        _ => Error::Changed,
+    }
+}
 fn denied(error: crate::Denied) -> Error {
     Error::Denied(error.to_string())
 }
@@ -152,6 +176,16 @@ impl Inventory {
     /// A fresh bounded metadata snapshot, independent of the aggregate disk scan. It never reads file contents.
     /// This first engine inventories only loose regular files in the three known folders; no directory moves.
     pub fn capture(env: &Env, cancel: &CancelToken) -> Result<Self, Error> {
+        Self::capture_in(env, None, cancel)
+    }
+    /// [`Inventory::capture`] of one known folder: the other folders' roots are still sealed (so validation still
+    /// refuses a replaced or nested known folder), but only `only` is listed. Its cap counts listed regular files,
+    /// not subfolders: the first 512 files in the order Windows lists the folder (by name on NTFS), visiting at most
+    /// four times that many entries. Regular files listed after the cap are counted, not opened ([`Self::later`]).
+    pub fn capture_folder(env: &Env, only: Folder, cancel: &CancelToken) -> Result<Self, Error> {
+        Self::capture_in(env, Some(only), cancel)
+    }
+    fn capture_in(env: &Env, only: Option<Folder>, cancel: &CancelToken) -> Result<Self, Error> {
         trust(env)?;
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
@@ -165,6 +199,7 @@ impl Inventory {
         let mut roots = Vec::new();
         let mut visited = 0;
         let mut truncated = false;
+        let mut later = 0;
         for at in FOLDERS {
             if cancel.is_cancelled() {
                 return Err(Error::Cancelled);
@@ -184,14 +219,24 @@ impl Inventory {
                 folder: at,
                 chain: ids,
             });
+            if only.is_some_and(|only| only != at) {
+                continue;
+            }
             if guard
                 .judge_walked(folder(env, at), &parent.steps, true)
                 .is_err()
             {
                 continue;
             }
-            let (listed, capped) = native::list_bounded(&parent.dir, MAX_ENTRIES - visited, cancel)
-                .map_err(changed)?;
+            let (listed, capped) = if only.is_some() {
+                let (listed, capped, more) =
+                    native::list_files_bounded(&parent.dir, MAX_ENTRIES, 4 * MAX_ENTRIES, cancel)
+                        .map_err(changed)?;
+                later += more;
+                (listed, capped)
+            } else {
+                native::list_bounded(&parent.dir, MAX_ENTRIES - visited, cancel).map_err(changed)?
+            };
             truncated |= capped;
             visited += listed.len();
             for entry in listed {
@@ -226,6 +271,8 @@ impl Inventory {
                     logical_bytes: info.logical,
                     allocated_bytes: info.allocated,
                     changed_ns: info.latest(),
+                    modified_ns: info.written,
+                    file_id: info.id.file,
                 });
                 captured.insert(
                     id,
@@ -249,6 +296,7 @@ impl Inventory {
             captured,
             entries,
             truncated,
+            later,
         })
     }
     pub fn entries(&self) -> &[InventoryEntry] {
@@ -256,6 +304,19 @@ impl Inventory {
     }
     pub fn truncated(&self) -> bool {
         self.truncated
+    }
+    /// For a one-folder capture that hit its cap: regular files listed after it, left for a later run.
+    pub fn later(&self) -> u64 {
+        self.later
+    }
+    /// [`Inventory::validate`], with every draft's file name pinned: a draft naming its file must get exactly that
+    /// name (as the user reviewed it), or it is dropped with [`Error::Taken`]. It is never renumbered.
+    pub fn validate_pinned(
+        &self,
+        drafts: &[Draft],
+        cancel: &CancelToken,
+    ) -> Result<ValidatedPlan, Error> {
+        self.validate_with(drafts, true, cancel)
     }
 
     /// Validates untrusted drafts one at a time. An invalid draft (unknown or repeated source, a source changed since
@@ -265,6 +326,14 @@ impl Inventory {
     /// cancellation, a replaced known folder, a manifest over the journal limit) or when no draft is left, and then
     /// with the first dropped draft's error.
     pub fn validate(&self, drafts: &[Draft], cancel: &CancelToken) -> Result<ValidatedPlan, Error> {
+        self.validate_with(drafts, false, cancel)
+    }
+    fn validate_with(
+        &self,
+        drafts: &[Draft],
+        pinned: bool,
+        cancel: &CancelToken,
+    ) -> Result<ValidatedPlan, Error> {
         if drafts.is_empty() || drafts.len() > MAX_ENTRIES {
             return Err(Error::Bounds);
         }
@@ -317,7 +386,8 @@ impl Inventory {
             if cancel.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            let (chain, to) = match self.resolve(&guard, &item, &reserved) {
+            let exact = pinned && item.draft.filename.is_some();
+            let (chain, to) = match self.resolve(&guard, &item, &reserved, exact) {
                 Ok(value) => value,
                 Err(error) => {
                     reject(item.draft, error);
@@ -334,6 +404,11 @@ impl Inventory {
                 entry_id: item.draft.entry_id.clone(),
                 from: super::names::display(path(&self.env, item.source).as_os_str().encode_wide()),
                 to: super::names::display(path(&self.env, &to).as_os_str().encode_wide()),
+                directories: to.names[..to.names.len() - 1]
+                    .iter()
+                    .map(Name::display)
+                    .collect(),
+                filename: to.names.last().map(Name::display).unwrap_or_default(),
             });
             moves.push(Move {
                 entry: item.draft.entry_id.clone(),
@@ -413,6 +488,7 @@ impl Inventory {
         guard: &Guard,
         item: &Parsed<'_>,
         reserved: &Reserved,
+        exact: bool,
     ) -> Result<(Chain, Place), Error> {
         let Parsed {
             draft,
@@ -498,7 +574,8 @@ impl Inventory {
         }) {
             return Err(Error::UnknownEntry);
         }
-        for suffix in 0..100 {
+        // A pinned name is used exactly or not at all: never renumbered after the user reviewed it.
+        for suffix in 0..if exact { 1 } else { 100 } {
             let name = collision_name(original, suffix)?;
             let mut candidate = names.clone();
             candidate.push(name.clone());
@@ -523,7 +600,7 @@ impl Inventory {
                 return Ok((chain, to));
             }
         }
-        Err(Error::Bounds)
+        Err(if exact { Error::Taken } else { Error::Bounds })
     }
     fn root_parent(&self, folder_id: Folder) -> Result<Parent, Error> {
         let parent = native::directory(folder(&self.env, folder_id)).map_err(changed)?;
@@ -601,6 +678,75 @@ impl Engine {
     }
     pub fn status(&self) -> Status {
         self.state.status()
+    }
+    /// A move that was applied and not yet put back.
+    fn undoable(&self, index: usize) -> bool {
+        matches!(
+            self.state.receipts.get(&Operation::Move.key(index)),
+            Some(Receipt::Applied(_))
+        ) && !matches!(
+            self.state.receipts.get(&Operation::Undo.key(index)),
+            Some(Receipt::Applied(_))
+        )
+    }
+    /// What happened to each move and directory of the plan, as the journal records it. Display text only: it
+    /// grants no filesystem authority.
+    pub fn ledger(&self) -> Ledger {
+        let state = |op: Operation, index: usize| -> OpState {
+            let key = op.key(index);
+            let note = || self.state.notes.get(&key).cloned().unwrap_or_default();
+            match (
+                self.state.pending.contains_key(&key),
+                self.state.receipts.get(&key),
+            ) {
+                (_, Some(Receipt::Unresolved)) => OpState::Unresolved(note()),
+                (true, _) => OpState::Pending,
+                (false, Some(Receipt::Applied(_))) => OpState::Applied,
+                (false, Some(Receipt::Skipped)) => OpState::Skipped(note()),
+                (false, None) => OpState::NotRun,
+            }
+        };
+        let names = |place: &Place| place.names.iter().map(Name::display).collect::<Vec<_>>();
+        Ledger {
+            run_id: self.state.plan.id.clone(),
+            started: self.state.started,
+            finished: self.state.finished,
+            cancelled: self.state.cancelled,
+            moves: self
+                .state
+                .plan
+                .moves
+                .iter()
+                .enumerate()
+                .map(|(index, mv)| LedgerMove {
+                    entry_id: mv.entry.clone(),
+                    folder: mv.from.folder,
+                    from: names(&mv.from),
+                    to: names(&mv.to),
+                    allocated_bytes: mv.fingerprint.allocated,
+                    moved: state(Operation::Move, index),
+                    undo: state(Operation::Undo, index),
+                })
+                .collect(),
+            directories: self
+                .state
+                .plan
+                .directories
+                .iter()
+                .enumerate()
+                .map(|(index, dir)| LedgerDirectory {
+                    folder: dir.at.folder,
+                    names: names(&dir.at),
+                    existing: dir.expected.is_some(),
+                    created: if dir.expected.is_some() {
+                        OpState::NotRun
+                    } else {
+                        state(Operation::Mkdir, index)
+                    },
+                    removed: state(Operation::RemoveDirectory, index),
+                })
+                .collect(),
+        }
     }
     pub fn durability_flushes(&self) -> u64 {
         self.store.flushes
@@ -700,6 +846,15 @@ impl Engine {
         }
     }
     pub fn run(&mut self, cancel: &CancelToken) -> Result<Status, Error> {
+        self.run_observed(cancel, &mut |_, _| {})
+    }
+    /// [`Engine::run`], telling `observe` after each move how many of the plan's moves have been handled and how
+    /// many there are. The observer only watches: it can't change what runs.
+    pub fn run_observed(
+        &mut self,
+        cancel: &CancelToken,
+        observe: &mut dyn FnMut(usize, usize),
+    ) -> Result<Status, Error> {
         if self.poisoned {
             return Err(Error::StoppedUnresolved);
         }
@@ -790,11 +945,13 @@ impl Engine {
                 }
             }
         }
-        for index in 0..self.state.plan.moves.len() {
+        let total = self.state.plan.moves.len();
+        for index in 0..total {
             if cancel.is_cancelled() {
                 break;
             }
             self.move_one(index, false)?;
+            observe(index + 1, total);
         }
         self.record(Event::Finished {
             cancelled: cancel.is_cancelled(),
@@ -822,7 +979,7 @@ impl Engine {
                 from.names.last().ok_or(Error::CorruptJournal)?,
                 true,
             )
-            .map_err(changed)?;
+            .map_err(source_open)?;
             if fingerprint.id != mv.fingerprint.id
                 || fingerprint.links != mv.fingerprint.links
                 || (!undo && fingerprint != mv.fingerprint)
@@ -852,7 +1009,7 @@ impl Engine {
             )
             .map_err(changed)?
             {
-                return Err(Error::Changed);
+                return Err(Error::Taken);
             }
             Ok((source_parent, destination_parent, file))
         };
@@ -1056,6 +1213,15 @@ impl Engine {
         }
     }
     pub fn undo(&mut self, cancel: &CancelToken) -> Result<Status, Error> {
+        self.undo_observed(cancel, &mut |_, _| {})
+    }
+    /// [`Engine::undo`], telling `observe` after each move it tries to put back how many it has tried and how many
+    /// there are to try. The observer only watches.
+    pub fn undo_observed(
+        &mut self,
+        cancel: &CancelToken,
+        observe: &mut dyn FnMut(usize, usize),
+    ) -> Result<Status, Error> {
         if self.poisoned {
             return Err(Error::StoppedUnresolved);
         }
@@ -1063,18 +1229,18 @@ impl Engine {
             return Err(Error::Unresolved);
         }
         self.root_check()?;
+        let total = (0..self.state.plan.moves.len())
+            .filter(|index| self.undoable(*index))
+            .count();
+        let mut tried = 0;
         for index in (0..self.state.plan.moves.len()).rev() {
             if cancel.is_cancelled() {
                 return Ok(self.status());
             }
-            if matches!(
-                self.state.receipts.get(&Operation::Move.key(index)),
-                Some(Receipt::Applied(_))
-            ) && !matches!(
-                self.state.receipts.get(&Operation::Undo.key(index)),
-                Some(Receipt::Applied(_))
-            ) {
+            if self.undoable(index) {
                 self.move_one(index, true)?;
+                tried += 1;
+                observe(tried, total);
             }
         }
         for index in (0..self.state.plan.directories.len()).rev() {

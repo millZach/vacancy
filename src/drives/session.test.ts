@@ -20,7 +20,7 @@ function mapOf(volume: VolumeInfo): Overview {
 }
 
 /** A finished scan of `volume`: its map and the fixture's proposals. */
-const done = (volume: VolumeInfo) => ({ status: 'done' as const, overview: mapOf(volume), proposals: fixtures.windows.proposals });
+const done = (volume: VolumeInfo) => ({ status: 'done' as const, overview: mapOf(volume), proposals: fixtures.windows.proposals, tidy: [] });
 
 const run = (s: Session, ...actions: Action[]) => actions.reduce(reduce, s);
 const listed = (drives: VolumeInfo[] = [C, D, E]): Action => ({ type: 'listed', drives });

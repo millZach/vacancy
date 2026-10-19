@@ -42,6 +42,16 @@ import type { FileKind } from '../bindings/FileKind';
 import type { PlannedDuplicates } from '../bindings/PlannedDuplicates';
 import type { PlannedTile } from '../bindings/PlannedTile';
 import type { TileFreed } from '../bindings/TileFreed';
+import type { MoveProgress } from '../bindings/MoveProgress';
+import type { StepKind } from '../bindings/StepKind';
+import type { TidyFolder } from '../bindings/TidyFolder';
+import type { TidyKind } from '../bindings/TidyKind';
+import type { TidyListing } from '../bindings/TidyListing';
+import type { TidyMove } from '../bindings/TidyMove';
+import type { TidyProposal } from '../bindings/TidyProposal';
+import type { TidyStay } from '../bindings/TidyStay';
+import type { TidySubfolder } from '../bindings/TidySubfolder';
+import type { Undone } from '../bindings/Undone';
 
 export type {
   AdvisorStatus,
@@ -87,6 +97,16 @@ export type {
   StepReport,
   TileFreed,
   VolumeInfo,
+  MoveProgress,
+  StepKind,
+  TidyFolder,
+  TidyKind,
+  TidyListing,
+  TidyMove,
+  TidyProposal,
+  TidyStay,
+  TidySubfolder,
+  Undone,
 };
 
 /** Which desktop the UI is running on. It decides the window chrome (macOS draws traffic lights over the header). */
@@ -155,8 +175,18 @@ export interface Bridge {
    * Never rejects for a damaged history file.
    */
   listRuns(): Promise<RunHistory>;
-  /** A kept run, as it was saved: everything its highlight slides and summary show. */
+  /**
+   * A kept run: everything its highlight slides and summary show. Each folder it tidied is read again from its
+   * journal (what moved, whether Undo can still run, whether the run was interrupted); nothing is resumed.
+   */
   openRun(id: string): Promise<RunReport>;
+  /**
+   * Undoes one folder's Tidy up (`tidyId`, like `tidy-downloads`) from the kept run `runId`, from its journal: every
+   * moved file that is still as it was left goes back, and the empty folders the run made are removed. Resolves
+   * with the run's report, updated with what came back, what couldn't and why. Windows only; it works after a
+   * restart too. Rejects while a plan or scan runs.
+   */
+  undoTidy(runId: string, tidyId: string): Promise<RunReport>;
   /** Opens a trusted numeric Steam hint from a retained scan. Never accepts a URL or runs as part of a plan. */
   openHint(mountPoint: string, proposalId: string): Promise<void>;
   /** Opens a compiled vendor reference, including from history with no current scan. */

@@ -1,7 +1,9 @@
 import { ChevronDown, ChevronRight, LoaderCircle, PanelRightClose, Signpost } from 'lucide-react';
 import { useId, useState } from 'react';
-import type { Proposal } from '../bridge';
+import type { Proposal, TidyProposal } from '../bridge';
 import { formatBytes, formatCount } from '../format';
+import { listOf, tidyTotals } from '../tidy/model';
+import { TidyGroup } from '../tidy/TidyGroup';
 import { Checkbox, RiskChip, SourceTag } from './bits';
 import { DUPLICATES, groupTotals, included } from './duplicates';
 import { planTotals, tileOf, type GroupChoice } from './totals';
@@ -13,8 +15,15 @@ interface Props {
   mountPoint: string;
   /** The drive's proposals, biggest first. */
   proposals: Proposal[];
-  /** The ids in the drive's plan. */
+  /** The folders Tidy up can sort on this drive (none on macOS). */
+  tidy?: TidyProposal[];
+  /** The ids in the drive's plan: proposals and sorts. */
   plan: string[];
+  /** The sort whose drawer is open, if one is, and how to open or close one. */
+  drawer?: string | null;
+  onDrawer?: (id: string | null) => void;
+  /** A sort's folder tile on the map, if it has one. */
+  tidyTile?: (t: TidyProposal) => string | null;
   /** The AI agent Vacancy found, or null, for AI proposals' source tags. */
   agent: string | null;
   /** The map tile under the pointer, by tile id, so a row and its tile light together. */
@@ -36,12 +45,17 @@ interface Props {
 
 /**
  * Variant D's plan tray, beside the map: the drive's delete proposals with tick boxes, risk chips, a source tag and
- * an expandable why with sample paths; and the plan's total, with the button that asks to free it.
+ * an expandable why with sample paths; the folders Tidy up can sort (Windows); and the plan's total, with the
+ * button that asks to free it. Moves are said apart from what is freed: they free nothing.
  */
 export function PlanTray({
   mountPoint,
   proposals,
+  tidy = [],
   plan,
+  drawer = null,
+  onDrawer = () => {},
+  tidyTile = () => null,
   agent,
   hot,
   onHot,
@@ -59,6 +73,7 @@ export function PlanTray({
   const on = deletes.filter((p) => plan.includes(p.id)).length;
   const t = planTotals(proposals, plan, duplicates ?? undefined);
   const dupGroups = duplicates && plan.includes(DUPLICATES) ? included(duplicates.groups, duplicates.skipped).length : 0;
+  const sorts = tidyTotals(tidy, plan);
   const note = useId();
   return (
     <aside className="tray" aria-label="Plan" data-no-ripple>
@@ -107,6 +122,7 @@ export function PlanTray({
             ),
           )}
         </section>
+        <TidyGroup tidy={tidy} plan={plan} open={drawer} onToggle={onToggle} onOpen={onDrawer} tileOf={tidyTile} hot={hot} onHot={onHot} />
         {hints.length > 0 && (
           <section className="tray-group" aria-label="Left for you">
             <h3>Left for you</h3>
@@ -134,16 +150,30 @@ export function PlanTray({
               One copy of each of {formatCount(dupGroups)} duplicate {dupGroups === 1 ? 'group' : 'groups'} stays
             </li>
           )}
+          {sorts.moves > 0 && (
+            <li className="note-moves">
+              {formatCount(sorts.moves)} {sorts.moves === 1 ? 'file' : 'files'} sorted in {listOf(sorts.folders)}. Moved, not
+              deleted: frees 0 B. Undo any time.
+            </li>
+          )}
           {reminders > 0 && <li>{reminders} left for you, not counted</li>}
         </ul>
         <button
           type="button"
           className="cta tray-cta"
-          disabled={(on === 0 && reminders === 0) || checking}
+          disabled={(on === 0 && reminders === 0 && sorts.moves === 0) || checking}
           aria-describedby={checking || error ? note : undefined}
           onClick={onFree}
         >
-          {on > 0 ? t.bytes > 0 ? `Free ${formatBytes(t.bytes)}` : 'Delete selected items' : reminders > 0 ? 'Review reminders' : 'Nothing selected yet'}
+          {on > 0
+            ? t.bytes > 0
+              ? `Free ${formatBytes(t.bytes)}`
+              : 'Delete selected items'
+            : sorts.moves > 0
+              ? `Move ${formatCount(sorts.moves)} ${sorts.moves === 1 ? 'file' : 'files'}`
+              : reminders > 0
+                ? 'Review reminders'
+                : 'Nothing selected yet'}
         </button>
         {checking && (
           <p className="tray-later" id={note}>

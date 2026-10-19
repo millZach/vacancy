@@ -87,6 +87,16 @@ pub struct Skip {
     pub items: u64,
 }
 
+/// What a step does: deletes (a cleanup) or moves (a Tidy up sort, which frees nothing).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum StepKind {
+    #[default]
+    Delete,
+    Move,
+}
+
 /// One step of a run: one proposal of the plan.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -108,12 +118,19 @@ pub struct StepReport {
     /// Allocated bytes freed: files deleted whose last name it was.
     #[ts(type = "number")]
     pub freed_bytes: u64,
-    /// Files the plan meant to delete.
+    /// Files the plan meant to delete (for a move step, to move).
     #[ts(type = "number")]
     pub planned_items: u64,
     /// Files deleted.
     #[ts(type = "number")]
     pub deleted_items: u64,
+    /// Deletes or moves. Older reports have only deletes.
+    #[serde(default)]
+    pub kind: StepKind,
+    /// Files moved, for a move step.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub moved_items: u64,
     /// Places the plan took files from.
     #[ts(type = "number")]
     pub places: u64,
@@ -154,19 +171,105 @@ pub struct LeftForYou {
     pub hint_action: Option<crate::hints::HintAction>,
 }
 
-/// A folder the run reorganized: its files moved into a tidier layout, every move journaled so it can be undone.
-/// Reorganizations arrive with ticket 08; until then no run has any.
+/// A folder the run reorganized (a Tidy up sort): its loose files moved into a tidier layout, every move journaled
+/// so it can be undone, from the summary or the run history. Moves free nothing.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct Reorganized {
-    /// The reorganization's id.
+    /// The reorganization's id: its proposal's, `tidy-downloads`.
     pub id: String,
     /// The folder, as the user knows it ("Downloads").
     pub folder: String,
     /// Files moved in it.
     #[ts(type = "number")]
     pub moved_items: u64,
+    /// Files the plan meant to move.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub planned_items: u64,
+    /// Its journal's file name in the app's journal folder; empty when it has none (nothing ran).
+    #[serde(default)]
+    pub journal: String,
+    /// The folder's path, for display.
+    #[serde(default)]
+    pub path: String,
+    /// The folders below it the files went into, most files first ("Images", "Documents").
+    #[serde(default)]
+    pub into: Vec<String>,
+    /// Folders the run made for them.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub folders_made: u64,
+    /// Undo can put something back now: a moved file is not back yet.
+    #[serde(default)]
+    pub undoable: bool,
+    /// Its run was interrupted (Vacancy closed while it ran). It is never resumed.
+    #[serde(default)]
+    pub interrupted: bool,
+    /// Something to know about its journal, in a sentence.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub note: Option<String>,
+    /// What Undo did, once it ran.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub undo: Option<Undone>,
+}
+
+/// What an Undo of a reorganization did.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct Undone {
+    /// When it ran, in milliseconds since the Unix epoch, if known (an Undo found in the journal by a later read
+    /// has no time).
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub at: Option<i64>,
+    /// Files back where they were.
+    #[ts(type = "number")]
+    pub back: u64,
+    /// Files that couldn't go back: where each is now, and why.
+    pub stuck: Vec<Skip>,
+    /// Empty folders the run made that Undo removed, below the folder.
+    pub removed: Vec<String>,
+    /// Folders the run made that Undo kept, because they still hold something.
+    pub kept: Vec<String>,
+}
+
+/// A reorganization in the history list: enough to show it and offer Undo.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct TidyListing {
+    pub id: String,
+    pub folder: String,
+    #[ts(type = "number")]
+    pub moved_items: u64,
+    pub undoable: bool,
+    /// Files Undo put back, once it ran.
+    #[ts(type = "number | null")]
+    pub back: Option<u64>,
+    /// Files Undo couldn't put back.
+    #[ts(type = "number")]
+    pub stuck: u64,
+    /// Its run was interrupted (Vacancy closed while it ran).
+    pub interrupted: bool,
+}
+
+impl From<&Reorganized> for TidyListing {
+    fn from(r: &Reorganized) -> Self {
+        Self {
+            id: r.id.clone(),
+            folder: r.folder.clone(),
+            moved_items: r.moved_items,
+            undoable: r.undoable,
+            back: r.undo.as_ref().map(|u| u.back),
+            stuck: r.undo.as_ref().map_or(0, |u| u.stuck.len() as u64),
+            interrupted: r.interrupted,
+        }
+    }
 }
 
 /// What a run did to duplicate files: the extra copies it deleted, and the one copy of each group that stayed.
@@ -322,6 +425,8 @@ pub struct RunListing {
     pub moved_items: u64,
     /// The user stopped it part way.
     pub cancelled: bool,
+    /// The folders it reorganized, with whether each can still be undone.
+    pub tidy: Vec<TidyListing>,
 }
 
 impl From<&RunReport> for RunListing {
@@ -336,6 +441,7 @@ impl From<&RunReport> for RunListing {
             deleted_items: r.deleted_items,
             moved_items: r.moved_items,
             cancelled: r.cancelled,
+            tidy: r.reorganized.iter().map(TidyListing::from).collect(),
         }
     }
 }
@@ -464,6 +570,8 @@ mod tests {
                 freed_bytes: 8,
                 planned_items: 2,
                 deleted_items: 1,
+                kind: StepKind::Delete,
+                moved_items: 0,
                 places: 1,
                 outcome: Outcome::Partial,
                 skipped: vec![Skip {

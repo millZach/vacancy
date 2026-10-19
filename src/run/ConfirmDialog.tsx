@@ -19,7 +19,8 @@ const CHANGED: ReadonlySet<Skip['kind']> = new Set(['changed', 'gone', 'link', '
 
 /**
  * Variant D's one confirmation before a plan runs: what will be deleted for good, from how many places, and that it
- * skips the bin. Moves (which can be undone) and places that changed since the scan are said quietly. "Go back" has
+ * skips the bin. Tidy up's moves (which free nothing and can be undone from the recap or Past runs) and places
+ * that changed since the scan are said quietly. "Go back" has
  * the focus; Escape and the scrim go back too.
  */
 export function ConfirmDialog({ plan, platform, onCancel, onGo }: Props) {
@@ -119,14 +120,20 @@ export function ConfirmDialog({ plan, platform, onCancel, onGo }: Props) {
           </div>
         )}
         {plan.moves > 0 && (
-          <p>
-            {formatCount(plan.moves)} {plan.moves === 1 ? 'file' : 'files'} will be moved. Every move is recorded, so
-            you can undo it from the summary.
+          <p className={deletes ? 'dialog-quiet' : undefined}>
+            {formatCount(plan.moves)} {plan.moves === 1 ? 'file' : 'files'} will be moved into folders, which frees no
+            space. Every move is recorded, so you can undo it from the recap or Past runs.
           </p>
         )}
         {reminders > 0 && <p className="dialog-quiet">{reminders} {reminders === 1 ? 'reminder will' : 'reminders will'} be saved under Left for you. Vacancy won’t touch these items or count them as freed space.</p>}
         {!deletes && plan.moves === 0 && reminders === 0 && (
           <p>Everything in the plan changed since the scan. Scan again to see the drive as it is now.</p>
+        )}
+        {plan.movesRefused.length > 0 && (
+          <p className="dialog-quiet" title={plan.movesRefused.map((r) => r.path).join('\n')}>
+            {plan.movesRefused.length === 1 ? '1 file' : `${formatCount(plan.movesRefused.length)} files`} Vacancy would
+            sort changed since you reviewed {plan.movesRefused.length === 1 ? 'it and stays where it is' : 'them and stay where they are'}.
+          </p>
         )}
         {n > 0 && (deletes || plan.moves > 0 || reminders > 0) && (
           <p className="dialog-quiet" title={plan.refused.map((r) => r.path).join('\n')}>

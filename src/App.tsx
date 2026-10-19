@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useBridge, type RunReport } from './bridge';
 import { Atlas } from './atlas/Atlas';
 import { DrivesPending } from './atlas/DrivesPending';
@@ -36,6 +36,18 @@ export function App() {
   const planRun = scan?.phase === 'done' ? scan.planRun : null;
   const planning = !planRun || planRun.phase === 'failed';
   const report = onMap && scan ? reportOf(scan) : null;
+  // Undo of a folder's Tidy up, from wherever its run shows: the drive's summary, a reopened past run, or Past runs.
+  // The core changes the kept report; every view of that run takes the new one.
+  const reportUpdated = ready?.reportUpdated;
+  const undoTidy = useCallback(
+    async (runId: string, tidyId: string) => {
+      const updated = await bridge.undoTidy(runId, tidyId);
+      reportUpdated?.(updated);
+      setPast((p) => (p && p.id === updated.id ? updated : p));
+      return updated;
+    },
+    [bridge, reportUpdated],
+  );
 
   return (
     <>
@@ -45,7 +57,7 @@ export function App() {
         advisor={<AdvisorTrigger open={advisorOpen} onOpen={() => setAdvisorOpen(true)} />}
         reclaimable={onMap && scan && planning ? reclaimableOf(scan) : null}
         lit={(!!report && report.freedBytes > 0) || (!!past && past.freedBytes > 0)}
-        history={ready && <HistoryMenu locked={ready.locked} onOpen={setPast} />}
+        history={ready && <HistoryMenu locked={ready.locked} onOpen={setPast} {...(bridge.platform === 'windows' ? { onUndo: undoTidy } : {})} />}
         action={
           onMap && !planOpen && !planRun && proposals.length > 0 ? (
             <button type="button" className="cta cta--sm" onClick={() => setPlanOpen(true)}>
@@ -55,7 +67,13 @@ export function App() {
         }
       >
         {past ? (
-          <Finish key={past.id} report={past} start="rest" onClose={() => setPast(null)} />
+          <Finish
+            key={past.id}
+            report={past}
+            start="rest"
+            onClose={() => setPast(null)}
+            {...(bridge.platform === 'windows' ? { onUndo: (tidyId: string) => undoTidy(past.id, tidyId) } : {})}
+          />
         ) : ready ? (
           <Atlas
             drives={ready}
@@ -64,6 +82,7 @@ export function App() {
             advisorOpen={advisorOpen}
             planOpen={planOpen}
             onPlanOpen={setPlanOpen}
+            onUndo={undoTidy}
           />
         ) : (
           <DrivesPending error={drives.status === 'error' ? drives.message : null} />

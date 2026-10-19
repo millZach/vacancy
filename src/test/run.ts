@@ -1,5 +1,5 @@
 // Plans and reports for tests, shaped like the core's (and the Windows fixture's): two steps, one of them partial.
-import { fixtures, type PlanSummary, type RunReport, type Skip, type StepReport } from '../bridge';
+import { fixtures, type PlanSummary, type Reorganized, type RunReport, type Skip, type StepReport } from '../bridge';
 
 const GB = 1e9;
 
@@ -11,10 +11,11 @@ export const plan: PlanSummary = {
   places: 67,
   moves: 0,
   steps: [
-    { id: 'w-node', title: 'node_modules in 61 idle projects', category: 'dev', bytes: 21 * GB, items: 412_118, places: 61 },
-    { id: 'w-browser', title: 'Browser caches', category: 'caches', bytes: 6.3 * GB, items: 48_310, places: 6 },
+    { id: 'w-node', title: 'node_modules in 61 idle projects', category: 'dev', bytes: 21 * GB, items: 412_118, places: 61, kind: 'delete', moves: 0 },
+    { id: 'w-browser', title: 'Browser caches', category: 'caches', bytes: 6.3 * GB, items: 48_310, places: 6, kind: 'delete', moves: 0 },
   ],
   refused: [],
+  movesRefused: [],
   leftForYou: [],
 };
 
@@ -34,6 +35,22 @@ export const changed: Skip = {
   items: 1,
 };
 
+/** A folder a run reorganized, as the core reports it, with no journal unless `over` gives one. */
+export function reorganized(over: Partial<Reorganized> & Pick<Reorganized, 'id' | 'folder' | 'movedItems'>): Reorganized {
+  return {
+    plannedItems: over.movedItems,
+    journal: '',
+    path: `C:\\Users\\alex\\${over.folder}`,
+    into: [],
+    foldersMade: 0,
+    undoable: false,
+    interrupted: false,
+    note: null,
+    undo: null,
+    ...over,
+  };
+}
+
 export function stepReport(over: Partial<StepReport> & Pick<StepReport, 'id' | 'title' | 'category'>): StepReport {
   return {
     why: '',
@@ -42,6 +59,8 @@ export function stepReport(over: Partial<StepReport> & Pick<StepReport, 'id' | '
     freedBytes: 0,
     plannedItems: 0,
     deletedItems: 0,
+    kind: 'delete',
+    movedItems: 0,
     places: 1,
     outcome: 'done',
     skipped: [],
@@ -125,8 +144,8 @@ export const fullReport: RunReport = {
   steps: [{ ...nodeDone, skipped: [hardLinked] }, browserPartial],
   movedItems: 1_028,
   reorganized: [
-    { id: 'r-downloads', folder: 'Downloads', movedItems: 812 },
-    { id: 'r-desktop', folder: 'Desktop', movedItems: 216 },
+    reorganized({ id: 'r-downloads', folder: 'Downloads', movedItems: 812 }),
+    reorganized({ id: 'r-desktop', folder: 'Desktop', movedItems: 216 }),
   ],
   leftForYou: [
     {
@@ -146,5 +165,5 @@ export const moveAdviceReport: RunReport = {
   steps: [], plannedBytes: 0, freedBytes: 0, deletedItems: 0, skippedItems: 0, freedByCategory: [], biggestWin: null,
   usedAfter: report.usedBefore, freeAfter: report.freeBefore, freeChange: 0,
   movedItems: 4,
-  reorganized: [{ id: 'r-move-advice', folder: 'Downloads', movedItems: 4 }],
+  reorganized: [reorganized({ id: 'r-move-advice', folder: 'Downloads', movedItems: 4 })],
 };

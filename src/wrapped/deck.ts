@@ -113,7 +113,8 @@ export interface Kept {
 }
 
 export function keptOf(r: RunReport): Kept {
-  const all = r.steps.flatMap((s) => s.skipped);
+  // A sort's files that stayed are told with its folder (the Reorganized section and the Moved slide).
+  const all = r.steps.filter((s) => s.kind !== 'move').flatMap((s) => s.skipped);
   return {
     left: all.filter((k) => k.kind !== 'cancelled' && !isNote(k)),
     stopped: all.filter((k) => k.kind === 'cancelled'),

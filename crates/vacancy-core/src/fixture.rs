@@ -12,9 +12,12 @@
 //! temp files, an idle project whose `node_modules` is laid out the way pnpm lays it out (links into `.pnpm`, a
 //! hard link into a package store outside it), a link inside a cache pointing at the profile's `Documents`, a
 //! read-only file, a file for a test to hold open, a target for a test to modify after the scan, a path longer
-//! than 260 characters, and a `Documents` folder that nothing may touch. It also holds known duplicate files for
-//! the duplicate finder (see [`DuplicateCases`]). `cargo run -p vacancy-core --example fixture -- <folder>` writes
-//! one.
+//! than 260 characters, and a `Documents` folder that no cleanup may touch. For Tidy up, Downloads, Desktop and
+//! the top of Documents also hold a messy set of loose files of every kind over several years, with a name that
+//! collides in its destination, an old installer a cleanup deletes too (delete wins over sort), a file to change
+//! after the scan and one to hold open ([`TidyProfile`]). It also holds known duplicate files for the duplicate
+//! finder, some of them loose among Tidy up's ([`DuplicateCases`]). `cargo run -p vacancy-core --example fixture
+//! -- <folder>` writes one.
 
 use std::fs;
 use std::io;
@@ -233,6 +236,28 @@ pub struct DuplicateCases {
     /// with another end, a hard link pair, copies under 1 MiB, a copy in a cloud-sync folder, one in a Photos
     /// library, one only reachable through a link, and an installer another rule already deletes.
     pub not_duplicates: Vec<PathBuf>,
+    /// The loose files Tidy up sorts (Windows; the same files are written on macOS, where nothing sorts them).
+    pub tidy: TidyProfile,
+}
+
+/// The fixture's loose files for Tidy up, by role.
+#[derive(Clone, Debug)]
+pub struct TidyProfile {
+    /// Every loose file written for it, at the top of Downloads, Desktop and Documents.
+    pub files: Vec<PathBuf>,
+    /// A loose file whose name a file already has in its destination: it gets a numbered suffix.
+    pub collision: PathBuf,
+    /// The file already in the destination, which must keep its name and contents.
+    pub collision_existing: PathBuf,
+    /// An old installer in Downloads that the old-installers cleanup takes too: with both in a plan it is deleted,
+    /// not moved.
+    pub deleted_too: PathBuf,
+    /// A loose file for a test to change after the scan: its move is skipped with a reason.
+    pub changed_later: PathBuf,
+    /// A loose file for a test to hold open during the run: its move is skipped with a reason.
+    pub held_open: PathBuf,
+    /// Files the rules leave where they are: a shortcut, the folder's settings, an unfinished download.
+    pub stays: Vec<PathBuf>,
 }
 
 /// The profile's files, relative to its home, `/`-separated, with their sizes, and how old they are in days.
@@ -426,6 +451,7 @@ fn build_options(root: &Path, bulk: usize, advice: bool) -> io::Result<Profile> 
             20,
         );
     }
+    let tidy = tidy_files(&mut file);
 
     let dups = duplicate_specs(windows);
     specs.extend(dups.specs);
@@ -577,6 +603,15 @@ fn build_options(root: &Path, bulk: usize, advice: bool) -> io::Result<Profile> 
         change_kept: at(dups.change_kept),
         not_duplicates: dups.not_duplicates.iter().map(|r| at(r)).collect(),
     };
+    let tidy = TidyProfile {
+        files: tidy.files.iter().map(|rel| sub(&home, rel)).collect(),
+        collision: sub(&home, &tidy.collision),
+        collision_existing: sub(&home, &tidy.collision_existing),
+        deleted_too: sub(&home, "Downloads/old-setup.exe"),
+        changed_later: sub(&home, &tidy.changed_later),
+        held_open: sub(&home, &tidy.held_open),
+        stays: tidy.stays.iter().map(|rel| sub(&home, rel)).collect(),
+    };
     std::thread::sleep(SETTLE);
     Ok(Profile {
         duplicates,
@@ -599,6 +634,7 @@ fn build_options(root: &Path, bulk: usize, advice: bool) -> io::Result<Profile> 
         node_modules,
         store_file,
         untouched,
+        tidy,
         home,
     })
 }
@@ -622,7 +658,8 @@ struct DuplicateSpecs {
 /// - a video in Videos (Movies) over an older copy in Downloads;
 /// - a document with its own name over an older "- Copy";
 /// - a guide in Documents over a copy in Downloads (the group a proof unticks);
-/// - the older of two photos in Pictures.
+/// - the older of two photos in Pictures;
+/// - a spreadsheet loose on the Desktop over a newer "(1)" copy in Downloads (both loose files Tidy up sorts).
 fn duplicate_specs(windows: bool) -> DuplicateSpecs {
     const KIB: usize = 1024;
     const MIB: usize = 1024 * KIB;
@@ -702,6 +739,18 @@ fn duplicate_specs(windows: bool) -> DuplicateSpecs {
                 0,
             )],
         ),
+        // Loose at the top of the Desktop, which Tidy up sorts: deleting the Downloads copy runs first, so the
+        // kept copy is still where the scan saw it when it is checked, and only then sorted.
+        (
+            copy("Desktop/Budget 2026.xlsx", MIB + 20 * KIB, 500, 13, 0),
+            vec![copy(
+                "Downloads/Budget 2026 (1).xlsx",
+                MIB + 20 * KIB,
+                30,
+                13,
+                0,
+            )],
+        ),
     ];
     let not_duplicates = vec![
         // The same length, other contents.
@@ -775,6 +824,89 @@ fn write_seeded(path: &Path, len: usize, seed: u64, tail: usize) -> io::Result<(
         *b = !*b;
     }
     fs::write(path, data)
+}
+
+/// The Tidy up files, relative to the home, `/`-separated.
+struct TidyFiles {
+    files: Vec<String>,
+    collision: String,
+    collision_existing: String,
+    changed_later: String,
+    held_open: String,
+    stays: Vec<String>,
+}
+
+/// Writes (through `file`) the messy loose files Tidy up sorts: images, videos, audio, documents, installers, archives
+/// and odd files in Downloads, Desktop and the top of Documents, modified this year and one and two years ago;
+/// a name already taken in its destination; and files the rules leave alone. Kept apart from the cleanup
+/// fixture so the two grow independently. Installers here are fresh, so the old-installers cleanup leaves them;
+/// `Downloads/old-setup.exe`, which it takes, is the cleanup fixture's own.
+fn tidy_files(file: &mut impl FnMut(&str, usize, u64)) -> TidyFiles {
+    const KIB: usize = 1024;
+    // Days ago: this year's, last year's and the year before's (by modified time).
+    const NOW: u64 = 20;
+    const LAST: u64 = 400;
+    const BEFORE: u64 = 760;
+    let loose: &[(&str, usize, u64)] = &[
+        ("Downloads/IMG_3301.jpg", 36 * KIB, NOW),
+        ("Downloads/boarding-pass.png", 12 * KIB, NOW),
+        ("Downloads/IMG_2041.jpg", 30 * KIB, LAST),
+        ("Downloads/logo-final.svg", 4 * KIB, LAST),
+        ("Downloads/floorplan-v3.png", 18 * KIB, BEFORE),
+        ("Downloads/statement-2026-09.pdf", 9 * KIB, NOW),
+        ("Downloads/resume-2025.docx", 14 * KIB, LAST),
+        ("Downloads/old-lease.pdf", 8 * KIB, BEFORE),
+        ("Downloads/screen-recording.mp4", 64 * KIB, NOW),
+        ("Downloads/birthday.mov", 48 * KIB, LAST),
+        ("Downloads/voice-memo.m4a", 12 * KIB, LAST),
+        ("Downloads/VSCodeUserSetup-x64.exe", 40 * KIB, 5),
+        ("Downloads/fonts.zip", 20 * KIB, 100),
+        ("Downloads/drivers.7z", 16 * KIB, 100),
+        ("Downloads/data.bin", 6 * KIB, 50),
+        ("Downloads/export_1734", 3 * KIB, 50),
+        ("Desktop/Screenshot 2026-10-02 141133.png", 22 * KIB, 16),
+        ("Desktop/wallpaper.jpg", 40 * KIB, LAST),
+        ("Desktop/notes-meeting.docx", 7 * KIB, 3),
+        ("Desktop/todo.txt", 2 * KIB, NOW),
+        ("Desktop/project-old.zip", 26 * KIB, LAST),
+        ("Desktop/OBS-Studio-Setup.exe", 30 * KIB, 8),
+        ("Desktop/thing", 2 * KIB, 30),
+        ("Documents/tax-return.pdf", 11 * KIB, LAST),
+        ("Documents/budget.xlsx", 9 * KIB, LAST),
+        ("Documents/minutes.docx", 5 * KIB, BEFORE),
+        ("Documents/scan001.jpg", 28 * KIB, LAST),
+        ("Documents/Untitled", KIB, 50),
+    ];
+    let stays: &[(&str, usize, u64)] = &[
+        ("Desktop/Steam.lnk", KIB, 30),
+        ("Desktop/desktop.ini", KIB, 30),
+        ("Downloads/video.mp4.crdownload", 8 * KIB, 1),
+    ];
+    // A file of last year's already sits where Downloads' fonts.zip and Documents' tax-return.pdf go.
+    let year = crate::tidy::year_of(
+        SystemTime::now()
+            .checked_sub(Duration::from_secs(LAST * 86_400 + 60))
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_nanos() as i128),
+    );
+    let existing = [
+        ("Downloads/Archives/fonts.zip".to_owned(), 5 * KIB, 300),
+        (format!("Documents/{year}/tax-return.pdf"), 10 * KIB, LAST),
+    ];
+    for (rel, len, days) in loose.iter().chain(stays) {
+        file(rel, *len, *days);
+    }
+    for (rel, len, days) in &existing {
+        file(rel, *len, *days);
+    }
+    TidyFiles {
+        files: loose.iter().map(|(rel, _, _)| (*rel).to_owned()).collect(),
+        collision: "Documents/tax-return.pdf".into(),
+        collision_existing: format!("Documents/{year}/tax-return.pdf"),
+        changed_later: "Desktop/notes-meeting.docx".into(),
+        held_open: "Downloads/statement-2026-09.pdf".into(),
+        stays: stays.iter().map(|(rel, _, _)| (*rel).to_owned()).collect(),
+    }
 }
 
 /// `base` joined with `/`-separated names.

@@ -1,7 +1,7 @@
 // A running plan as the run panel and the map show it: each step's state and figures, the skips as they arrive, and
 // the log. This is the pure part: the view a plan starts with, and how the run's events (and, at the end, its report)
 // change it. The session keeps one per drive.
-import type { CategoryId, Outcome, PlanSummary, RunEvent, RunReport, Skip, StepReport } from '../bridge';
+import type { CategoryId, Outcome, PlanSummary, RunEvent, RunReport, Skip, StepKind, StepReport } from '../bridge';
 import { formatBytes, formatCount } from '../format';
 
 export type StepStatus = 'pending' | 'running' | 'done';
@@ -18,6 +18,14 @@ export interface StepView {
   freedBytes: number;
   /** Files deleted so far. */
   deletedItems: number;
+  /** Deletes, or moves (a Tidy up sort, which frees nothing). */
+  kind: StepKind;
+  /** Files a move step means to move. */
+  plannedMoves: number;
+  /** Moves a move step has handled so far (moved, or skipped with a reason). */
+  handled: number;
+  /** Files a move step moved, once it has finished. */
+  movedItems: number;
   status: StepStatus;
   /** How it ended, once it has. */
   outcome: Outcome | null;
@@ -60,6 +68,10 @@ export function startRun(plan: PlanSummary): RunView {
       plannedBytes: s.bytes,
       freedBytes: 0,
       deletedItems: 0,
+      kind: s.kind,
+      plannedMoves: s.moves,
+      handled: 0,
+      movedItems: 0,
       status: 'pending',
       outcome: null,
       skips: [],
@@ -113,6 +125,12 @@ export function foldEvents(view: RunView, events: readonly RunEvent[]): RunView 
         settleStep(s, e.report);
         write('sum', stepLine(e.report));
         break;
+      case 'moveProgress':
+        if (s.status === 'pending') s.status = 'running';
+        s.handled = e.done;
+        s.plannedMoves = e.total;
+        current = e.step;
+        break;
     }
   }
 
@@ -145,20 +163,34 @@ function settleStep(s: StepView, r: StepReport) {
   s.outcome = r.outcome;
   s.freedBytes = r.freedBytes;
   s.deletedItems = r.deletedItems;
+  if (r.kind === 'move') {
+    s.movedItems = r.movedItems;
+    s.handled = r.plannedItems;
+  }
   // The report's list is the step's own: at most a dozen of each kind, the rest summed into one.
   s.skips = r.skipped;
 }
 
 const total = (steps: readonly StepView[]) => steps.reduce((sum, s) => sum + s.freedBytes, 0);
 
-/** A finished step the run never got to: it was stopped first, so it deleted nothing. */
-export function neverReached(deletedItems: number, skips: readonly Skip[]): boolean {
-  return deletedItems === 0 && skips.some((k) => k.kind === 'cancelled');
+/** A finished step the run never got to: it was stopped first, so it deleted (or moved) nothing. */
+export function neverReached(done: number, skips: readonly Skip[]): boolean {
+  return done === 0 && skips.some((k) => k.kind === 'cancelled');
 }
 
-/** The line a finished step adds to the log: "Browser caches: 5.9 GB freed, 212 files left". */
+/** What a finished step did, in files: deleted, or for a move step moved. */
+export const doneOf = (r: Pick<StepReport, 'deletedItems'> & { movedItems?: number }) => r.deletedItems + (r.movedItems ?? 0);
+
+/**
+ * The line a finished step adds to the log: "Browser caches: 5.9 GB freed, 212 files left", or for a sort "Sort
+ * Downloads: 184 files moved, nothing deleted, every move recorded".
+ */
 export function stepLine(r: StepReport): string {
   const left = r.skipped.reduce((n, k) => n + k.items, 0);
+  if (r.kind === 'move') {
+    const moved = `${formatCount(r.movedItems)} ${r.movedItems === 1 ? 'file' : 'files'} moved`;
+    return `${r.title}: ${moved}, nothing deleted${r.movedItems > 0 ? ', every move recorded' : ''}${left > 0 ? `, ${formatCount(left)} left where ${left === 1 ? 'it was' : 'they were'}` : ''}`;
+  }
   const freed = r.outcome === 'skipped' ? 'nothing freed' : `${formatBytes(r.freedBytes)} freed`;
   return left > 0 ? `${r.title}: ${freed}, ${formatCount(left)} ${left === 1 ? 'file' : 'files'} left` : `${r.title}: ${freed}`;
 }

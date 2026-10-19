@@ -39,12 +39,13 @@ use crate::plan::{
     Action, KeptCopy, LooseFile, Plan, Step as PlanStep, Target, denied_reason, next_id,
 };
 use crate::report::{
-    CategoryFreed, DuplicatePair, DuplicatesDone, Outcome, RunReport, Skip, SkipKind, StepReport,
-    TileFreed,
+    CategoryFreed, DuplicatePair, DuplicatesDone, Outcome, Reorganized, RunReport, Skip, SkipKind,
+    StepKind, StepReport, TileFreed,
 };
 use crate::scan::CancelToken;
 use crate::snapshot::{digest_key, file_digest_key};
 use crate::text::group_digits;
+use crate::tidy::{Approved, Journals};
 use crate::volume::VolumeInfo;
 
 #[cfg(unix)]
@@ -72,6 +73,22 @@ pub enum RunEvent {
     Skipped(Skipped),
     /// A step ended.
     StepFinished(StepFinished),
+    /// How far a move step (a Tidy up sort) has got: after each of its moves.
+    MoveProgress(MoveProgress),
+}
+
+/// See [`RunEvent::MoveProgress`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct MoveProgress {
+    pub step: u32,
+    /// Moves handled so far (moved, or skipped with a reason).
+    #[ts(type = "number")]
+    pub done: u64,
+    /// Moves the step makes.
+    #[ts(type = "number")]
+    pub total: u64,
 }
 
 /// See [`RunEvent::StepStarted`].
@@ -153,8 +170,55 @@ pub fn execute(
     on_event: &mut dyn FnMut(RunEvent),
     cancel: &CancelToken,
 ) -> RunReport {
-    execute_inner(plan, env, figures, on_event, cancel, &Hooks::default())
+    execute_inner(
+        plan,
+        env,
+        Sorts::default(),
+        figures,
+        on_event,
+        cancel,
+        &Hooks::default(),
+    )
 }
+
+/// [`execute`], for a plan that may hold Tidy up sorts: they run after the deletes, each with a journal of its own
+/// in `journals`. Right before the first sort, `checkpoint` gets the report so far (the sorts marked interrupted),
+/// for the caller to keep: if the app closes while files move, the history still finds their journals. If it can't
+/// keep it (it gives why), no sort begins: each is reported skipped with that reason, since a journal nothing leads
+/// to could never be undone from the app. A plan with sorts and no `journals` moves nothing and says why.
+pub fn execute_with(
+    plan: &Plan,
+    env: &Env,
+    journals: Option<&Journals>,
+    checkpoint: &mut dyn FnMut(&RunReport) -> Result<(), String>,
+    figures: &dyn Fn() -> Option<VolumeInfo>,
+    on_event: &mut dyn FnMut(RunEvent),
+    cancel: &CancelToken,
+) -> RunReport {
+    let sorts = Sorts {
+        journals,
+        checkpoint: Some(checkpoint),
+    };
+    execute_inner(
+        plan,
+        env,
+        sorts,
+        figures,
+        on_event,
+        cancel,
+        &Hooks::default(),
+    )
+}
+
+/// Where a run's sorts keep their journals, and who keeps the report as the sorts begin.
+#[derive(Default)]
+pub(crate) struct Sorts<'s> {
+    journals: Option<&'s Journals>,
+    checkpoint: Option<&'s mut Checkpoint<'s>>,
+}
+
+/// Keeps a run's report before its sorts begin; gives why it couldn't.
+pub type Checkpoint<'a> = dyn FnMut(&RunReport) -> Result<(), String> + 'a;
 
 /// The folder at `path` and what it lists, read now through a fresh walk that follows no link: its chain and its
 /// entries. For the planner, which reads a folder's loose files by identity.
@@ -410,6 +474,7 @@ const SKIPS_PER_KIND: usize = 12;
 pub(crate) fn execute_inner(
     plan: &Plan,
     env: &Env,
+    mut sorts: Sorts<'_>,
     figures: &dyn Fn() -> Option<VolumeInfo>,
     on_event: &mut dyn FnMut(RunEvent),
     cancel: &CancelToken,
@@ -417,6 +482,7 @@ pub(crate) fn execute_inner(
 ) -> RunReport {
     let started = Instant::now();
     let started_at = SystemTime::now();
+    let id = next_id("run");
     let before = figures();
     let mut run = Run {
         on_event,
@@ -441,15 +507,91 @@ pub(crate) fn execute_inner(
         }));
         steps.push(report);
     }
+    let mut reorganized = Vec::new();
+    // Why no sort may begin: the checkpoint report couldn't be kept.
+    let mut blocked = None;
+    if !plan.tidy().is_empty() {
+        // Kept before any file moves: a run the app never finishes still leads the history to its journals.
+        let pending: Vec<Reorganized> = plan
+            .tidy()
+            .iter()
+            .map(|t| Reorganized {
+                id: t.id.clone(),
+                folder: t.name.clone(),
+                moved_items: 0,
+                planned_items: t.planned(),
+                journal: crate::tidy::journal_for(&id, &t.id),
+                path: t.path.clone(),
+                into: t.into.clone(),
+                folders_made: 0,
+                undoable: false,
+                interrupted: true,
+                note: None,
+                undo: None,
+            })
+            .collect();
+        if let Some(checkpoint) = sorts.checkpoint.as_mut() {
+            let mut at = report(
+                plan,
+                steps.clone(),
+                started,
+                started_at,
+                before.clone(),
+                before.clone(),
+                cancel,
+            );
+            at.id = id.clone();
+            at.reorganized = pending;
+            // The deletes are done by now: a run reopened from this checkpoint still tells its duplicates.
+            at.duplicates = run.duplicates.clone();
+            blocked = checkpoint(&at).err();
+        }
+    }
+    let first = steps.len();
+    for (k, approved) in plan.tidy().iter().enumerate() {
+        let index = u32::try_from(first + k).unwrap_or(u32::MAX);
+        (run.on_event)(RunEvent::StepStarted(StepStarted {
+            step: index,
+            id: approved.id.clone(),
+        }));
+        let on_event = &mut *run.on_event;
+        let (skips, record) = crate::tidy::run_sort(
+            approved,
+            &id,
+            env,
+            sorts.journals,
+            blocked.as_deref(),
+            cancel,
+            &mut |done, total| {
+                on_event(RunEvent::MoveProgress(MoveProgress {
+                    step: index,
+                    done,
+                    total,
+                }))
+            },
+        );
+        // What planning left out of the sort is reported with what the run left, as a cleanup's refusals are.
+        let skips = approved.refused.iter().cloned().chain(skips).collect();
+        let report = sort_report(approved, skips, record.moved_items);
+        (run.on_event)(RunEvent::StepFinished(StepFinished {
+            step: index,
+            report: report.clone(),
+        }));
+        steps.push(report);
+        reorganized.push(record);
+    }
     let after = figures();
-    let mut report = report(plan, steps, started, started_at, before, after, cancel);
-    report.duplicates = run.duplicates.take();
-    report
+    let mut out = report(plan, steps, started, started_at, before, after, cancel);
+    out.id = id;
+    out.moved_items = reorganized.iter().map(|r| r.moved_items).sum();
+    out.reorganized = reorganized;
+    out.duplicates = run.duplicates.take();
+    out
 }
 
 /// The moment from which a change counts as since the scan: its start, to the whole second before, less the
 /// margin. In nanoseconds since the Unix epoch.
-fn threshold(since: SystemTime) -> i128 {
+pub(crate) fn threshold(since: SystemTime) -> i128 {
     let secs = since
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -645,21 +787,26 @@ impl Run<'_, '_> {
             sr.tally.links = 0;
             sr.tally.left.clear();
             sr.live = 0;
-            // An extra copy goes only while the copy its group keeps is still the one the scan saw.
-            if let Some(keep) = &action.keep
-                && let Err(reason) = self.kept_unchanged(&mut sr, keep)
-            {
-                let skip = Skip {
-                    path: action.path.display().to_string(),
-                    reason,
-                    kind: SkipKind::Changed,
-                    bytes: action.bytes,
-                    items: action.files,
-                };
-                self.skipped(&mut sr, skip);
-                continue;
-            }
-            if let Err(whole) = self.action(&mut sr, action) {
+            // An extra copy goes only while the copy its group keeps is still the one the scan saw: found again and
+            // held for as long as the extra copy is being deleted (see `sys::Held`).
+            let held = match &action.keep {
+                Some(keep) => match self.hold_kept(&mut sr, keep) {
+                    Ok(held) => Some(held),
+                    Err(reason) => {
+                        let skip = Skip {
+                            path: action.path.display().to_string(),
+                            reason,
+                            kind: SkipKind::Changed,
+                            bytes: action.bytes,
+                            items: action.files,
+                        };
+                        self.skipped(&mut sr, skip);
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            if let Err(whole) = self.action(&mut sr, action, held.as_ref()) {
                 let skip = Skip {
                     path: action.path.display().to_string(),
                     reason: whole.reason,
@@ -708,37 +855,24 @@ impl Run<'_, '_> {
         step_report(step, sr.tally)
     }
 
-    /// Whether the copy a duplicate group keeps is still the one the scan saw: found again by a fresh walk that
-    /// follows no link, the same file (identity), an ordinary file at the same length and allocation, unchanged
-    /// since the scan. Once it isn't, nothing more of its group goes, even if it comes back. `Err` with why.
-    fn kept_unchanged(&self, sr: &mut StepRun<'_>, keep: &KeptCopy) -> Result<(), String> {
-        let why = || {
-            format!(
-                "The copy Vacancy keeps of it ({}) changed or is gone since the scan, so this copy stays",
-                keep.path.display()
+    /// Holds the copy a duplicate group keeps, if it is still the one the scan saw: found again by a fresh walk
+    /// that follows no link, the same file (identity), an ordinary file at the same length and allocation, unchanged
+    /// since the scan, and held so it stays there while the extra copy beside it is deleted (see `sys::Held`). Once
+    /// it isn't, nothing more of its group goes, even if it comes back. `Err` with why.
+    fn hold_kept(&self, sr: &mut StepRun<'_>, keep: &KeptCopy) -> Result<sys::Held, String> {
+        if !sr.dups.kept_whole.contains(&keep.group)
+            && let Ok(held) = sys::hold_file(
+                &keep.path,
+                keep.identity,
+                keep.logical,
+                keep.alloc,
+                self.threshold,
             )
-        };
-        if sr.dups.kept_whole.contains(&keep.group) {
-            return Err(why());
-        }
-        let found = (|| {
-            let name = keep.path.file_name()?;
-            let parent = sys::walk_to_parent(&keep.path, false).ok()?;
-            let volume = parent.steps.last().map_or(0, |s| s.id.volume());
-            let e = sys::entry(&parent.dir, name).ok()?;
-            Some(
-                e.kind == Kind::File
-                    && e.step(volume).id == keep.identity
-                    && e.changed < self.threshold
-                    && e.alloc == keep.alloc
-                    && e.logical == keep.logical,
-            )
-        })();
-        if found == Some(true) {
-            return Ok(());
+        {
+            return Ok(held);
         }
         sr.dups.kept_whole.insert(keep.group);
-        Err(why())
+        Err(kept_gone(keep))
     }
 
     /// A skip of a whole place (or one the planner refused): sent, and kept for the report.
@@ -815,7 +949,12 @@ impl Run<'_, '_> {
 
     /// Carries out one action: the fresh walk, the Guard, the fingerprint, then the delete. `Err` when it is
     /// skipped whole, before anything in it was deleted.
-    fn action(&mut self, sr: &mut StepRun<'_>, action: &Action) -> Result<(), Whole> {
+    fn action(
+        &mut self,
+        sr: &mut StepRun<'_>,
+        action: &Action,
+        held: Option<&sys::Held>,
+    ) -> Result<(), Whole> {
         let path = &action.path;
         let name = path
             .file_name()
@@ -852,6 +991,13 @@ impl Run<'_, '_> {
                 self.look_at_open_files(sr, false);
                 if !in_place(parent_steps, path.parent().unwrap_or(path)) {
                     return Err(Whole::new(SkipKind::Changed, MOVED));
+                }
+                // The kept copy, looked at once more right before the extra copy goes.
+                if let (Some(held), Some(keep)) = (held, &action.keep)
+                    && !held.still_there()
+                {
+                    sr.dups.kept_whole.insert(keep.group);
+                    return Err(Whole::new(SkipKind::Changed, kept_gone(keep)));
                 }
                 self.delete_file(sr, parent_dir, path, &entry, false);
                 Ok(())
@@ -1380,12 +1526,26 @@ fn same_volume(target: &Step, sub: &Step) -> bool {
 
 fn changed_inside(path: &Path, at: &Path) -> Whole {
     let rel = at.strip_prefix(path).unwrap_or(at);
+    // The target itself changed: name it, so the sentence never reads "It changed since the scan:  was modified".
+    let what = if rel.as_os_str().is_empty() {
+        path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        )
+    } else {
+        rel.display().to_string()
+    };
     Whole::new(
         SkipKind::Changed,
-        format!(
-            "It changed since the scan: {} was modified, added or moved",
-            rel.display()
-        ),
+        format!("It changed since the scan: {what} was modified, added or moved"),
+    )
+}
+
+/// Why an extra copy of a duplicate group stays: the copy kept of it isn't the one the scan saw any more.
+fn kept_gone(keep: &KeptCopy) -> String {
+    format!(
+        "The copy Vacancy keeps of it ({}) changed or is gone since the scan, so this copy stays",
+        keep.path.display()
     )
 }
 
@@ -1546,9 +1706,48 @@ fn step_report(step: &PlanStep, tally: Tally) -> StepReport {
         freed_bytes: tally.step.freed,
         planned_items,
         deleted_items: tally.step.deleted,
+        kind: StepKind::Delete,
+        moved_items: 0,
         places: step.actions.len() as u64,
         outcome,
         skipped,
+    }
+}
+
+/// The report of a Tidy up sort step: what it moved and what it left, and why. It frees nothing.
+fn sort_report(approved: &Approved, skips: Vec<Skip>, moved: u64) -> StepReport {
+    let left: u64 = skips
+        .iter()
+        .filter(|k| !k.kind.is_note())
+        .map(|k| k.items)
+        .sum();
+    let outcome = if left == 0 {
+        Outcome::Done
+    } else if moved > 0 {
+        Outcome::Partial
+    } else {
+        Outcome::Skipped
+    };
+    StepReport {
+        id: approved.id.clone(),
+        title: approved.title(),
+        why: format!(
+            "Loose files at the top of {} sorted into folders by kind and year, by Vacancy's built-in rules. Moved, \
+             not deleted.",
+            approved.name
+        ),
+        category: approved.category(),
+        regenerable: false,
+        planned_bytes: 0,
+        freed_bytes: 0,
+        // What the review meant to move: moved and left add up to it.
+        planned_items: approved.planned(),
+        deleted_items: 0,
+        kind: StepKind::Move,
+        moved_items: moved,
+        places: 0,
+        outcome,
+        skipped: skips,
     }
 }
 
@@ -1608,7 +1807,7 @@ fn report(
         planned_bytes: steps.iter().map(|s| s.planned_bytes).sum(),
         freed_bytes: steps.iter().map(|s| s.freed_bytes).sum(),
         deleted_items: steps.iter().map(|s| s.deleted_items).sum(),
-        // Reorganizations arrive with ticket 08.
+        // Set by the caller from the sorts' records.
         moved_items: 0,
         // Names deleted while other names keep the file were deleted, not skipped.
         skipped_items: steps
@@ -1706,7 +1905,15 @@ mod tests {
 
         fn run(&self, id: &str, hooks: &Hooks<'_>, cancel: &CancelToken) -> RunReport {
             let plan = crate::plan::plan(&self.scanned, &self.env, &[id.to_owned()]).unwrap();
-            execute_inner(&plan, &self.env, &|| None, &mut |_| {}, cancel, hooks)
+            execute_inner(
+                &plan,
+                &self.env,
+                Sorts::default(),
+                &|| None,
+                &mut |_| {},
+                cancel,
+                hooks,
+            )
         }
 
         fn documents(&self) -> Vec<String> {
@@ -2172,6 +2379,7 @@ mod tests {
         let report = execute_inner(
             &plan,
             &fx.env,
+            Sorts::default(),
             &|| None,
             &mut |_| {},
             &CancelToken::new(),

@@ -16,7 +16,7 @@
 //!
 //! A plan can't be changed once made: its fields are private and it is only ever read.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,9 +29,11 @@ use crate::categorize::{CategoryId, Env, ItemRef};
 use crate::fsid::{Identity, Walker};
 use crate::guard::{Denied, Guard};
 use crate::map::{Overview, ScannedVolume};
-use crate::report::{LeftForYou, Skip, SkipKind};
+use crate::report::{LeftForYou, Skip, SkipKind, StepKind};
 use crate::rules::{ProposalAction, loose};
+use crate::scan::CancelToken;
 use crate::snapshot::{DirId, Snapshot, file_digest_key};
+use crate::tidy::Approved;
 
 /// A plan, as the confirm dialog shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
@@ -51,7 +53,7 @@ pub struct PlanSummary {
     /// Places it takes them from.
     #[ts(type = "number")]
     pub places: u64,
-    /// Folder moves it makes, which can be undone. None until reorganizations arrive (ticket 08).
+    /// Folder moves it makes (Tidy up), which free nothing and can be undone.
     #[ts(type = "number")]
     pub moves: u64,
     /// Its steps, one per proposal, in the order they run.
@@ -59,6 +61,9 @@ pub struct PlanSummary {
     /// Places the Guard refused, or found changed, while planning: left out of the numbers above, and reported
     /// as skipped when the plan runs.
     pub refused: Vec<Skip>,
+    /// Files of the plan's sorts left out while planning (changed since the review, or their reviewed name taken):
+    /// not in `moves`, and reported with the sort when the plan runs.
+    pub moves_refused: Vec<Skip>,
     /// Advice in the selection that Vacancy can't carry out itself, by proposal id.
     pub left_for_you: Vec<String>,
     /// The duplicate files in it, if their proposal is: how many groups lose their extra copies and how many the
@@ -114,6 +119,11 @@ pub struct PlanStep {
     pub items: u64,
     #[ts(type = "number")]
     pub places: u64,
+    /// Deletes, or moves (a Tidy up sort, with `bytes`, `items` and `places` zero).
+    pub kind: StepKind,
+    /// Files it moves, for a move step.
+    #[ts(type = "number")]
+    pub moves: u64,
 }
 
 /// Why a selection couldn't become a plan.
@@ -125,6 +135,12 @@ pub enum PlanError {
     /// No cleanup or advice was selected.
     #[error("the plan is empty")]
     Empty,
+    /// A skipped duplicate group names no group of this scan's duplicates: the groups the user saw aren't these.
+    #[error("there is no duplicate group {0} in this scan: look for duplicates again")]
+    NoSuchGroup(String),
+    /// The duplicates proposal was planned without saying which groups to skip (see [`plan_with`]).
+    #[error("duplicate files are planned with the groups to skip")]
+    DuplicatesNeedGroups,
 }
 
 /// What an action deletes.
@@ -164,12 +180,15 @@ pub(crate) struct Action {
     pub(crate) files: u64,
     /// For a file, its length when the scan listed it.
     pub(crate) logical: u64,
+    /// The proposal's target it was made from.
+    pub(crate) from: ItemRef,
     /// For an extra copy of a duplicate group, the copy that stays: checked before this one goes.
     pub(crate) keep: Option<KeptCopy>,
 }
 
 /// The copy of a duplicate group that stays, as the scan and the duplicate finder saw it. Before an extra copy
-/// goes, the executor finds it again: the same file, at the same sizes, unchanged since the scan.
+/// goes, the executor finds it again and holds it while the extra copy is deleted: the same file, at the same sizes,
+/// unchanged since the scan.
 #[derive(Clone, Debug)]
 pub(crate) struct KeptCopy {
     pub(crate) path: PathBuf,
@@ -231,6 +250,10 @@ pub struct Plan {
     since: SystemTime,
     steps: Vec<Step>,
     left_for_you: Vec<LeftForYou>,
+    /// The Tidy up sorts it runs after its deletes, each validated when the plan was made.
+    tidy: Vec<Approved>,
+    /// Sorts refused while planning: nothing of them can run.
+    tidy_refused: Vec<Skip>,
     /// The map of the scan it was made from, for the run's report.
     map: Overview,
 }
@@ -243,7 +266,7 @@ impl Plan {
 
     /// What the confirm dialog shows.
     pub fn summary(&self) -> PlanSummary {
-        let steps: Vec<PlanStep> = self
+        let mut steps: Vec<PlanStep> = self
             .steps
             .iter()
             .map(|s| PlanStep {
@@ -253,20 +276,38 @@ impl Plan {
                 bytes: s.actions.iter().map(|a| a.bytes).sum(),
                 items: s.actions.iter().map(|a| a.files).sum(),
                 places: s.actions.len() as u64,
+                kind: StepKind::Delete,
+                moves: 0,
             })
             .collect();
+        steps.extend(self.tidy.iter().map(|t| PlanStep {
+            id: t.id.clone(),
+            title: t.title(),
+            category: t.category(),
+            bytes: 0,
+            items: 0,
+            places: 0,
+            kind: StepKind::Move,
+            moves: t.moves,
+        }));
         PlanSummary {
             id: self.id.clone(),
             mount_point: self.mount_point.clone(),
             bytes: steps.iter().map(|s| s.bytes).sum(),
             items: steps.iter().map(|s| s.items).sum(),
             places: steps.iter().map(|s| s.places).sum(),
-            moves: 0,
+            moves: self.tidy.iter().map(|t| t.moves).sum(),
             steps,
             refused: self
                 .steps
                 .iter()
                 .flat_map(|s| s.refused.iter().map(|(skip, _)| skip.clone()))
+                .collect(),
+            moves_refused: self
+                .tidy
+                .iter()
+                .flat_map(|t| t.refused.iter().cloned())
+                .chain(self.tidy_refused.iter().cloned())
                 .collect(),
             left_for_you: self.left_for_you.iter().map(|l| l.id.clone()).collect(),
             duplicates: self.steps.iter().find_map(planned_duplicates),
@@ -296,12 +337,16 @@ impl Plan {
     pub(crate) fn map(&self) -> &Overview {
         &self.map
     }
+
+    pub(crate) fn tidy(&self) -> &[Approved] {
+        &self.tidy
+    }
 }
 
 /// What the confirm dialog says of a plan's duplicates step.
 fn planned_duplicates(step: &Step) -> Option<PlannedDuplicates> {
     let d = step.duplicates.as_ref()?;
-    let mut groups = std::collections::HashSet::new();
+    let mut groups = HashSet::new();
     let mut tiles = vec![0u64; d.tiles.len()];
     for a in &step.actions {
         if let Some(k) = &a.keep {
@@ -332,13 +377,20 @@ fn planned_duplicates(step: &Step) -> Option<PlannedDuplicates> {
 /// Makes the plan for the proposals `ids` of the drive `scanned`, whose scan used `env`. Advice and tools in the
 /// selection are kept aside as left for the user (tools arrive in ticket 06). Every target passes the Guard, built
 /// from `env` now, and must still be what the scan saw; see the module docs.
+///
+/// Refuses the duplicates proposal ([`PlanError::DuplicatesNeedGroups`]): which of its groups the user unticked is
+/// part of the approval, so it is only ever planned with [`plan_with`].
 pub fn plan(scanned: &ScannedVolume, env: &Env, ids: &[String]) -> Result<Plan, PlanError> {
+    if ids.iter().any(|id| id == crate::duplicates::ID) {
+        return Err(PlanError::DuplicatesNeedGroups);
+    }
     plan_with(scanned, env, ids, &[])
 }
 
 /// [`plan`], leaving out the duplicate groups `skipped_groups` (by group id) the user unticked: every copy of them
-/// stays. Each extra copy of the other groups carries the copy that stays, which the executor checks again before
-/// the extra copy goes.
+/// stays. A group id this scan's duplicates don't have is refused: the groups the user saw aren't these. Each extra
+/// copy of the other groups carries the copy that stays, which the executor checks again before the extra copy
+/// goes; an extra copy whose group or kept copy can't be found is refused, never planned as a plain delete.
 pub fn plan_with(
     scanned: &ScannedVolume,
     env: &Env,
@@ -354,8 +406,25 @@ pub fn plan_with(
         .unwrap_or_else(|| env.root.clone());
     let guard = Guard::new(env, &env.root);
     let mut walker = Walker::default();
+    if let Some(unknown) = skipped_groups.iter().find(|g| {
+        !proposals
+            .duplicates()
+            .is_some_and(|d| d.groups.iter().any(|x| &x.id == *g))
+    }) {
+        return Err(PlanError::NoSuchGroup(unknown.clone()));
+    }
     let mut chosen: Vec<usize> = Vec::new();
+    let mut sorts: Vec<&str> = Vec::new();
     for id in ids {
+        if id.starts_with(crate::tidy::PREFIX) {
+            if !scanned.tidy.has(id) {
+                return Err(PlanError::NoSuchProposal(id.clone()));
+            }
+            if !sorts.contains(&id.as_str()) {
+                sorts.push(id);
+            }
+            continue;
+        }
         let i = proposals
             .position(id)
             .ok_or_else(|| PlanError::NoSuchProposal(id.clone()))?;
@@ -391,19 +460,19 @@ pub fn plan_with(
             refused: Vec::new(),
             duplicates: None,
         };
-        let dups = (p.id == crate::duplicates::ID)
-            .then(|| proposals.duplicates())
-            .flatten();
+        let is_dups = p.id == crate::duplicates::ID;
+        let dups = if is_dups { proposals.duplicates() } else { None };
         let mut local: HashMap<usize, u32> = HashMap::new();
-        if let Some(d) = dups {
+        if is_dups {
             step.duplicates = Some(StepDuplicates {
                 groups: Vec::new(),
-                tiles: (0..d.tiles.len()).map(|t| d.tile_id(t)).collect(),
-                skipped_groups: d
-                    .groups
-                    .iter()
-                    .filter(|g| skipped_groups.contains(&g.id))
-                    .count() as u64,
+                tiles: dups.map_or_else(Vec::new, |d| (0..d.tiles.len()).map(|t| d.tile_id(t)).collect()),
+                skipped_groups: dups.map_or(0, |d| {
+                    d.groups
+                        .iter()
+                        .filter(|g| skipped_groups.contains(&g.id))
+                        .count() as u64
+                }),
             });
         }
         for &at in proposals.targets(i) {
@@ -412,15 +481,23 @@ pub fn plan_with(
                 _ => 0,
             };
             // An extra copy of a duplicate group: left out if the user unticked its group, and otherwise carrying
-            // the copy that stays.
+            // the copy that stays. One whose group or kept copy can't be found is refused (fail closed): it is never
+            // deleted without its kept copy being checked.
             let mut keep = None;
-            if let (Some(d), ItemRef::File(f)) = (dups, at)
-                && let Some((gi, g)) = d.group_of(f)
-            {
+            if is_dups {
+                let found = match at {
+                    ItemRef::File(f) => dups.and_then(|d| d.group_of(f)).map(|(gi, g)| (f, gi, g)),
+                    _ => None,
+                };
+                let Some((f, gi, g)) = found else {
+                    step.refused.push(dup_refused(snap, at, "Vacancy can\u{2019}t tell which copy of it stays"));
+                    continue;
+                };
                 if skipped_groups.contains(&g.id) {
                     continue;
                 }
                 let Some(identity) = snap.file_full_identity(g.keep) else {
+                    step.refused.push(dup_refused(snap, at, "The copy that stays can\u{2019}t be confirmed on this drive"));
                     continue;
                 };
                 let tile = g
@@ -430,10 +507,7 @@ pub fn plan_with(
                     .and_then(|n| g.extra_tiles.get(n))
                     .copied()
                     .unwrap_or(0);
-                let planned = step
-                    .duplicates
-                    .as_mut()
-                    .expect("the duplicates step has them");
+                let planned = step.duplicates.as_mut().expect("the duplicates step has them");
                 let next = planned.groups.len() as u32;
                 let group = *local.entry(gi).or_insert_with(|| {
                     planned.groups.push(PlannedGroup {
@@ -537,6 +611,7 @@ pub fn plan_with(
                 bytes,
                 files,
                 logical,
+                from: at,
                 keep,
             });
         }
@@ -546,7 +621,42 @@ pub fn plan_with(
         }
         steps.push(step);
     }
+    // Delete wins over sort: a file a delete step of this plan still takes (its target wasn't refused) is left out of
+    // every sort.
+    let deleting: crate::tidy::Surviving<'_> = steps
+        .iter()
+        .map(|s| {
+            (
+                s.id.as_str(),
+                s.actions.iter().map(|a| a.from).collect::<HashSet<_>>(),
+            )
+        })
+        .collect();
+    let mut tidy = Vec::new();
+    let mut tidy_refused = Vec::new();
+    // In the order the tray lists them: Downloads, Desktop, Documents.
+    for proposal in scanned.tidy.proposals() {
+        if !sorts.contains(&proposal.id.as_str()) {
+            continue;
+        }
+        match scanned
+            .tidy
+            .validate(&proposal.id, &deleting, &CancelToken::new())
+        {
+            Some(Ok(approved)) => tidy.push(approved),
+            Some(Err(reason)) => tidy_refused.push(Skip {
+                path: proposal.path.clone(),
+                reason,
+                kind: SkipKind::Changed,
+                bytes: 0,
+                items: proposal.moves.len() as u64,
+            }),
+            None => {}
+        }
+    }
     if left_for_you.is_empty()
+        && tidy.is_empty()
+        && tidy_refused.is_empty()
         && steps
             .iter()
             .all(|s| s.actions.is_empty() && s.refused.is_empty())
@@ -560,8 +670,29 @@ pub fn plan_with(
         since: snap.started(),
         steps,
         left_for_you,
+        tidy,
+        tidy_refused,
         map: scanned.overview.clone(),
     })
+}
+
+/// A duplicates target refused while planning, with why: never planned as a plain delete.
+fn dup_refused(snap: &Snapshot, at: ItemRef, reason: &str) -> (Skip, u64) {
+    let (path, bytes) = match at {
+        ItemRef::File(f) => (snap.file_path(f).display().to_string(), snap.file(f).bytes),
+        ItemRef::Dir(d) | ItemRef::FilesIn(d) => (snap.path(d).display().to_string(), snap.tree(d).bytes),
+        ItemRef::Proposal(_) => (String::new(), 0),
+    };
+    (
+        Skip {
+            path,
+            reason: reason.to_owned(),
+            kind: SkipKind::Refused,
+            bytes,
+            items: 1,
+        },
+        1,
+    )
 }
 
 /// Why a target the scan has no identities for is refused.

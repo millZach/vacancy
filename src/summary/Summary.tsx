@@ -1,4 +1,4 @@
-import { FolderInput, Info, Play, RotateCcw, Signpost, TriangleAlert, X } from 'lucide-react';
+import { Info, Play, RotateCcw, Signpost, TriangleAlert, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
 import type { DuplicatesDone, RunReport, Skip, StepReport } from '../bridge';
 import { formatBytes, formatCount, formatDuration } from '../format';
@@ -11,8 +11,10 @@ import { KindIcon } from '../plan/KindIcon';
 import { tileOf } from '../plan/totals';
 import { HintActionButton } from '../plan/HintActionButton';
 import { AdviceText } from '../plan/AdviceText';
-import { asSentence, neverReached } from '../run/progress';
-import { biggestWin, categoryOf, count, keptOf, remindersOnly } from '../wrapped/deck';
+import { asSentence, doneOf, neverReached } from '../run/progress';
+import { ReorganizedSection } from '../tidy/Recap';
+import type { OnUndo } from '../tidy/Undo';
+import { biggestWin, categoryOf, keptOf, remindersOnly } from '../wrapped/deck';
 import { tokenMs } from '../wrapped/motion';
 import { HeroNumber } from './HeroNumber';
 import { formatWhen } from './when';
@@ -231,6 +233,8 @@ interface PanelProps {
   onScanAgain?: () => void;
   /** A run reopened from the history: back to where the user was. Its date shows at the top. */
   onClose?: () => void;
+  /** Undoes one folder's Tidy up. */
+  onUndo?: OnUndo;
 }
 
 /**
@@ -240,13 +244,13 @@ interface PanelProps {
  * user. The freed figure and the counts are where the checkout slide's numbers land. Replay highlights plays the
  * slides again.
  */
-export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onClose }: PanelProps) {
+export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onClose, onUndo }: PanelProps) {
   const [allSkips, setAllSkips] = useState(false);
   const [allNotes, setAllNotes] = useState(false);
   const known = r.totalBytes > 0;
   const growth = r.freeBefore > 0 ? r.freeAfter / r.freeBefore : 0;
   const differs = known && formatBytes(r.freeChange) !== formatBytes(r.freedBytes);
-  const ran = r.steps.filter((s) => !neverReached(s.deletedItems, s.skipped));
+  const ran = r.steps.filter((s) => !neverReached(doneOf(s), s.skipped));
   const name = (id: StepReport['category']) => categoryOf(r, id)?.name ?? id;
 
   const win = biggestWin(r);
@@ -280,6 +284,7 @@ export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onCl
               ` Free space went from ${formatBytes(r.freeBefore)} to ${formatBytes(r.freeAfter)}${
                 growth >= 1.5 ? `, ${growth.toFixed(1)} times the room you started with.` : '.'
               }`}
+            {r.movedItems > 0 && ' The moved files freed nothing: they’re only in new folders.'}
           </p>
           {r.cancelled && (
             <p className="summary-note is-stopped">
@@ -363,21 +368,7 @@ export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onCl
           </section>
         )}
 
-        {r.reorganized.length > 0 && (
-          <section className="summary-sec">
-            <h3>Reorganized</h3>
-            <ul className="moves">
-              {r.reorganized.map((m) => (
-                <li key={m.id}>
-                  <FolderInput size={13} aria-hidden />
-                  <span>
-                    <b>{m.folder}.</b> {count(m.movedItems, 'file')} moved. Every move is recorded.
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
+        <ReorganizedSection report={r} onUndo={onUndo} />
 
         {(left.length > 0 || stopped.length > 0) && (
           <section className="summary-sec">
