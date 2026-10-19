@@ -162,6 +162,27 @@ fn locked_folders_are_totals_only() {
 }
 
 #[test]
+fn a_root_the_account_cant_list_sends_nothing() {
+    let mut v = sample();
+    // The root's security id is ALLOW in the sample; point it at DENY.
+    let root = Volume::root();
+    v.records[5] = Some(testkit::record(
+        5,
+        root.sequence,
+        3,
+        None,
+        &[
+            testkit::standard(0x16, 0x101, 1, 1),
+            testkit::file_name(root, 3, "."),
+            testkit::index_root(),
+        ],
+    ));
+    let (l, _) = serve_image(v.image());
+    assert_eq!(l.error, Some(wire::ErrorCode::Access));
+    assert!(l.dirs.is_empty(), "no name is sent");
+}
+
+#[test]
 fn counts_what_ntfs_keeps_for_itself() {
     let v = sample();
     let mft = (v.records.len() * testkit::RECORD) as u64;
@@ -231,4 +252,41 @@ fn records_that_flip_bits_never_panic() {
             let _ = serve_image(v2.image());
         }
     }
+}
+
+/// A volume whose disk fails part way through the index (a bad sector, a drive unplugged): the read ends with an
+/// error, sent, instead of the reading thread waiting for ever.
+#[test]
+fn a_disk_that_fails_mid_index_ends_the_read() {
+    struct Failing {
+        img: std::io::Cursor<Vec<u8>>,
+        from: u64,
+    }
+    impl crate::Disk for Failing {
+        fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+            if offset >= self.from {
+                return Err(std::io::Error::other("a bad sector"));
+            }
+            crate::Disk::read_at(&mut self.img, offset, buf)
+        }
+    }
+    let img = sample().image();
+    // The MFT starts at cluster 4; fail from its third chunk of 8 records on.
+    let from = 4 * CLUSTER + 16 * testkit::RECORD as u64;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut access = FirstByte::default();
+        let mut enc = wire::Encoder::new(Vec::new());
+        let disk = Failing {
+            img: std::io::Cursor::new(img),
+            from,
+        };
+        let r = crate::serve(disk, &mut access, &mut enc, &|| false);
+        let _ = tx.send((r.is_err(), decode(&enc.into_inner()).error));
+    });
+    let (failed, error) = rx
+        .recv_timeout(std::time::Duration::from_secs(20))
+        .expect("the read ends");
+    assert!(failed);
+    assert_eq!(error, Some(wire::ErrorCode::Unreadable));
 }

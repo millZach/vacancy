@@ -512,8 +512,9 @@ pub fn fast_scan_for_map(
     let Some(expect) = fast_expect(volume) else {
         return fallback(FastFallback::IndexUnreadable, on_update);
     };
+    // A volume with no drive letter (mounted in a folder) can't be named to the reader.
     let Some(letter) = expect.root_letter else {
-        return fallback(FastFallback::NotNtfs, on_update);
+        return fallback(FastFallback::HelperFailed, on_update);
     };
     let started = Instant::now();
     let stage = |stage: FastStage, index: Option<IndexRead>, files: u64, folders: u64| ScanUpdate {
@@ -792,7 +793,10 @@ fn overview_until(
     let stats = snapshot.stats();
     let fast = how.method == ScanMethod::Fast;
     let scanned = categories.list().iter().map(|c| c.bytes).sum::<u64>();
-    let locked = how.locked.iter().map(|g| g.bytes).sum::<u64>();
+    let locked = how
+        .locked
+        .iter()
+        .fold(0u64, |n, g| n.saturating_add(g.bytes));
     let counted = scanned
         .saturating_add(locked)
         .saturating_add(how.records_bytes);

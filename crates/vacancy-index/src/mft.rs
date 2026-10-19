@@ -43,6 +43,8 @@ pub enum IndexError {
     Io(io::Error),
     /// The index doesn't make sense.
     Unreadable(&'static str),
+    /// The app's account can't list the drive's root, or folders couldn't be checked against it.
+    Access,
 }
 
 impl std::fmt::Display for IndexError {
@@ -51,6 +53,7 @@ impl std::fmt::Display for IndexError {
             Self::NotNtfs => write!(f, "the volume isn't NTFS"),
             Self::Io(e) => write!(f, "the volume couldn't be read: {e}"),
             Self::Unreadable(why) => write!(f, "the file index can't be read: {why}"),
+            Self::Access => write!(f, "folders couldn't be checked against the app's account"),
         }
     }
 }
@@ -73,8 +76,8 @@ pub struct Volume<D> {
     pub records: u32,
 }
 
-/// Records read at a time: 4 MiB with 1 KiB records.
-const CHUNK_RECORDS: usize = 4096;
+/// Records read at a time: 4 MiB with 1 KiB records (tests use small chunks, so their small volumes take several).
+const CHUNK_RECORDS: usize = if cfg!(test) { 8 } else { 4096 };
 /// `$Secure:$SDS` is a few MiB on a big volume; more than this is not a real one.
 const LONGEST_SDS: u64 = 512 << 20;
 
@@ -95,7 +98,11 @@ impl<D: Disk> Volume<D> {
         };
         let size = boot.record_size as usize;
         let mut buf = vec![0u8; size];
-        disk.read_at(boot.mft_lcn * cluster, &mut buf)?;
+        let mft_at = boot
+            .mft_lcn
+            .checked_mul(cluster)
+            .ok_or(IndexError::Unreadable("the boot sector's geometry"))?;
+        disk.read_at(mft_at, &mut buf)?;
         let first = parse_mft_record(&mut buf, 0, want)?;
         let mut extents = first.extents;
         let sizes = first
@@ -123,14 +130,23 @@ impl<D: Disk> Volume<D> {
             .iter()
             .filter(|e| e.kind == ATTR_DATA && e.name.is_empty() && e.record.record != 0)
         {
-            let at = entry.record.record * size as u64;
+            let at = entry
+                .record
+                .record
+                .checked_mul(size as u64)
+                .ok_or(IndexError::Unreadable("$MFT's attribute list"))?;
             read_stream(&mut disk, &runs, cluster, at, &mut buf)?;
             let more = parse_mft_record(&mut buf, entry.record.record, want)?;
             extents.extend(more.extents);
             runs = flatten(&extents);
         }
-        let covered: u64 = runs.iter().map(|r| r.clusters).sum::<u64>() * cluster;
-        if sizes.logical > covered || sizes.logical > boot.total_clusters * cluster {
+        let covered = runs
+            .iter()
+            .try_fold(0u64, |n, r| n.checked_add(r.clusters))
+            .and_then(|n| n.checked_mul(cluster))
+            .ok_or(IndexError::Unreadable("$MFT's runs"))?;
+        let volume = boot.total_clusters.saturating_mul(cluster);
+        if sizes.logical > covered || sizes.logical > volume {
             return Err(IndexError::Unreadable("$MFT's runs don't cover it"));
         }
         let records = u32::try_from(sizes.logical / size as u64)
@@ -174,12 +190,17 @@ impl<D: Disk> Volume<D> {
                     let n = CHUNK_RECORDS.min(total - first);
                     buf.resize(n * size, 0);
                     let read = read_stream(disk, runs, cluster, (first * size) as u64, &mut buf);
-                    if full_tx.send(read.map(|()| (first, buf))).is_err() {
+                    let failed = read.is_err();
+                    if full_tx.send(read.map(|()| (first, buf))).is_err() || failed {
                         return;
                     }
                     first += n;
                 }
             });
+            // Owned here, so that however this ends (an error included) they are dropped before the scope waits
+            // for the reading thread, which then stops instead of waiting for a buffer that never comes.
+            let full_rx = full_rx;
+            let empty_tx = empty_tx;
             let mut done = 0usize;
             while done < total {
                 let (first, mut buf) = match full_rx.recv() {
@@ -203,12 +224,17 @@ impl<D: Disk> Volume<D> {
                     break;
                 }
             }
-            drop(full_rx);
             Ok(())
         });
         result?;
         if stopped {
             return Err(IndexError::Unreadable("stopped"));
+        }
+        table.finish();
+        if table.overflow {
+            return Err(IndexError::Unreadable(
+                "more names than the reader can hold",
+            ));
         }
         Ok(table)
     }
@@ -330,18 +356,32 @@ fn read_stream(
     offset: u64,
     buf: &mut [u8],
 ) -> io::Result<()> {
+    let bad = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "a run past what a volume can hold",
+        )
+    };
     let mut want = offset;
     let mut filled = 0usize;
     let mut run_start = 0u64;
     for run in runs {
-        let run_bytes = run.clusters * cluster;
-        let run_end = run_start + run_bytes;
+        let run_bytes = run.clusters.checked_mul(cluster).ok_or_else(bad)?;
+        let run_end = run_start.checked_add(run_bytes).ok_or_else(bad)?;
         while filled < buf.len() && want < run_end && want >= run_start {
             let into = want - run_start;
-            let n = ((run_end - want) as usize).min(buf.len() - filled);
+            let n = usize::try_from(run_end - want)
+                .unwrap_or(usize::MAX)
+                .min(buf.len() - filled);
             let part = &mut buf[filled..filled + n];
             match run.lcn {
-                Some(lcn) => disk.read_at(lcn * cluster + into, part)?,
+                Some(lcn) => {
+                    let at = lcn
+                        .checked_mul(cluster)
+                        .and_then(|a| a.checked_add(into))
+                        .ok_or_else(bad)?;
+                    disk.read_at(at, part)?;
+                }
                 None => part.fill(0),
             }
             filled += n;

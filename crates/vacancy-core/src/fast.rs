@@ -222,6 +222,13 @@ pub fn snapshot_from_stream(
                 for e in entries {
                     let e = e?;
                     state.entries_here += 1;
+                    // Every name is a record's: a real index has a few names a record at most (hard links). A
+                    // stream with far more is not an index, and would only make the app hold more.
+                    if state.entries.saturating_add(state.entries_here)
+                        > header.records.saturating_mul(4)
+                    {
+                        return Err(bad("more names than the index has room for"));
+                    }
                     e.name_into(&mut state.name);
                     let name = checked_name(&state.name)?;
                     let kind = checked_kind(e.attributes, e.tag, e.flags)?;
@@ -373,7 +380,10 @@ pub fn snapshot_from_stream(
     let Some(_) = state.root else {
         return Err(bad("the folder to scan wasn't in the index"));
     };
-    let locked_bytes: u64 = state.locked.iter().map(|l| l.bytes).sum();
+    let locked_bytes = state
+        .locked
+        .iter()
+        .fold(0u64, |n, l| n.saturating_add(l.bytes));
     let records_bytes = if expect.subtree.is_some() {
         // The fixture is a folder: NTFS's records belong to the volume, not to it.
         0

@@ -39,6 +39,12 @@ pub enum Security<'a> {
 /// does.
 pub trait Access {
     fn can_list(&mut self, security: Security<'_>) -> bool;
+
+    /// Whether checking itself failed (not a folder refused: the check couldn't be made, say with a bad token).
+    /// Then nothing is sent: a drive of "locked" folders would be wrong, so the app runs the normal scan.
+    fn broken(&self) -> bool {
+        false
+    }
 }
 
 /// What was sent.
@@ -75,6 +81,13 @@ pub fn emit<W: Write>(
     let mut summary = Summary::default();
     let mut name = Vec::new();
 
+    // The root first: a normal scan that may not list it sees nothing below it, and neither may this.
+    if !can_list(table, ROOT, sds, sds_index, access, &mut verdicts) || access.broken() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the account can't list the drive's root",
+        ));
+    }
     // Visible folders, parents first.
     state[ROOT as usize] = VISIBLE;
     let mut queue = VecDeque::from([ROOT]);
@@ -129,6 +142,12 @@ pub fn emit<W: Write>(
         out.dir_end(table.frn(dir), count)?;
         summary.dirs += 1;
         summary.entries += count;
+        if access.broken() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "folders' permissions couldn't be checked",
+            ));
+        }
     }
 
     // Inside each locked folder: every folder below it (never through a link), counted.

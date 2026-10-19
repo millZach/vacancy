@@ -346,6 +346,9 @@ fn connect(token: &str, process: &Owned, pid: u32, cancel: &CancelToken) -> Resu
     }
 }
 
+/// How long the reader may send nothing before the app gives up on it.
+const SILENCE: Duration = Duration::from_secs(120);
+
 /// The stream, read without blocking for long: what the pipe holds is read; when it holds nothing the read waits a
 /// little and asks again, so a cancel lands within a few milliseconds and a reader that died ends the stream.
 struct PipeStream<'a> {
@@ -357,9 +360,15 @@ struct PipeStream<'a> {
 impl Read for PipeStream<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let mut exited_at: Option<Instant> = None;
+        let waiting = Instant::now();
         loop {
             if self.cancel.is_cancelled() {
                 return Err(io::Error::other("cancelled"));
+            }
+            // The reader sends progress while it reads the index and entries while it lists: two minutes of
+            // silence is a reader stuck (a drive that stopped answering), and the app runs the normal scan.
+            if waiting.elapsed() > SILENCE {
+                return Err(io::ErrorKind::TimedOut.into());
             }
             let mut available = 0u32;
             // SAFETY: the pipe is open; only the count is asked for.
@@ -501,8 +510,13 @@ mod tests {
         .expect("the reader starts and connects");
         match result {
             Err(FastError::Unreadable(why)) => {
-                // Not elevated: the volume can't be opened, and the reader said so over the pipe.
+                // Not elevated: the volume can't be opened, and the reader said so over the pipe. CI's Windows
+                // runners run as admin, so there the whole read must happen.
                 assert!(why.contains("couldn't be opened"), "{why}");
+                assert!(
+                    std::env::var_os("CI").is_none(),
+                    "CI runs elevated: the reader should have read the volume ({why})"
+                );
             }
             Err(e) => panic!("{e}"),
             Ok(fast) => {

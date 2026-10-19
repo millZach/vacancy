@@ -203,11 +203,15 @@ impl Disk for VolumeDisk {
 #[derive(Debug)]
 pub struct TokenAccess {
     token: Owned,
+    broken: bool,
 }
 
 impl TokenAccess {
     pub fn new(token: Owned) -> Self {
-        Self { token }
+        Self {
+            token,
+            broken: false,
+        }
     }
 }
 
@@ -216,12 +220,19 @@ impl Access for TokenAccess {
         let Security::Descriptor(sd) = security else {
             return false;
         };
-        // AccessCheck reads the descriptor through its own offsets: check it is whole first.
-        let mut copy = sd.to_vec();
+        // The descriptor came off the disk, and Windows follows its offsets without a length: check it is whole
+        // first, in Rust.
+        if !crate::sd::is_well_formed(sd) {
+            return false;
+        }
+        // A copy, 4-byte aligned as Windows expects a descriptor to be.
+        let mut copy = vec![0u32; sd.len().div_ceil(4)];
+        // SAFETY: `copy` holds at least `sd.len()` bytes, and they don't overlap `sd`.
+        unsafe { ptr::copy_nonoverlapping(sd.as_ptr(), copy.as_mut_ptr().cast::<u8>(), sd.len()) };
         let psd: PSECURITY_DESCRIPTOR = copy.as_mut_ptr().cast();
-        // SAFETY: `copy` holds the descriptor's bytes; these calls only read them.
+        // SAFETY: checked above to be a self-relative descriptor wholly inside `copy`; these calls only read it.
         let valid = unsafe { IsValidSecurityDescriptor(psd) } != 0
-            && (unsafe { GetSecurityDescriptorLength(psd) } as usize) <= copy.len();
+            && (unsafe { GetSecurityDescriptorLength(psd) } as usize) <= sd.len();
         if !valid {
             return false;
         }
@@ -236,7 +247,8 @@ impl Access for TokenAccess {
         let mut privileges_len = std::mem::size_of::<PRIVILEGE_SET>() as u32;
         let mut granted = 0u32;
         let mut status = 0i32;
-        // SAFETY: every pointer is valid for the call; the token is an identification-level token.
+        // SAFETY: every pointer is valid for the call; the descriptor was checked above; the token is an
+        // identification-level token.
         let ok = unsafe {
             AccessCheck(
                 psd,
@@ -249,7 +261,27 @@ impl Access for TokenAccess {
                 &mut status,
             )
         };
-        ok != 0 && status != 0
+        if ok == 0 {
+            // A descriptor Windows won't take is this folder's problem (locked); anything else means checks can't
+            // be made at all (a bad token), and the whole read stops.
+            const ERROR_INVALID_ACL: u32 = 1336;
+            const ERROR_INVALID_SID: u32 = 1337;
+            const ERROR_INVALID_SECURITY_DESCR: u32 = 1338;
+            // SAFETY: reads this thread's last error.
+            let code = unsafe { GetLastError() };
+            if !matches!(
+                code,
+                ERROR_INVALID_ACL | ERROR_INVALID_SID | ERROR_INVALID_SECURITY_DESCR
+            ) {
+                self.broken = true;
+            }
+            return false;
+        }
+        status != 0
+    }
+
+    fn broken(&self) -> bool {
+        self.broken
     }
 }
 

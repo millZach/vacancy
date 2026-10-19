@@ -51,7 +51,11 @@ UAC is not a security boundary (Microsoft says so); a process running as the use
 
 A normal scan can't list a folder its account may not open, and counts it as unreadable (ADR 0004). Fast scan can read it, but Zach chose totals only, with no names.
 
-The reader decides, with the app's own token from the pipe: for each folder, `AccessCheck` of its security descriptor (from `$Secure:$SDS` by the security id in its `$STANDARD_INFORMATION`, or from the record itself on volumes older than NTFS 3.0) for `FILE_LIST_DIRECTORY | SYNCHRONIZE`, what a normal scan opens it with, with file generic mapping. A descriptor that can't be found or isn't valid counts as locked. Verdicts are cached by security id, so a volume with millions of folders needs a few thousand checks.
+The reader decides, with the app's own token from the pipe: for each folder, the drive's root first, `AccessCheck` of its security descriptor (from `$Secure:$SDS` by the security id in its `$STANDARD_INFORMATION`, or from the record itself on volumes older than NTFS 3.0) for `FILE_LIST_DIRECTORY | SYNCHRONIZE`, what a normal scan opens it with, with file generic mapping. A descriptor that can't be found or isn't valid counts as locked. Verdicts are cached by security id, so a volume with millions of folders needs a few thousand checks.
+
+- A root the account can't list ends the read before any name is sent (the app runs the normal scan, which sees nothing either): bypass-traverse would otherwise let the app reach what it can't list.
+- The descriptors come off the disk, and `IsValidSecurityDescriptor`, `GetSecurityDescriptorLength` and `AccessCheck` follow their offsets without a length. So each is first checked in Rust (`vacancy_index::sd`): self-relative, an owner and a group, every SID, ACL and ACE (and each ACE's SID) inside its bytes, only ACE types Windows defines. Then a 4-byte-aligned copy goes to Windows.
+- `AccessCheck` failing for any reason but a bad descriptor (a bad token) stops the read: a drive of "locked" folders would be wrong.
 
 A locked folder is sent the way a normal scan sees it: its own name in its parent's listing, flagged locked. Nothing inside it is sent but one frame of totals: its bytes, files and folders. **No name inside a locked folder ever leaves the elevated process.** Files are counted in locked totals only when every name they have is inside locked folders (a file hard-linked into a visible folder is the app's to count there), each once.
 
@@ -70,9 +74,10 @@ The parser:
 - reads the boot sector (an `-FVE-FS-` or other signature is "not NTFS": a BitLocker-locked volume), then `$MFT`'s own record and its runs, following its attribute list into extension records when the index is fragmented;
 - reads every record in 4 MiB sequential chunks on one thread while parsing on another;
 - applies each record's update sequence array (a mismatch is a torn record: left out and counted);
-- merges each extension record's attributes into its base record by the base reference, so attribute lists of ordinary files need no chasing;
+- merges each extension record's attributes into its base record by the base reference, once every record is read and only when the base is in use with the sequence the extension names (a stale extension never lends a name to a reused record), so attribute lists of ordinary files need no chasing;
 - keeps every `$FILE_NAME` but DOS 8.3 ones (a listing never shows them), and links a name into its folder only when the folder's sequence number is the one the name expects (a folder deleted and its record reused orphans the name);
-- bounds every read: a field past its record or attribute makes the record malformed, never a panic.
+- bounds every read: a field past its record or attribute makes the record malformed, never a panic; offsets and sizes are checked arithmetic, and an index with more names than 32-bit offsets reach is refused;
+- a read that fails part way (a bad sector, a drive unplugged) ends the read with an error, sent to the app.
 
 What a listing would say is reproduced, measured against `FileIdExtdDirectoryInfo` on Windows 11:
 
@@ -93,7 +98,8 @@ The reader sends the visible folders from the root down, each as `Dir`, `Entries
 - a name that is empty, `.`, `..`, or holds `\`, `/` or NUL;
 - an entry whose flags don't match what its attributes say (a link marked entered, a file marked a folder);
 - a file bigger than the drive, or all files (each once) plus locked totals plus records more than the drive holds;
-- a stream that ends early.
+- more names than four a record, which no real index has;
+- a stream that ends early, or a reader silent for two minutes.
 
 Entries go through the normal scan's `Collector` and `Builder`: hard links by record number, kept files, markers, and the per-folder digests the executor checks (ADR 0005) are made exactly as for a listing.
 
@@ -103,8 +109,8 @@ Each falls back to the normal scan, and the HUD and the map say why:
 
 - the prompt declined or closed: "admin wasn't given";
 - the drive isn't NTFS (from `GetVolumeInformationW`; no prompt is shown);
-- the reader couldn't start, or didn't connect within 30 seconds, or isn't the one bundled;
-- the index couldn't be read: the reader's error (not NTFS on disk, unreadable), or a stream that doesn't add up.
+- the reader couldn't start, or didn't connect within 30 seconds, or isn't the one bundled, or the volume has no drive letter to name it by;
+- the index couldn't be read: the reader's error (not NTFS on disk, unreadable, the root not listable, checks that couldn't be made), or a stream that doesn't add up.
 
 ## Fixture mode
 
@@ -124,5 +130,6 @@ A fast scan's map should match a normal scan of the same drive except for:
 
 - Every fast scan shows Windows' admin prompt, by design. Unsigned, it says "Unknown publisher".
 - The reader holds the index in memory while it works: about 40 bytes a record, 20 a name and the names themselves, some 400 MB for five million files, for seconds.
+- What fast scan sees and a listing doesn't: a cloud placeholder or other reparse point whose reparse data is too big for its record has no tag the reader can read, so it is taken for a link and not entered; and folders a filter (Controlled Folder Access) refuses beyond their ACL are listed. Either way the executor's checks at run time, unelevated, still apply.
 - Proposals, the plan and deletion are the same code as after a normal scan. Nothing admin read is trusted to delete: every target is walked, judged and identity-checked again by handle at execution, unelevated.
 - A future signed reader changes only the prompt's publisher line, and the hash recorded must then be the signed file's.

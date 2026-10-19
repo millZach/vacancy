@@ -17,6 +17,7 @@ mod le;
 pub mod mft;
 pub mod record;
 pub mod runs;
+pub mod sd;
 pub mod sds;
 pub mod table;
 pub mod wire;
@@ -48,6 +49,7 @@ pub fn serve<D: Disk, W: Write>(
         let code = match e {
             IndexError::NotNtfs => wire::ErrorCode::NotNtfs,
             IndexError::Io(_) | IndexError::Unreadable(_) => wire::ErrorCode::Unreadable,
+            IndexError::Access => wire::ErrorCode::Access,
         };
         let _ = out.error(code);
     }
@@ -92,5 +94,11 @@ fn serve_inner<D: Disk, W: Write>(
         Some(_) => volume.read_sds(&table)?,
     };
     let index = sds::index(&sds);
-    Ok(emit::emit(&mut table, &sds, &index, access, out, stop)?)
+    emit::emit(&mut table, &sds, &index, access, out, stop).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            IndexError::Access
+        } else {
+            IndexError::Io(e)
+        }
+    })
 }

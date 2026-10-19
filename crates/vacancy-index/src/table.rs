@@ -95,6 +95,10 @@ pub struct Table {
     /// `$Secure:$SDS`'s extents and size, gathered from record 9 and its extension records.
     pub(crate) sds: Vec<Extent>,
     pub(crate) sds_size: Option<u64>,
+    /// Extension records' attributes, with the base record and sequence they name, applied by [`Table::finish`].
+    extensions: Vec<(u32, u16, Vec<Attr>)>,
+    /// More names than 32-bit offsets reach: the index is refused.
+    pub overflow: bool,
     /// Records that couldn't be read.
     pub torn: u64,
     pub malformed: u64,
@@ -125,6 +129,8 @@ impl Table {
             extra_bytes: 0,
             sds: Vec::new(),
             sds_size: None,
+            extensions: Vec::new(),
+            overflow: false,
             torn: 0,
             malformed: 0,
             files: 0,
@@ -179,7 +185,13 @@ impl Table {
         // Gather first, so a malformed record adds nothing.
         let mut attrs = Vec::new();
         record::attributes(buf, want, &mut |a| attrs.push(a))?;
-        if header.base.is_none() {
+        if let Some(base) = header.base {
+            // Applied once every record is read, and only if the base record is in use with the sequence this
+            // extension names: a stale extension never lends a name or data to a reused record.
+            self.extensions.push((owner, base.sequence, attrs));
+            return Ok(());
+        }
+        {
             let row = &mut self.rows[owner as usize];
             row.sequence = header.sequence;
             row.flags |= F_IN_USE | F_BASE_READ;
@@ -191,7 +203,7 @@ impl Table {
             self.apply(owner, a);
         }
         let row = self.rows[owner as usize];
-        if header.base.is_none() && row.first_name != NONE {
+        if row.first_name != NONE {
             if row.flags & F_DIR != 0 {
                 self.folders += 1;
             } else {
@@ -199,6 +211,20 @@ impl Table {
             }
         }
         Ok(())
+    }
+
+    /// Applies the extension records' attributes to their base records: call once every record is read.
+    pub fn finish(&mut self) {
+        for (owner, sequence, attrs) in std::mem::take(&mut self.extensions) {
+            let row = self.rows[owner as usize];
+            if row.flags & F_BASE_READ == 0 || row.sequence != sequence {
+                self.malformed += 1;
+                continue;
+            }
+            for a in attrs {
+                self.apply(owner, a);
+            }
+        }
     }
 
     fn apply(&mut self, owner: u32, a: Attr) {
@@ -219,7 +245,18 @@ impl Table {
                 let Ok(parent) = u32::try_from(n.parent.record) else {
                     return;
                 };
-                let start = self.arena.len() as u32;
+                // Offsets and ids are 32-bit: an index too big for them is refused whole, never wrapped.
+                let (Ok(start), Ok(id)) = (
+                    u32::try_from(self.arena.len()),
+                    u32::try_from(self.names.len()),
+                ) else {
+                    self.overflow = true;
+                    return;
+                };
+                if id == NONE || start.checked_add(2 * 255).is_none() {
+                    self.overflow = true;
+                    return;
+                }
                 let narrow = n.name.iter().all(|&u| u < 0x100);
                 if narrow {
                     self.arena.extend(n.name.iter().map(|&u| u as u8));
@@ -228,7 +265,6 @@ impl Table {
                         self.arena.extend_from_slice(&u.to_le_bytes());
                     }
                 }
-                let id = self.names.len() as u32;
                 self.names.push(NameRow {
                     owner,
                     parent,

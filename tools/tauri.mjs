@@ -67,4 +67,5 @@ if (windows && command === 'build') {
 }
 
 const cli = join(root, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
-run(process.execPath, [cli, ...args, ...extra], env);
+// Right after the command: anything after a `--` goes to cargo.
+run(process.execPath, [cli, args[0], ...extra, ...args.slice(1)].filter((a) => a !== undefined), env);
