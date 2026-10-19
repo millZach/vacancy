@@ -43,7 +43,9 @@ impl Fx {
 
     /// A profile changed by `setup` before it is scanned.
     fn with(setup: impl FnOnce(&Profile)) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        // Under the build's temp folder, as the Tidy up tests do: CI's %TEMP% is `C:\Users\RUNNER~1\...`, and Tidy up
+        // refuses a path with a name that looks like an 8.3 short name, so it would propose no sorts there.
+        let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
         let root = support::real_path(dir.path()).join("fixture");
         let profile = fixture::build(&root).expect("build the fixture profile");
         setup(&profile);
@@ -547,6 +549,12 @@ mod with_tidy_up {
         assert!(
             before_marks.values().all(|m| !m),
             "nothing is marked before the search"
+        );
+        assert_eq!(
+            fx.scanned.tidy.proposals().len(),
+            3,
+            "Tidy up sorts Downloads, Desktop and Documents in {}",
+            fx.root.display()
         );
         let found = fx.find();
 
