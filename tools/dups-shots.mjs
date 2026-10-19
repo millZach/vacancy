@@ -13,6 +13,7 @@
 //   --viewport <WxH>   browser viewport (default 1280x820, the app window's default size)
 //   --untick <name>    the group to untick, by its kept copy's name (default: the second group listed)
 //   --only             take every other proposal out of the plan first, so the run deletes duplicates only
+//   --sort             then tick every Tidy up folder too, so one run deletes the extra copies and sorts loose files
 //   --timeout <ms>     how long the scan, the search or the run may take (default 600000)
 //   --cdp <url>        drive an already running page over CDP (the installed app started with
 //                      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333 and --cdp http://127.0.0.1:9333)
@@ -35,6 +36,7 @@ const { values: o } = parseArgs({
     viewport: { type: 'string', default: '1280x820' },
     untick: { type: 'string' },
     only: { type: 'boolean', default: false },
+    sort: { type: 'boolean', default: false },
     timeout: { type: 'string', default: '600000' },
     cdp: { type: 'string' },
     run: { type: 'boolean', default: false },
@@ -124,6 +126,14 @@ try {
     // Everything else out of the plan: the run then deletes the duplicates' extra copies only.
     const others = page.locator('.tray [role="checkbox"][aria-checked="true"]:not([aria-label="Include Duplicate files"])');
     while ((await others.count()) > 0) await others.first().click();
+  }
+  if (o.sort) {
+    // Tidy up into the same plan: the extra copies in the plan aren't sorted, the unticked group's are.
+    const sorts = page.locator('.tray [role="checkbox"][aria-checked="false"][aria-label^="Include Sort "]');
+    while ((await sorts.count()) > 0) await sorts.first().click();
+    said.sorts = await page
+      .locator('.tray [role="checkbox"][aria-checked="true"][aria-label^="Include Sort "]')
+      .evaluateAll((els) => els.map((e) => e.getAttribute('aria-label')));
   }
   await page.mouse.move(2, 2);
   await settle(page);
