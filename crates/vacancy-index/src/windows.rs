@@ -22,8 +22,8 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_ALL_ACCESS, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
     FILE_FLAG_SEQUENTIAL_SCAN, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-    FILE_LIST_DIRECTORY, FILE_READ_DATA, FILE_SHARE_READ, FILE_SHARE_WRITE, GetDriveTypeW,
-    OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, SYNCHRONIZE, WriteFile,
+    FILE_LIST_DIRECTORY, FILE_READ_DATA, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+    GetDriveTypeW, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile, SYNCHRONIZE, WriteFile,
 };
 use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows_sys::Win32::System::Pipes::{
@@ -179,6 +179,33 @@ impl VolumeDisk {
 }
 
 impl Disk for VolumeDisk {
+    fn size(&mut self) -> io::Result<u64> {
+        use windows_sys::Win32::System::IO::DeviceIoControl;
+        use windows_sys::Win32::System::Ioctl::{
+            GET_LENGTH_INFORMATION, IOCTL_DISK_GET_LENGTH_INFO,
+        };
+        // SAFETY: an all-zero GET_LENGTH_INFORMATION is valid.
+        let mut info: GET_LENGTH_INFORMATION = unsafe { std::mem::zeroed() };
+        let mut got = 0u32;
+        // SAFETY: the volume is open; `info` is writable and sized as passed; synchronous.
+        let ok = unsafe {
+            DeviceIoControl(
+                self.handle.0,
+                IOCTL_DISK_GET_LENGTH_INFO,
+                ptr::null(),
+                0,
+                (&raw mut info).cast(),
+                std::mem::size_of::<GET_LENGTH_INFORMATION>() as u32,
+                &mut got,
+                ptr::null_mut(),
+            )
+        };
+        if ok == 0 {
+            return Err(last_error());
+        }
+        u64::try_from(info.Length).map_err(|_| io::Error::other("a negative length"))
+    }
+
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         let end = offset + buf.len() as u64;
         if offset.is_multiple_of(ALIGN) && end.is_multiple_of(ALIGN) {
@@ -204,19 +231,23 @@ impl Disk for VolumeDisk {
 pub struct TokenAccess {
     token: Owned,
     broken: bool,
+    bypass: bool,
 }
 
 impl TokenAccess {
     pub fn new(token: Owned) -> Self {
+        let bypass = bypasses_traverse(token.0);
         Self {
             token,
             broken: false,
+            bypass,
         }
     }
 }
 
-impl Access for TokenAccess {
-    fn can_list(&mut self, security: Security<'_>) -> bool {
+impl TokenAccess {
+    /// Whether the token may do `desired` to a folder with descriptor `security`.
+    fn allows(&mut self, security: Security<'_>, desired: u32) -> bool {
         let Security::Descriptor(sd) = security else {
             return false;
         };
@@ -242,20 +273,20 @@ impl Access for TokenAccess {
             GenericExecute: FILE_GENERIC_EXECUTE,
             GenericAll: FILE_ALL_ACCESS,
         };
-        // SAFETY: an all-zero PRIVILEGE_SET is valid.
-        let mut privileges: PRIVILEGE_SET = unsafe { std::mem::zeroed() };
-        let mut privileges_len = std::mem::size_of::<PRIVILEGE_SET>() as u32;
+        // Room for the privileges AccessCheck may report (a fixed PRIVILEGE_SET holds one).
+        let mut privileges = vec![0u64; 64];
+        let mut privileges_len = (privileges.len() * 8) as u32;
         let mut granted = 0u32;
         let mut status = 0i32;
-        // SAFETY: every pointer is valid for the call; the descriptor was checked above; the token is an
-        // identification-level token.
+        // SAFETY: every pointer is valid for the call; the descriptor was checked above; `privileges` is 8-byte
+        // aligned and `privileges_len` long; the token is an identification-level token.
         let ok = unsafe {
             AccessCheck(
                 psd,
                 self.token.0,
-                FILE_LIST_DIRECTORY | SYNCHRONIZE,
+                desired,
                 &mapping,
-                &mut privileges,
+                privileges.as_mut_ptr().cast::<PRIVILEGE_SET>(),
                 &mut privileges_len,
                 &mut granted,
                 &mut status,
@@ -279,10 +310,76 @@ impl Access for TokenAccess {
         }
         status != 0
     }
+}
+
+impl Access for TokenAccess {
+    fn can_list(&mut self, security: Security<'_>) -> bool {
+        self.allows(security, FILE_LIST_DIRECTORY | SYNCHRONIZE)
+    }
+
+    fn can_traverse(&mut self, security: Security<'_>) -> bool {
+        self.allows(security, FILE_TRAVERSE | SYNCHRONIZE)
+    }
+
+    fn bypasses_traverse(&self) -> bool {
+        self.bypass
+    }
 
     fn broken(&self) -> bool {
         self.broken
     }
+}
+
+/// Whether `token` has `SeChangeNotifyPrivilege` ("bypass traverse checking") enabled. If it can't be told, no:
+/// then every folder above one is checked, which can only lock more.
+fn bypasses_traverse(token: HANDLE) -> bool {
+    use windows_sys::Win32::Foundation::LUID;
+    use windows_sys::Win32::Security::{
+        LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED, TokenPrivileges,
+    };
+    let name = wide("SeChangeNotifyPrivilege");
+    // SAFETY: an all-zero LUID is valid.
+    let mut luid: LUID = unsafe { std::mem::zeroed() };
+    // SAFETY: `name` is NUL-terminated; `luid` is writable.
+    if unsafe { LookupPrivilegeValueW(ptr::null(), name.as_ptr(), &mut luid) } == 0 {
+        return false;
+    }
+    let mut buf = vec![0u64; 512];
+    let mut len = 0u32;
+    // SAFETY: `buf` is 4 KiB of writable, 8-byte aligned memory.
+    if unsafe {
+        GetTokenInformation(
+            token,
+            TokenPrivileges,
+            buf.as_mut_ptr().cast(),
+            (buf.len() * 8) as u32,
+            &mut len,
+        )
+    } == 0
+    {
+        return false;
+    }
+    let bytes = &buf[..];
+    let count = (bytes[0] & 0xFFFF_FFFF) as usize;
+    let entry = std::mem::size_of::<LUID_AND_ATTRIBUTES>();
+    if 4 + count * entry > (len as usize).min(buf.len() * 8) {
+        return false;
+    }
+    // SAFETY: TOKEN_PRIVILEGES is a count followed by `count` LUID_AND_ATTRIBUTES, all inside `buf` (checked).
+    let entries = unsafe {
+        std::slice::from_raw_parts(
+            buf.as_ptr()
+                .cast::<u8>()
+                .add(4)
+                .cast::<LUID_AND_ATTRIBUTES>(),
+            count,
+        )
+    };
+    entries.iter().any(|e| {
+        e.Luid.LowPart == luid.LowPart
+            && e.Luid.HighPart == luid.HighPart
+            && e.Attributes & SE_PRIVILEGE_ENABLED != 0
+    })
 }
 
 /// The pipe, the reader's end: created by the reader, connected to by the app.
@@ -495,8 +592,11 @@ impl io::Write for &Pipe {
     }
 }
 
-/// The process that started this one, and its account's SID as a string.
-pub fn parent() -> io::Result<(u32, String)> {
+/// The process that started this one: its id, its account's SID as a string, and a handle on it, held for as long
+/// as the reader runs. While a process is held its id can't be given to another, so the pipe's client check
+/// ([`Pipe::accept`]) can't be met by a newer process that got the id; and the reader exits when it ends
+/// ([`exit_with`]). A process younger than this one isn't its parent (the id was reused): refused.
+pub fn parent() -> io::Result<(u32, String, Owned)> {
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
         TH32CS_SNAPPROCESS,
@@ -524,12 +624,22 @@ pub fn parent() -> io::Result<(u32, String)> {
         ok = unsafe { Process32NextW(snap.0, &mut entry) };
     }
     let pid = parent.ok_or_else(|| io::Error::other("no parent process"))?;
-    // SAFETY: opens the parent for its token only.
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    // SAFETY: opens the parent for its token, its times, and waiting on it.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
     if process.is_null() {
         return Err(last_error());
     }
     let process = Owned(process);
+    // SAFETY: reads a pseudo-handle for this process.
+    let me_handle = unsafe { windows_sys::Win32::System::Threading::GetCurrentProcess() };
+    match (created(process.0), created(me_handle)) {
+        (Some(parent_at), Some(me_at)) if parent_at <= me_at => {}
+        _ => {
+            return Err(io::Error::other(
+                "the parent process isn't older than the reader",
+            ));
+        }
+    }
     let mut token: HANDLE = ptr::null_mut();
     // SAFETY: the process handle is open.
     if unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut token) } == 0 {
@@ -575,7 +685,29 @@ pub fn parent() -> io::Result<(u32, String)> {
     {
         return Err(io::Error::other("an unexpected SID"));
     }
-    Ok((pid, sid))
+    Ok((pid, sid, process))
+}
+
+/// When a process was created (FILETIME ticks).
+fn created(process: HANDLE) -> Option<u64> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetProcessTimes;
+    // SAFETY: all-zero FILETIMEs are valid.
+    let (mut c, mut e, mut k, mut u): (FILETIME, FILETIME, FILETIME, FILETIME) =
+        unsafe { std::mem::zeroed() };
+    // SAFETY: the handle has query access; the outputs are writable.
+    let ok = unsafe { GetProcessTimes(process, &mut c, &mut e, &mut k, &mut u) };
+    (ok != 0).then(|| (u64::from(c.dwHighDateTime) << 32) | u64::from(c.dwLowDateTime))
+}
+
+/// Exits this process with `code` as soon as `process` ends, from a thread of its own that holds it.
+pub fn exit_with(process: Owned, code: i32) {
+    std::thread::spawn(move || {
+        let process = process;
+        // SAFETY: the handle has SYNCHRONIZE access and is held by this thread.
+        unsafe { WaitForSingleObject(process.0, u32::MAX) };
+        std::process::exit(code);
+    });
 }
 
 /// Loads DLLs from System32 only, from now on (the reader's folder may be writable by the user).

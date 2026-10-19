@@ -197,10 +197,19 @@ pub fn record(
     r
 }
 
-/// A security descriptor's stand-in for tests: the [`crate::Access`] in tests reads its first byte.
+/// A security descriptor's stand-in for tests: the [`crate::Access`] in tests reads its first byte (list) and
+/// its second (traverse).
 pub fn fake_sd(allow: bool) -> Vec<u8> {
     let mut sd = vec![0u8; 40];
     sd[0] = u8::from(allow);
+    sd[1] = u8::from(allow);
+    sd
+}
+
+/// A descriptor that lets the account list the folder but not pass through it.
+pub fn fake_sd_list_only() -> Vec<u8> {
+    let mut sd = fake_sd(true);
+    sd[1] = 0;
     sd
 }
 
@@ -358,10 +367,12 @@ impl Volume {
     }
 }
 
-/// An [`crate::Access`] for tests: a descriptor whose first byte is 1 can be listed.
+/// An [`crate::Access`] for tests: a descriptor whose first byte is 1 can be listed, whose second byte is 1 can be
+/// passed through. Traverse checks are skipped (as with `SeChangeNotifyPrivilege`) unless `strict`.
 #[derive(Debug, Default)]
 pub struct FirstByte {
     pub asked: usize,
+    pub strict: bool,
 }
 
 impl crate::Access for FirstByte {
@@ -369,10 +380,20 @@ impl crate::Access for FirstByte {
         self.asked += 1;
         matches!(security, crate::Security::Descriptor(sd) if sd.first() == Some(&1))
     }
+
+    fn can_traverse(&mut self, security: crate::Security<'_>) -> bool {
+        matches!(security, crate::Security::Descriptor(sd) if sd.get(1) == Some(&1))
+    }
+
+    fn bypasses_traverse(&self) -> bool {
+        !self.strict
+    }
 }
 
 const ALLOW: u32 = 0x100;
 const DENY: u32 = 0x101;
+/// A security id whose descriptor lets the account list a folder but not pass through it.
+pub const LIST_ONLY: u32 = 0x102;
 const FILE: u32 = 0x20;
 const DIR_ATTR: u32 = 0x10;
 const REPARSE: u32 = 0x400;
@@ -389,7 +410,11 @@ pub fn r(record: u32, sequence: u16) -> FileRef {
 /// A volume with a bit of everything; see each record's comment.
 pub fn sample() -> Volume {
     let mut v = Volume::new(64);
-    v.sds = vec![(ALLOW, fake_sd(true)), (DENY, fake_sd(false))];
+    v.sds = vec![
+        (ALLOW, fake_sd(true)),
+        (DENY, fake_sd(false)),
+        (LIST_ONLY, fake_sd_list_only()),
+    ];
     v.system(ALLOW);
     let root = Volume::root();
     let mut put = |n: u32, rec: Vec<u8>| v.records[n as usize] = Some(rec);

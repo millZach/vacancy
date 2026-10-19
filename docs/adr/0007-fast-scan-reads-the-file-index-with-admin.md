@@ -14,9 +14,10 @@ Only `vacancy-index-reader.exe`, a small program bundled beside the app. It:
 - opens `\\.\X:` for reading (`FILE_READ_DATA`, share read and write), and nothing else;
 - reads the boot sector, `$MFT` and `$Secure:$SDS`, and of each file only what its record says: names, sizes, dates, attributes, file ids, parents, reparse tags and security ids. Of a file's data only the sizes in its `$DATA` header are read: never its value, even when it is small enough to sit in the record;
 - never creates, writes, moves or deletes a file, never writes to the volume, and talks to nothing but the pipe;
-- exits after 30 minutes whatever happens, and as soon as the pipe breaks.
+- exits after 30 minutes whatever happens, as soon as the pipe breaks, and as soon as the app that started it ends (it holds that process from its start; see below);
+- is ended by the app too, if it hasn't ended five seconds after the app is done with it, whatever way the app was done (stream read, cancelled, never connected).
 
-It loads its DLLs from System32 only: linked with `/DEPENDENTLOADFLAG:0x800` (`LOAD_LIBRARY_SEARCH_SYSTEM32`), calling `SetDefaultDllDirectories` first, and built with the C runtime linked in (`+crt-static`), so it imports only Windows' own DLLs (kernel32, advapi32, ntdll, bcryptprimitives and the API sets), never `VCRUNTIME140.dll`. Its folder may be writable by the user (the per-user install), so a DLL dropped beside it must never load. It carries a version resource ("Vacancy scan helper"), so Windows' prompt names it. It is unsigned for now (Zach, 2026-10-18): the prompt says "Unknown publisher".
+It loads its DLLs from System32 only: linked with `/DEPENDENTLOADFLAG:0x800` (`LOAD_LIBRARY_SEARCH_SYSTEM32`), calling `SetDefaultDllDirectories` first, and built with the C runtime linked in (`+crt-static`), so it imports only Windows' own DLLs (kernel32, advapi32, ntdll, bcryptprimitives and the API sets), never `VCRUNTIME140.dll`. Its folder may be writable by the user (the per-user install), so a DLL dropped beside it must never load. A build that couldn't promise this fails: a non-MSVC Windows build of the crate stops in `build.rs`, and a release build of the reader without `+crt-static` doesn't compile. It carries a version resource ("Vacancy scan helper"), so Windows' prompt names it. It is unsigned for now (Zach, 2026-10-18): the prompt says "Unknown publisher".
 
 Deleting stays in the app, unelevated, exactly as before: the planner, the Guard and the executor never see admin.
 
@@ -31,7 +32,7 @@ The app:
 The reader (the pipe's server):
 
 1. Creates the pipe with `FILE_FLAG_FIRST_PIPE_INSTANCE` (a name someone made first fails), one instance, `PIPE_REJECT_REMOTE_CLIENTS`, and a DACL granting only read, write and synchronize to its parent process's account, at medium integrity: no right to make further instances.
-2. Waits up to 60 seconds for a client, and checks `GetNamedPipeClientProcessId` is its parent process (the app, which `runas` makes its parent).
+2. Waits up to 60 seconds for a client, and checks `GetNamedPipeClientProcessId` is its parent process (the app, which `runas` makes its parent). It opens the parent at its start and holds it for its whole life, so the parent's id can't pass to another process while it waits; it refuses a "parent" younger than itself (an id reused before it looked); and it exits when the parent ends.
 3. Reads the hello, and nothing more. Then `ImpersonateNamedPipeClient`, `OpenThreadToken` and `RevertToSelf` at once (the reader exits if it can't revert). The token is identification level: enough for `AccessCheck`, never enough to act as the app.
 
 The token is a random 128-bit value from `BCryptGenRandom`, so the name can't be guessed.
@@ -51,7 +52,7 @@ UAC is not a security boundary (Microsoft says so); a process running as the use
 
 A normal scan can't list a folder its account may not open, and counts it as unreadable (ADR 0004). Fast scan can read it, but Zach chose totals only, with no names.
 
-The reader decides, with the app's own token from the pipe: for each folder, the drive's root first, `AccessCheck` of its security descriptor (from `$Secure:$SDS` by the security id in its `$STANDARD_INFORMATION`, or from the record itself on volumes older than NTFS 3.0) for `FILE_LIST_DIRECTORY | SYNCHRONIZE`, what a normal scan opens it with, with file generic mapping. A descriptor that can't be found or isn't valid counts as locked. Verdicts are cached by security id, so a volume with millions of folders needs a few thousand checks.
+The reader decides, with the app's own token from the pipe, as a normal scan would meet each folder: it opens each by its path, so a folder can be listed only if the account can also pass through every folder above it (`FILE_TRAVERSE`), unless the token has `SeChangeNotifyPrivilege` ("bypass traverse checking", every account's by default) enabled. A folder whose parent can't be passed through is locked even if its own descriptor would let it be listed. For each folder, the drive's root first, `AccessCheck` of its security descriptor (from `$Secure:$SDS` by the security id in its `$STANDARD_INFORMATION`, or from the record itself on volumes older than NTFS 3.0) for `FILE_LIST_DIRECTORY | SYNCHRONIZE`, what a normal scan opens it with, with file generic mapping. A descriptor that can't be found or isn't valid counts as locked. Verdicts are cached by security id, so a volume with millions of folders needs a few thousand checks.
 
 - A root the account can't list ends the read before any name is sent (the app runs the normal scan, which sees nothing either): bypass-traverse would otherwise let the app reach what it can't list.
 - The descriptors come off the disk, and `IsValidSecurityDescriptor`, `GetSecurityDescriptorLength` and `AccessCheck` follow their offsets without a length. So each is first checked in Rust (`vacancy_index::sd`): self-relative, an owner and a group, every SID, ACL and ACE (and each ACE's SID) inside its bytes, only ACE types Windows defines. Then a 4-byte-aligned copy goes to Windows.
@@ -75,9 +76,10 @@ The parser:
 - reads every record in 4 MiB sequential chunks on one thread while parsing on another;
 - applies each record's update sequence array (a mismatch is a torn record: left out and counted);
 - merges each extension record's attributes into its base record by the base reference, once every record is read and only when the base is in use with the sequence the extension names (a stale extension never lends a name to a reused record), so attribute lists of ordinary files need no chasing;
-- keeps every `$FILE_NAME` but DOS 8.3 ones (a listing never shows them), and links a name into its folder only when the folder's sequence number is the one the name expects (a folder deleted and its record reused orphans the name);
+- keeps every `$FILE_NAME` but DOS 8.3 ones (a listing never shows a DOS alias of a long name; a file whose only name is a DOS one, which only other systems make, is left out: an undercount), and links a name into its folder only when the folder's sequence number is the one the name expects (a folder deleted and its record reused orphans the name);
 - bounds every read: a field past its record or attribute makes the record malformed, never a panic; offsets and sizes are checked arithmetic, and an index with more names than 32-bit offsets reach is refused;
-- a read that fails part way (a bad sector, a drive unplugged) ends the read with an error, sent to the app.
+- a read that fails part way (a bad sector, a drive unplugged) ends the read with an error, sent to the app;
+- trusts the boot sector's size only as far as the drive's real length (`IOCTL_DISK_GET_LENGTH_INFO`), makes rows only for records it has read, and reads at most 64 MiB of descriptors kept outside records, so a crafted drive can't make the elevated reader claim memory for an index it doesn't have.
 
 What a listing would say is reproduced, measured against `FileIdExtdDirectoryInfo` on Windows 11:
 
@@ -99,7 +101,8 @@ The reader sends the visible folders from the root down, each as `Dir`, `Entries
 - an entry whose flags don't match what its attributes say (a link marked entered, a file marked a folder);
 - a file bigger than the drive, or all files (each once) plus locked totals plus records more than the drive holds;
 - more names than four a record, which no real index has;
-- a stream that ends early, or a reader silent for two minutes.
+- a stream that ends early, or a reader silent for two minutes; frames out of their place (progress once folders are listed, records inside a folder, an end that miscounts);
+- in fixture mode, a fixture folder the account can't open (no empty map: the normal scan runs).
 
 Entries go through the normal scan's `Collector` and `Builder`: hard links by record number, kept files, markers, and the per-folder digests the executor checks (ADR 0005) are made exactly as for a listing.
 

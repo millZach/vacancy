@@ -419,3 +419,72 @@ fn a_cancel_stops_the_read() {
     );
     assert!(matches!(r, Err(FastError::Cancelled)));
 }
+
+/// Fixture mode with the fixture folder locked to the account: refused, so the normal scan runs, never an empty map.
+#[test]
+fn a_locked_fixture_folder_is_refused_not_mapped_empty() {
+    let a = units("fixture");
+    let bytes = stream(|enc| {
+        enc.dir(ROOT).unwrap();
+        enc.entry(&entry(20, &a, ENTRY_DIR | ENTRY_LOCKED, 0))
+            .unwrap();
+        enc.dir_end(ROOT, 1).unwrap();
+        enc.locked(&Locked {
+            frn: 20,
+            bytes: 10,
+            files: 1,
+            folders: 1,
+        })
+        .unwrap();
+        enc.records(0).unwrap();
+        enc.end(&End {
+            dirs: 1,
+            entries: 1,
+            locked: 1,
+        })
+        .unwrap();
+    });
+    let mut e = big();
+    e.subtree = Some(20);
+    assert!(matches!(read(&bytes, &e), Err(FastError::Unreadable(_))));
+    // The same stream for the whole drive is fine: the locked folder is one block among others.
+    let snap = read(&bytes, &big()).expect("reads");
+    assert_eq!(snap.fast().unwrap().locked.len(), 1);
+}
+
+/// Frames out of their place: progress once folders are being listed, records inside a folder, an end that
+/// miscounts the locked folders.
+#[test]
+fn frames_out_of_place_are_refused() {
+    let a = units("a");
+    refused(|enc| {
+        enc.dir(ROOT).unwrap();
+        enc.progress(&vacancy_index::wire::Progress::default())
+            .unwrap();
+        enc.dir_end(ROOT, 0).unwrap();
+    });
+    refused(|enc| {
+        enc.dir(ROOT).unwrap();
+        enc.records(0).unwrap();
+        enc.dir_end(ROOT, 0).unwrap();
+    });
+    refused(|enc| {
+        enc.dir(ROOT).unwrap();
+        enc.entry(&entry(20, &a, ENTRY_DIR | ENTRY_LOCKED, 0))
+            .unwrap();
+        enc.dir_end(ROOT, 1).unwrap();
+        enc.locked(&Locked {
+            frn: 20,
+            bytes: 1,
+            files: 1,
+            folders: 1,
+        })
+        .unwrap();
+        enc.end(&End {
+            dirs: 1,
+            entries: 1,
+            locked: 0,
+        })
+        .unwrap();
+    });
+}

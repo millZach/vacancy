@@ -97,8 +97,10 @@ pub struct Table {
     pub(crate) sds_size: Option<u64>,
     /// Extension records' attributes, with the base record and sequence they name, applied by [`Table::finish`].
     extensions: Vec<(u32, u16, Vec<Attr>)>,
-    /// More names than 32-bit offsets reach: the index is refused.
+    /// More names than 32-bit offsets reach, or no memory for the rows: the index is refused.
     pub overflow: bool,
+    /// Records in the index: no row past it.
+    limit: u32,
     /// Records that couldn't be read.
     pub torn: u64,
     pub malformed: u64,
@@ -113,13 +115,12 @@ pub struct Table {
 pub(crate) const SECURE: u32 = 9;
 
 impl Table {
-    /// A table for `records` records, or `None` if there isn't the memory for it.
+    /// A table for up to `records` records. Rows are made as records are read (up to the highest one read), so a
+    /// volume claiming a huge index of nothing costs nothing; `None` is kept for callers that check.
     pub fn new(records: u32, total_clusters: u64, cluster_size: u64) -> Option<Self> {
-        let mut rows = Vec::new();
-        rows.try_reserve_exact(records as usize).ok()?;
-        rows.resize(records as usize, EMPTY_ROW);
         Some(Self {
-            rows,
+            rows: Vec::new(),
+            limit: records,
             names: Vec::new(),
             arena: Vec::new(),
             tags: HashMap::new(),
@@ -158,8 +159,24 @@ impl Table {
         }
     }
 
+    /// Makes rows up to record `i`; false past the index's size or out of memory.
+    fn ensure(&mut self, i: u32) -> bool {
+        if i >= self.limit {
+            return false;
+        }
+        let want = i as usize + 1;
+        if want > self.rows.len() {
+            if self.rows.try_reserve(want - self.rows.len()).is_err() {
+                self.overflow = true;
+                return false;
+            }
+            self.rows.resize(want, EMPTY_ROW);
+        }
+        true
+    }
+
     fn try_add(&mut self, number: u32, buf: &mut [u8]) -> Result<(), RecordError> {
-        if number as usize >= self.rows.len() {
+        if number >= self.limit {
             return Err(RecordError::Malformed);
         }
         record::apply_fixups(buf)?;
@@ -171,12 +188,15 @@ impl Table {
             None => number,
             Some(base) => {
                 let b = u32::try_from(base.record).map_err(|_| RecordError::Malformed)?;
-                if b as usize >= self.rows.len() || b == number {
+                if b >= self.limit || b == number {
                     return Err(RecordError::Malformed);
                 }
                 b
             }
         };
+        if !self.ensure(owner) {
+            return Err(RecordError::Malformed);
+        }
         let want = Want {
             runs: owner == SECURE,
             total_clusters: self.total_clusters,
@@ -216,7 +236,10 @@ impl Table {
     /// Applies the extension records' attributes to their base records: call once every record is read.
     pub fn finish(&mut self) {
         for (owner, sequence, attrs) in std::mem::take(&mut self.extensions) {
-            let row = self.rows[owner as usize];
+            let Some(&row) = self.rows.get(owner as usize) else {
+                self.malformed += 1;
+                continue;
+            };
             if row.flags & F_BASE_READ == 0 || row.sequence != sequence {
                 self.malformed += 1;
                 continue;

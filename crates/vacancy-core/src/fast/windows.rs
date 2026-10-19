@@ -32,7 +32,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::Pipes::{
     GetNamedPipeServerProcessId, PeekNamedPipe, WaitNamedPipeW,
 };
-use windows_sys::Win32::System::Threading::{GetProcessId, WaitForSingleObject};
+use windows_sys::Win32::System::Threading::{GetProcessId, TerminateProcess, WaitForSingleObject};
 use windows_sys::Win32::UI::Shell::{
     SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
     ShellExecuteExW,
@@ -106,30 +106,56 @@ fn read_index_with<R>(
 ) -> Result<R, Launch> {
     let held = hold_and_check(reader)?;
     let token = random_token().map_err(|e| failed(format!("no random numbers: {e}")))?;
-    let process = start(reader, &token)?;
+    // However this ends (read, cancelled, never connected), the reader gets a short grace to end on its own, and
+    // is ended if it hasn't: nothing started here may linger elevated.
+    let process = Reaper(start(reader, &token)?);
     // The reader is running from the bytes checked above; it may be let go now.
     drop(held);
     let pid = {
         // SAFETY: the process handle is open.
-        unsafe { GetProcessId(process.0) }
+        unsafe { GetProcessId(process.0.0) }
     };
-    let pipe = connect(&token, &process, pid, cancel)?;
+    let pipe = connect(&token, &process.0, pid, cancel)?;
     // Buffered: the stream is millions of small frames, and each read of the pipe is two calls to Windows.
     let mut stream = std::io::BufReader::with_capacity(
         1 << 20,
         PipeStream {
             pipe: &pipe,
-            process: &process,
+            process: &process.0,
             cancel,
         },
     );
     let out = read(&mut stream);
+    drop(stream);
     drop(pipe);
-    // The reader ends once the pipe closes; don't leave it behind if it is slow to notice.
-    // SAFETY: the process handle is open.
-    unsafe { WaitForSingleObject(process.0, 5_000) };
-    report_memory(&process);
+    report_memory(&process.0);
     Ok(out)
+}
+
+/// How long a reader may take to end once the app is done with it.
+const GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The reader's process: when dropped, it waits [`GRACE`] for it to end, then ends it.
+struct Reaper(Owned);
+
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        let ms = GRACE.as_millis() as u32;
+        // SAFETY: the process handle is open.
+        if unsafe { WaitForSingleObject(self.0.0, ms) } == WAIT_TIMEOUT {
+            // SAFETY: as above; a handle without the right fails, and the reader's own limits still end it.
+            if unsafe { TerminateProcess(self.0.0, 1) } == 0 {
+                eprintln!(
+                    "fast scan: the reader didn't end and couldn't be ended: {}",
+                    io::Error::last_os_error()
+                );
+            } else {
+                // Ending a process is asynchronous: wait for it to be gone.
+                // SAFETY: the process handle is open.
+                unsafe { WaitForSingleObject(self.0.0, 2_000) };
+            }
+        }
+    }
 }
 
 /// Notes the reader's peak memory, for measuring.
@@ -251,9 +277,7 @@ fn start_elevated(
     let verb = wide(OsStr::new("runas"));
     let params = wide(OsStr::new(&format!("--volume {letter}: --pipe {token}")));
     // It starts in System32, never in a folder the user can write to.
-    let system = std::env::var_os("SystemRoot")
-        .map(|r| PathBuf::from(r).join("System32"))
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32"));
+    let system = system_dir().ok_or_else(|| failed("Windows' System32 folder can't be found"))?;
     let dir = wide(system.as_os_str());
     // SAFETY: an all-zero SHELLEXECUTEINFOW is valid before its fields are set.
     let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
@@ -280,6 +304,16 @@ fn start_elevated(
         return Err(failed(format!("Windows started {READER} without a handle")));
     }
     Ok(Owned(info.hProcess))
+}
+
+/// Windows' System32 folder, as Windows gives it.
+fn system_dir() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
+    let mut buf = vec![0u16; 1024];
+    // SAFETY: `buf` holds 1024 writable units.
+    let n = unsafe { GetSystemDirectoryW(buf.as_mut_ptr(), buf.len() as u32) } as usize;
+    (n > 0 && n < buf.len()).then(|| PathBuf::from(std::ffi::OsString::from_wide(&buf[..n])))
 }
 
 /// Connects to the reader's pipe as soon as it is there, while the reader runs, for up to 30 seconds.
@@ -616,6 +650,107 @@ mod tests {
             documents,
             "Documents untouched"
         );
+    }
+
+    /// A started reader that never answers (here a stand-in that just waits) is ended once the app gives up on it,
+    /// a cancel included: nothing started for a fast scan outlives it by more than the grace.
+    #[test]
+    fn a_reader_that_never_answers_is_ended() {
+        let Some(reader) = built_reader() else {
+            assert!(std::env::var_os("CI").is_none(), "CI builds the reader");
+            return;
+        };
+        let pid = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let seen = pid.clone();
+        let cancel = CancelToken::new();
+        let stop = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            stop.cancel();
+        });
+        let started = std::time::Instant::now();
+        let r = read_index_with(
+            &reader,
+            &cancel,
+            move |_, _| {
+                let child = std::process::Command::new("ping")
+                    .args(["-n", "120", "127.0.0.1"])
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .map_err(|e| failed(e.to_string()))?;
+                seen.store(child.id(), std::sync::atomic::Ordering::SeqCst);
+                let mut dup: HANDLE = ptr::null_mut();
+                // SAFETY: duplicates the child's process handle into this process.
+                let ok = unsafe {
+                    DuplicateHandle(
+                        GetCurrentProcess(),
+                        child.as_raw_handle(),
+                        GetCurrentProcess(),
+                        &mut dup,
+                        0,
+                        0,
+                        DUPLICATE_SAME_ACCESS,
+                    )
+                };
+                assert!(ok != 0);
+                Ok(Owned(dup))
+            },
+            |_| (),
+        );
+        assert!(matches!(r, Err(Launch::Failed(_))), "{r:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        let pid = pid.load(std::sync::atomic::Ordering::SeqCst);
+        // SAFETY: opens the stand-in by id to see whether it still runs.
+        let h = unsafe { windows_sys::Win32::System::Threading::OpenProcess(SYNCHRONIZE, 0, pid) };
+        if !h.is_null() {
+            let h = Owned(h);
+            // SAFETY: the handle is open.
+            let state = unsafe { WaitForSingleObject(h.0, 0) };
+            assert_eq!(state, WAIT_OBJECT_0, "it was ended");
+        }
+    }
+
+    /// A pipe someone else made first under the reader's name: the reader can't make its own (it exits), and the
+    /// app refuses to talk to a server that isn't the reader. Nothing is read.
+    #[test]
+    fn a_squatted_pipe_is_refused() {
+        let Some(reader) = built_reader() else {
+            assert!(std::env::var_os("CI").is_none(), "CI builds the reader");
+            return;
+        };
+        let fx = tempfile::tempdir().unwrap();
+        let letter = fx.path().to_str().and_then(|s| s.chars().next()).unwrap();
+        let squatted = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let keep = squatted.clone();
+        let cancel = CancelToken::new();
+        let plain = start_plain(letter);
+        let r = read_index_with(
+            &reader,
+            &cancel,
+            move |path, token| {
+                use windows_sys::Win32::System::Pipes::{CreateNamedPipeW, PIPE_TYPE_BYTE};
+                let name = wide(OsStr::new(&format!(r"\\.\pipe\vacancy-index-{token}")));
+                // SAFETY: `name` is NUL-terminated; a plain duplex pipe with the default security.
+                let h = unsafe {
+                    CreateNamedPipeW(
+                        name.as_ptr(),
+                        3,
+                        PIPE_TYPE_BYTE,
+                        1,
+                        4096,
+                        4096,
+                        0,
+                        ptr::null(),
+                    )
+                };
+                assert!(h != INVALID_HANDLE_VALUE, "the squatter's pipe");
+                *keep.borrow_mut() = Some(Owned(h));
+                plain(path, token)
+            },
+            |_| panic!("nothing is read from a squatted pipe"),
+        );
+        assert!(matches!(r, Err(Launch::Failed(_))), "{r:?}");
+        drop(squatted);
     }
 
     fn compare_with_normal(root: &Path, fast: &Snapshot) {

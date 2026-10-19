@@ -44,6 +44,8 @@ if (windows && command === 'build') {
   // The C runtime linked in: the reader imports only Windows' own DLLs, which load from System32 alone, so no DLL
   // beside it (in a folder the user can write to) is ever loaded. Its own target folder keeps the app's build cache.
   const readerEnv = { ...process.env, RUSTFLAGS: '-C target-feature=+crt-static', CARGO_TARGET_DIR: join(root, 'target', 'reader') };
+  // Encoded flags would win over RUSTFLAGS and drop +crt-static (the reader then refuses to compile in release).
+  delete readerEnv.CARGO_ENCODED_RUSTFLAGS;
   run('cargo', ['build', '--release', '--locked', '-p', 'vacancy-index', '--bin', 'vacancy-index-reader', ...(explicit ? ['--target', target] : [])], readerEnv);
   const built = join(root, 'target', 'reader', ...(explicit ? [target] : []), 'release', 'vacancy-index-reader.exe');
   const bundled = join(root, 'src-tauri', 'binaries', `vacancy-index-reader-${target}.exe`);

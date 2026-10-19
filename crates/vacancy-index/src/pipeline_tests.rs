@@ -78,7 +78,10 @@ pub(crate) fn decode(bytes: &[u8]) -> Listed {
 }
 
 pub(crate) fn serve_image(img: Vec<u8>) -> (Listed, FirstByte) {
-    let mut access = FirstByte::default();
+    serve_with(img, FirstByte::default())
+}
+
+pub(crate) fn serve_with(img: Vec<u8>, mut access: FirstByte) -> (Listed, FirstByte) {
     let mut enc = wire::Encoder::new(Vec::new());
     let _ = crate::serve(std::io::Cursor::new(img), &mut access, &mut enc, &|| false);
     (decode(&enc.into_inner()), access)
@@ -263,6 +266,9 @@ fn a_disk_that_fails_mid_index_ends_the_read() {
         from: u64,
     }
     impl crate::Disk for Failing {
+        fn size(&mut self) -> std::io::Result<u64> {
+            crate::Disk::size(&mut self.img)
+        }
         fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
             if offset >= self.from {
                 return Err(std::io::Error::other("a bad sector"));
@@ -289,4 +295,61 @@ fn a_disk_that_fails_mid_index_ends_the_read() {
         .expect("the read ends");
     assert!(failed);
     assert_eq!(error, Some(wire::ErrorCode::Unreadable));
+}
+
+/// The root as a folder the account may list but not pass through, for an account without bypass-traverse: a normal
+/// scan lists the root's names but opens none of its folders, so every one of them is locked, totals only.
+#[test]
+fn a_folder_the_account_cant_pass_through_locks_the_folders_in_it() {
+    let mut v = sample();
+    let root = Volume::root();
+    v.records[5] = Some(testkit::record(
+        5,
+        root.sequence,
+        3,
+        None,
+        &[
+            testkit::standard(0x16, testkit::LIST_ONLY, 1, 1),
+            testkit::file_name(root, 3, "."),
+            testkit::index_root(),
+        ],
+    ));
+    let strict = FirstByte {
+        strict: true,
+        ..FirstByte::default()
+    };
+    let (l, _) = serve_with(v.image(), strict);
+    assert_eq!(l.error, None);
+    let top = root.raw();
+    assert_eq!(l.dirs.len(), 1, "only the root is listed");
+    assert!(
+        l.has(top, "A Long Name.txt"),
+        "the root's own files are listed"
+    );
+    for folder in ["docs", "cloud", "locked"] {
+        assert_eq!(
+            l.item(top, folder).flags,
+            ENTRY_DIR | ENTRY_LOCKED,
+            "{folder}"
+        );
+    }
+    assert!(
+        l.locked
+            .iter()
+            .any(|t| t.frn == r(17, 3).raw() && t.bytes >= 25 * CLUSTER)
+    );
+    // An account that skips traverse checks (every account, by default) opens them as before.
+    let (l, _) = serve_image(v.image());
+    assert_eq!(l.item(top, "docs").flags, ENTRY_DIR | ENTRY_ENTER);
+}
+
+/// A boot sector claiming a volume bigger than its drive: refused before any record is read.
+#[test]
+fn a_volume_bigger_than_its_drive_is_refused() {
+    let img = sample().image();
+    let mut cut = img.clone();
+    cut.truncate(img.len() / 2);
+    let (l, _) = serve_image(cut);
+    assert_eq!(l.error, Some(wire::ErrorCode::Unreadable));
+    assert!(l.dirs.is_empty());
 }

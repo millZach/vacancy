@@ -35,10 +35,23 @@ pub enum Security<'a> {
     Unknown,
 }
 
-/// Decides whether the app's account can list a folder: open it with `FILE_LIST_DIRECTORY`, as the normal scan
-/// does.
+/// Decides what the app's account may do with a folder, as the normal scan would meet it.
 pub trait Access {
+    /// Whether it can list the folder: open it with `FILE_LIST_DIRECTORY`, as the normal scan does.
     fn can_list(&mut self, security: Security<'_>) -> bool;
+
+    /// Whether it can pass through the folder to open one below it (`FILE_TRAVERSE`). Only asked when
+    /// [`Access::bypasses_traverse`] says the account can't skip that check.
+    fn can_traverse(&mut self, security: Security<'_>) -> bool {
+        let _ = security;
+        true
+    }
+
+    /// Whether the account skips traverse checks (`SeChangeNotifyPrivilege` enabled, as every account has by
+    /// default): then a folder it can list can be opened wherever it is.
+    fn bypasses_traverse(&self) -> bool {
+        true
+    }
 
     /// Whether checking itself failed (not a folder refused: the check couldn't be made, say with a bad token).
     /// Then nothing is sent: a drive of "locked" folders would be wrong, so the app runs the normal scan.
@@ -56,9 +69,19 @@ pub struct Summary {
     pub records_bytes: u64,
 }
 
-/// Per folder: not reached yet, listed, or inside the locked folder with this index (plus two).
+/// Per folder: not reached yet; listed, and the folders in it can be opened; listed, but the folders in it can't be
+/// opened (the account can't pass through it); or inside the locked folder with this index (plus [`LOCKED`]).
 const UNSEEN: u32 = 0;
 const VISIBLE: u32 = 1;
+const SEALED: u32 = 2;
+const LOCKED: u32 = 3;
+
+/// What a check is for.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Need {
+    List,
+    Traverse,
+}
 
 /// Sends the table: see the module docs. `stop` is asked between folders; when it says so, nothing more is sent
 /// (and no `End`).
@@ -76,20 +99,39 @@ pub fn emit<W: Write>(
     }
     let heads = link_children(table);
     let mut state = vec![UNSEEN; n];
-    let mut verdicts: HashMap<u32, bool> = HashMap::new();
+    let mut verdicts: HashMap<(u32, Need), bool> = HashMap::new();
+    let bypass = access.bypasses_traverse();
     let mut locked_tops: Vec<u32> = Vec::new();
     let mut summary = Summary::default();
     let mut name = Vec::new();
 
     // The root first: a normal scan that may not list it sees nothing below it, and neither may this.
-    if !can_list(table, ROOT, sds, sds_index, access, &mut verdicts) || access.broken() {
+    if !check(
+        table,
+        ROOT,
+        Need::List,
+        sds,
+        sds_index,
+        access,
+        &mut verdicts,
+    ) || access.broken()
+    {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "the account can't list the drive's root",
         ));
     }
-    // Visible folders, parents first.
-    state[ROOT as usize] = VISIBLE;
+    // Visible folders, parents first. A folder's subfolders can be opened only if the account can pass through
+    // it and every folder above it (unless it skips traverse checks): a normal scan opens each by its path.
+    let opens_below =
+        |dir: u32, verdicts: &mut HashMap<(u32, Need), bool>, access: &mut dyn Access| {
+            bypass || check(table, dir, Need::Traverse, sds, sds_index, access, verdicts)
+        };
+    state[ROOT as usize] = if opens_below(ROOT, &mut verdicts, access) {
+        VISIBLE
+    } else {
+        SEALED
+    };
     let mut queue = VecDeque::from([ROOT]);
     while let Some(dir) = queue.pop_front() {
         if stop() {
@@ -113,13 +155,28 @@ pub fn emit<W: Write>(
                     continue;
                 }
                 if kind.entered() {
-                    if can_list(table, owner, sds, sds_index, access, &mut verdicts) {
+                    // Reachable (its parent can be passed through, as can everything above) and listable.
+                    let open = state[dir as usize] == VISIBLE
+                        && check(
+                            table,
+                            owner,
+                            Need::List,
+                            sds,
+                            sds_index,
+                            access,
+                            &mut verdicts,
+                        );
+                    if open {
                         flags |= ENTRY_ENTER;
-                        state[owner as usize] = VISIBLE;
+                        state[owner as usize] = if opens_below(owner, &mut verdicts, access) {
+                            VISIBLE
+                        } else {
+                            SEALED
+                        };
                         queue.push_back(owner);
                     } else {
                         flags |= ENTRY_LOCKED;
-                        state[owner as usize] = locked_tops.len() as u32 + 2;
+                        state[owner as usize] = locked_tops.len() as u32 + LOCKED;
                         locked_tops.push(owner);
                     }
                 }
@@ -153,7 +210,7 @@ pub fn emit<W: Write>(
     // Inside each locked folder: every folder below it (never through a link), counted.
     let mut folders = vec![0u64; locked_tops.len()];
     for (k, &top) in locked_tops.iter().enumerate() {
-        let mark = k as u32 + 2;
+        let mark = k as u32 + LOCKED;
         folders[k] = 1;
         let mut queue = VecDeque::from([top]);
         while let Some(dir) = queue.pop_front() {
@@ -178,8 +235,10 @@ pub fn emit<W: Write>(
 
     // Files: a file with a name in a listed folder is the app's to count; one found only in locked folders is
     // counted in the first locked folder it is in, once.
-    for nr in &table.names {
-        if nr.parent != NONE && state.get(nr.parent as usize) == Some(&VISIBLE) {
+    for i in 0..table.names.len() {
+        let nr = table.names[i];
+        let listed_here = matches!(state.get(nr.parent as usize), Some(&VISIBLE | &SEALED));
+        if listed_here && linked(table, i as u32) {
             table.rows[nr.owner as usize].flags |= F_VISIBLE;
         }
     }
@@ -189,7 +248,7 @@ pub fn emit<W: Write>(
         let Some(&s) = state.get(nr.parent as usize) else {
             continue;
         };
-        if s < 2 {
+        if s < LOCKED {
             continue;
         }
         let row = table.rows[nr.owner as usize];
@@ -201,7 +260,7 @@ pub fn emit<W: Write>(
             continue;
         }
         table.rows[nr.owner as usize].flags |= F_COUNTED;
-        let t = &mut totals[(s - 2) as usize];
+        let t = &mut totals[(s - LOCKED) as usize];
         t.0 = t.0.saturating_add(allocated);
         t.1 += 1;
     }
@@ -332,31 +391,36 @@ fn listed(table: &Table, i: u32) -> (u32, u32, u64) {
     (attributes, tag, allocated)
 }
 
-fn can_list(
+fn check(
     table: &Table,
     dir: u32,
+    need: Need,
     sds: &[u8],
     sds_index: &HashMap<u32, Range<usize>>,
     access: &mut dyn Access,
-    verdicts: &mut HashMap<u32, bool>,
+    verdicts: &mut HashMap<(u32, Need), bool>,
 ) -> bool {
+    let mut ask = |security: Security<'_>| match need {
+        Need::List => access.can_list(security),
+        Need::Traverse => access.can_traverse(security),
+    };
     let row = table.rows[dir as usize];
     if row.flags & F_INLINE_SD != 0 {
         let sd = table.inline_sd.get(&dir).map(Vec::as_slice);
-        return access.can_list(sd.map_or(Security::Unknown, Security::Descriptor));
+        return ask(sd.map_or(Security::Unknown, Security::Descriptor));
     }
     if row.flags & F_FAR_SD != 0 {
-        return access.can_list(Security::Unknown);
+        return ask(Security::Unknown);
     }
     let id = row.security_id;
-    if let Some(&v) = verdicts.get(&id) {
+    if let Some(&v) = verdicts.get(&(id, need)) {
         return v;
     }
     let security = sds_index
         .get(&id)
         .and_then(|r| sds.get(r.clone()))
         .map_or(Security::Unknown, Security::Descriptor);
-    let v = access.can_list(security);
-    verdicts.insert(id, v);
+    let v = ask(security);
+    verdicts.insert((id, need), v);
     v
 }

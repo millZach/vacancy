@@ -376,6 +376,7 @@ fn read_batch(
 }
 
 impl Scratch {
+    /// Fast scan's reader classifies entries with the same rule (`vacancy_index::kind::classify`): keep them alike.
     fn entry<'n>(&'n mut self, raw: &RawEntry<'_>, dir: &Handle, volume: &Volume) -> Entry<'n> {
         let is_dir = raw.attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
         let reparse = raw.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;

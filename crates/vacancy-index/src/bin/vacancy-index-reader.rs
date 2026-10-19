@@ -4,9 +4,17 @@
 //! moves or deletes anything, and takes nothing else from the app. See ADR 0007.
 //!
 //! Exit codes: 0 sent the index; 1 couldn't read the volume (the app was told why); 2 bad arguments; 3 the app
-//! didn't connect, or something else did; 4 the pipe failed while sending.
+//! didn't connect, or something else did; 4 the pipe failed while sending; 5 it ran for 30 minutes;
+//! 6 the app that started it ended.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
+
+// A release reader links the C runtime in, so it imports Windows' own DLLs only (no VCRUNTIME140.dll from the
+// folder beside it). tools/tauri.mjs builds it that way; any other release build of it is refused here.
+#[cfg(all(windows, not(debug_assertions), not(target_feature = "crt-static")))]
+compile_error!(
+    "build vacancy-index-reader for release with RUSTFLAGS=\"-C target-feature=+crt-static\" (tools/tauri.mjs does)"
+);
 
 #[cfg(windows)]
 fn main() {
@@ -25,7 +33,8 @@ mod reader {
     use std::time::Duration;
 
     use vacancy_index::windows::{
-        Pipe, TokenAccess, VolumeDisk, harden_dll_search, is_local_drive, parent, parse_args,
+        Pipe, TokenAccess, VolumeDisk, exit_with, harden_dll_search, is_local_drive, parent,
+        parse_args,
     };
     use vacancy_index::wire::{Encoder, ErrorCode};
 
@@ -47,9 +56,11 @@ mod reader {
             std::thread::sleep(LONGEST);
             std::process::exit(5);
         });
-        let Ok((parent_pid, parent_sid)) = parent() else {
+        let Ok((parent_pid, parent_sid, parent_process)) = parent() else {
             return 3;
         };
+        // Held for as long as the reader runs (so its id stays the app's), and the reader ends with it.
+        exit_with(parent_process, 6);
         let Ok(pipe) = Pipe::create(&args.token, &parent_sid) else {
             return 3;
         };

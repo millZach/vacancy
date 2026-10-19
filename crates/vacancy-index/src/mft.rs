@@ -16,6 +16,8 @@ use crate::wire::Progress;
 /// length; a disk that needs aligned reads aligns them itself.
 pub trait Disk: Send {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()>;
+    /// How many bytes it really holds: what the boot sector claims is checked against it.
+    fn size(&mut self) -> io::Result<u64>;
 }
 
 impl Disk for std::fs::File {
@@ -24,6 +26,9 @@ impl Disk for std::fs::File {
         self.seek(SeekFrom::Start(offset))?;
         self.read_exact(buf)
     }
+    fn size(&mut self) -> io::Result<u64> {
+        Ok(self.metadata()?.len())
+    }
 }
 
 impl Disk for io::Cursor<Vec<u8>> {
@@ -31,6 +36,9 @@ impl Disk for io::Cursor<Vec<u8>> {
         use std::io::{Read, Seek, SeekFrom};
         self.seek(SeekFrom::Start(offset))?;
         self.read_exact(buf)
+    }
+    fn size(&mut self) -> io::Result<u64> {
+        Ok(self.get_ref().len() as u64)
     }
 }
 
@@ -91,6 +99,14 @@ impl<D: Disk> Volume<D> {
             BootError::Malformed => IndexError::Unreadable("the boot sector's geometry"),
         })?;
         let cluster = u64::from(boot.cluster_size);
+        // The boot sector's size against the drive's own: a volume claiming more than its device holds is not one
+        // (its last cluster may sit a sector short of the end, where NTFS keeps its boot sector's copy).
+        let device = disk.size()?;
+        if boot.total_clusters.saturating_mul(cluster) > device.saturating_add(cluster) {
+            return Err(IndexError::Unreadable(
+                "the boot sector claims more than the drive holds",
+            ));
+        }
         let want = Want {
             runs: true,
             total_clusters: boot.total_clusters,
@@ -247,10 +263,13 @@ impl<D: Disk> Volume<D> {
             .far_descriptors()
             .map(|(r, runs, len)| (r, runs.to_vec(), len))
             .collect();
+        // Each at most 64 KiB, all together at most 64 MiB: more than that is no volume's.
+        let mut budget: u64 = 64 << 20;
         for (record, runs, len) in far {
-            if len == 0 || len > 64 * 1024 {
+            if len == 0 || len > 64 * 1024 || len > budget {
                 continue;
             }
+            budget -= len;
             let mut sd = vec![0u8; len as usize];
             if read_stream(&mut self.disk, &runs, cluster, 0, &mut sd).is_ok() {
                 table.set_descriptor(record, sd);
@@ -341,7 +360,10 @@ fn flatten(extents: &[Extent]) -> Vec<Run> {
             break;
         }
         for r in &e.runs {
-            vcn += r.clusters;
+            let Some(next) = vcn.checked_add(r.clusters) else {
+                return runs;
+            };
+            vcn = next;
             runs.push(*r);
         }
     }
@@ -404,6 +426,9 @@ mod tests {
 
     struct Mem(Vec<u8>);
     impl Disk for Mem {
+        fn size(&mut self) -> io::Result<u64> {
+            Ok(self.0.len() as u64)
+        }
         fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
             let at = offset as usize;
             let src = self

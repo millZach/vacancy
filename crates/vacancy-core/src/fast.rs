@@ -135,6 +135,8 @@ pub fn snapshot_from_stream(
         root: None,
         records_bytes: None,
         ended: false,
+        listing_began: false,
+        locked_frames: 0,
     };
     let files = AtomicU64::new(0);
     let folders = AtomicU64::new(0);
@@ -170,7 +172,7 @@ pub fn snapshot_from_stream(
             Frame::Header(_) => return Err(bad("a second header")),
             Frame::Error(code) => return Err(reader_error(code)),
             Frame::Progress(p) => {
-                if state.dirs > 0 {
+                if state.listing_began {
                     return Err(bad("progress after the listing began"));
                 }
                 on_index(&p);
@@ -179,6 +181,7 @@ pub fn snapshot_from_stream(
                 if state.current.is_some() {
                     return Err(bad("a folder inside a folder"));
                 }
+                state.listing_began = true;
                 let into = if state.dirs == 0 {
                     // The volume's root first, as the reader walks from it.
                     if frn & RECORD_MASK != ROOT_RECORD {
@@ -308,6 +311,11 @@ pub fn snapshot_from_stream(
                     if !state.announced.insert(sub_frn) {
                         return Err(bad("a folder in two places"));
                     }
+                    // The folder to scan (fixture mode) locked: there is nothing to map, which is not an empty
+                    // folder. The normal scan runs instead, as for a drive whose root can't be listed.
+                    if expect.subtree == Some(sub_frn) && flags & ENTRY_LOCKED != 0 {
+                        return Err(bad("the folder to scan is one the account can't open"));
+                    }
                     let id = ids.as_ref().map(|r| DirId(r.start + i as u32));
                     // In fixture mode the fixture folder becomes the snapshot's root when it is announced.
                     let id = match (id, expect.subtree) {
@@ -346,6 +354,7 @@ pub fn snapshot_from_stream(
                 if l.bytes > expect.capacity || l.folders == 0 || l.folders > header.records {
                     return Err(bad("locked totals that don't fit"));
                 }
+                state.locked_frames += 1;
                 if let Some(dir) = id {
                     state.locked.push(LockedFolder {
                         dir,
@@ -356,7 +365,10 @@ pub fn snapshot_from_stream(
                 }
             }
             Frame::Records { bytes } => {
-                if state.records_bytes.is_some() || bytes > expect.capacity {
+                if state.current.is_some()
+                    || state.records_bytes.is_some()
+                    || bytes > expect.capacity
+                {
                     return Err(bad("records that don't fit"));
                 }
                 state.records_bytes = Some(bytes);
@@ -367,6 +379,7 @@ pub fn snapshot_from_stream(
                     || !state.locked_pending.is_empty()
                     || end.dirs != state.dirs
                     || end.entries != state.entries
+                    || end.locked != state.locked_frames
                 {
                     return Err(bad("the stream ended before everything was listed"));
                 }
@@ -427,6 +440,10 @@ struct State {
     root: Option<DirId>,
     records_bytes: Option<u64>,
     ended: bool,
+    /// The first folder has begun: no more progress frames.
+    listing_began: bool,
+    /// `Locked` frames read.
+    locked_frames: u64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

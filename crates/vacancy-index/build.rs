@@ -9,10 +9,13 @@ fn main() {
     if !windows {
         return;
     }
-    if msvc {
-        // LOAD_LIBRARY_SEARCH_SYSTEM32 for the DLLs the reader imports: none come from its own folder.
-        println!("cargo:rustc-link-arg-bin=vacancy-index-reader=/DEPENDENTLOADFLAG:0x800");
-    }
+    // The reader's DLLs must load from System32 only, which takes MSVC's linker: never build it without.
+    assert!(
+        msvc,
+        "vacancy-index-reader is built with MSVC only: its DLLs must load from System32 (/DEPENDENTLOADFLAG)"
+    );
+    // LOAD_LIBRARY_SEARCH_SYSTEM32 for the DLLs the reader imports: none come from its own folder.
+    println!("cargo:rustc-link-arg-bin=vacancy-index-reader=/DEPENDENTLOADFLAG:0x800");
     let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
     let mut parts = version
         .split(['.', '-'])
