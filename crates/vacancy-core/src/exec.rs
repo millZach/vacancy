@@ -35,9 +35,12 @@ use ts_rs::TS;
 use crate::categorize::Env;
 use crate::fsid::{self, Identity, Step};
 use crate::guard::Guard;
-use crate::plan::{Action, LooseFile, Plan, Step as PlanStep, Target, denied_reason, next_id};
+use crate::plan::{
+    Action, KeptCopy, LooseFile, Plan, Step as PlanStep, Target, denied_reason, next_id,
+};
 use crate::report::{
-    CategoryFreed, Outcome, Reorganized, RunReport, Skip, SkipKind, StepKind, StepReport,
+    CategoryFreed, DuplicatePair, DuplicatesDone, Outcome, Reorganized, RunReport, Skip, SkipKind,
+    StepKind, StepReport, TileFreed,
 };
 use crate::scan::CancelToken;
 use crate::snapshot::{digest_key, file_digest_key};
@@ -488,6 +491,7 @@ pub(crate) fn execute_inner(
         threshold: threshold(plan.since()),
         total_freed: 0,
         last_progress: Instant::now(),
+        duplicates: None,
     };
     let mut steps = Vec::new();
     for (i, step) in plan.steps().iter().enumerate() {
@@ -538,6 +542,8 @@ pub(crate) fn execute_inner(
             );
             at.id = id.clone();
             at.reorganized = pending;
+            // The deletes are done by now: a run reopened from this checkpoint still tells its duplicates.
+            at.duplicates = run.duplicates.clone();
             blocked = checkpoint(&at).err();
         }
     }
@@ -579,12 +585,13 @@ pub(crate) fn execute_inner(
     out.id = id;
     out.moved_items = reorganized.iter().map(|r| r.moved_items).sum();
     out.reorganized = reorganized;
+    out.duplicates = run.duplicates.take();
     out
 }
 
 /// The moment from which a change counts as since the scan: its start, to the whole second before, less the
 /// margin. In nanoseconds since the Unix epoch.
-fn threshold(since: SystemTime) -> i128 {
+pub(crate) fn threshold(since: SystemTime) -> i128 {
     let secs = since
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -601,6 +608,8 @@ struct Run<'a, 'h> {
     /// Freed by the steps that have finished.
     total_freed: u64,
     last_progress: Instant,
+    /// What the duplicates step did, once it has run.
+    duplicates: Option<DuplicatesDone>,
 }
 
 /// How a folder is opened (Windows; POSIX has no sharing modes).
@@ -626,6 +635,19 @@ struct StepRun<'g> {
     /// Files deleted since the last look at what apps have open (macOS). One still open at the next look was
     /// deleted while an app held it: its space comes back only when the app lets go, so it isn't counted as freed.
     unlinked: Vec<Unlinked>,
+    /// For the duplicates step: what each group and tile has come to.
+    dups: DupTally,
+}
+
+/// What the duplicates step has done so far.
+#[derive(Default)]
+struct DupTally {
+    /// Groups whose kept copy was found changed or gone: nothing more of them goes.
+    kept_whole: HashSet<u32>,
+    /// Groups that lost an extra copy, and how many.
+    cleared: HashMap<u32, u64>,
+    /// Freed per tile.
+    tiles: HashMap<u32, u64>,
 }
 
 /// A file deleted and counted as freed, until a look at what apps have open says otherwise.
@@ -744,6 +766,7 @@ impl Run<'_, '_> {
             tally: Tally::default(),
             live: 0,
             unlinked: Vec::new(),
+            dups: DupTally::default(),
         };
         for (skip, _) in &step.refused {
             self.skipped(&mut sr, skip.clone());
@@ -764,7 +787,26 @@ impl Run<'_, '_> {
             sr.tally.links = 0;
             sr.tally.left.clear();
             sr.live = 0;
-            if let Err(whole) = self.action(&mut sr, action) {
+            // An extra copy goes only while the copy its group keeps is still the one the scan saw: found again and
+            // held for as long as the extra copy is being deleted (see `sys::Held`).
+            let held = match &action.keep {
+                Some(keep) => match self.hold_kept(&mut sr, keep) {
+                    Ok(held) => Some(held),
+                    Err(reason) => {
+                        let skip = Skip {
+                            path: action.path.display().to_string(),
+                            reason,
+                            kind: SkipKind::Changed,
+                            bytes: action.bytes,
+                            items: action.files,
+                        };
+                        self.skipped(&mut sr, skip);
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            if let Err(whole) = self.action(&mut sr, action, held.as_ref()) {
                 let skip = Skip {
                     path: action.path.display().to_string(),
                     reason: whole.reason,
@@ -782,6 +824,13 @@ impl Run<'_, '_> {
             tally.step.freed += done.freed;
             tally.step.deleted += done.deleted;
             tally.action = Counts::default();
+            if let Some(keep) = &action.keep {
+                *sr.dups.tiles.entry(keep.tile).or_default() += done.freed;
+                if done.deleted > 0 {
+                    *sr.dups.cleared.entry(keep.group).or_default() += done.deleted;
+                }
+            }
+            let tally = &mut sr.tally;
             if done.deleted > 0 || tally.links > 0 || tally.left.is_empty() {
                 let whole = !matches!(action.target, Target::Loose { .. })
                     && tally.left.iter().all(|l| l.said.kind.is_note());
@@ -800,7 +849,30 @@ impl Run<'_, '_> {
             self.progress(&sr, &action.path, true);
         }
         self.total_freed += sr.tally.step.freed;
+        if let Some(planned) = &step.duplicates {
+            self.duplicates = Some(duplicates_done(step, planned, &sr));
+        }
         step_report(step, sr.tally)
+    }
+
+    /// Holds the copy a duplicate group keeps, if it is still the one the scan saw: found again by a fresh walk
+    /// that follows no link, the same file (identity), an ordinary file at the same length and allocation, unchanged
+    /// since the scan, and held so it stays there while the extra copy beside it is deleted (see `sys::Held`). Once
+    /// it isn't, nothing more of its group goes, even if it comes back. `Err` with why.
+    fn hold_kept(&self, sr: &mut StepRun<'_>, keep: &KeptCopy) -> Result<sys::Held, String> {
+        if !sr.dups.kept_whole.contains(&keep.group)
+            && let Ok(held) = sys::hold_file(
+                &keep.path,
+                keep.identity,
+                keep.logical,
+                keep.alloc,
+                self.threshold,
+            )
+        {
+            return Ok(held);
+        }
+        sr.dups.kept_whole.insert(keep.group);
+        Err(kept_gone(keep))
     }
 
     /// A skip of a whole place (or one the planner refused): sent, and kept for the report.
@@ -877,7 +949,12 @@ impl Run<'_, '_> {
 
     /// Carries out one action: the fresh walk, the Guard, the fingerprint, then the delete. `Err` when it is
     /// skipped whole, before anything in it was deleted.
-    fn action(&mut self, sr: &mut StepRun<'_>, action: &Action) -> Result<(), Whole> {
+    fn action(
+        &mut self,
+        sr: &mut StepRun<'_>,
+        action: &Action,
+        held: Option<&sys::Held>,
+    ) -> Result<(), Whole> {
         let path = &action.path;
         let name = path
             .file_name()
@@ -914,6 +991,13 @@ impl Run<'_, '_> {
                 self.look_at_open_files(sr, false);
                 if !in_place(parent_steps, path.parent().unwrap_or(path)) {
                     return Err(Whole::new(SkipKind::Changed, MOVED));
+                }
+                // The kept copy, looked at once more right before the extra copy goes.
+                if let (Some(held), Some(keep)) = (held, &action.keep)
+                    && !held.still_there()
+                {
+                    sr.dups.kept_whole.insert(keep.group);
+                    return Err(Whole::new(SkipKind::Changed, kept_gone(keep)));
                 }
                 self.delete_file(sr, parent_dir, path, &entry, false);
                 Ok(())
@@ -1457,6 +1541,95 @@ fn changed_inside(path: &Path, at: &Path) -> Whole {
     )
 }
 
+/// Why an extra copy of a duplicate group stays: the copy kept of it isn't the one the scan saw any more.
+fn kept_gone(keep: &KeptCopy) -> String {
+    format!(
+        "The copy Vacancy keeps of it ({}) changed or is gone since the scan, so this copy stays",
+        keep.path.display()
+    )
+}
+
+/// What the duplicates step came to: groups cleared, groups left whole, the copies deleted, a few sample pairs (a
+/// photo, a video and another file where it can), and each tile's figures.
+fn duplicates_done(
+    step: &PlanStep,
+    planned: &crate::plan::StepDuplicates,
+    sr: &StepRun<'_>,
+) -> DuplicatesDone {
+    let mut tiles: Vec<TileFreed> = planned
+        .tiles
+        .iter()
+        .map(|id| TileFreed {
+            id: id.clone(),
+            planned_bytes: 0,
+            freed_bytes: 0,
+        })
+        .collect();
+    for a in &step.actions {
+        if let Some(k) = &a.keep
+            && let Some(t) = tiles.get_mut(k.tile as usize)
+        {
+            t.planned_bytes += a.bytes;
+        }
+    }
+    for (&t, &freed) in &sr.dups.tiles {
+        if let Some(tile) = tiles.get_mut(t as usize) {
+            tile.freed_bytes = freed;
+        }
+    }
+    tiles.retain(|t| t.planned_bytes > 0);
+    let pair = |i: u32| {
+        let g = &planned.groups[i as usize];
+        DuplicatePair {
+            kind: g.kind,
+            name: g.name.clone(),
+            kept: g.kept.clone(),
+            removed: g.removed.clone(),
+            copies: sr.dups.cleared.get(&i).copied().unwrap_or(0),
+        }
+    };
+    let cleared: Vec<u32> = (0..planned.groups.len() as u32)
+        .filter(|i| sr.dups.cleared.contains_key(i))
+        .collect();
+    use crate::duplicates::FileKind;
+    let mut samples: Vec<u32> = Vec::new();
+    for want in [
+        &(|k: FileKind| k == FileKind::Photo) as &dyn Fn(FileKind) -> bool,
+        &|k| k == FileKind::Video,
+        &|k| k != FileKind::Photo && k != FileKind::Video,
+    ] {
+        if let Some(&i) = cleared
+            .iter()
+            .find(|&&i| want(planned.groups[i as usize].kind))
+        {
+            samples.push(i);
+        }
+    }
+    for &i in &cleared {
+        if samples.len() >= 3 {
+            break;
+        }
+        if !samples.contains(&i) {
+            samples.push(i);
+        }
+    }
+    let groups: HashSet<u32> = step
+        .actions
+        .iter()
+        .filter_map(|a| a.keep.as_ref().map(|k| k.group))
+        .collect();
+    DuplicatesDone {
+        groups: groups.len() as u64,
+        cleared_groups: cleared.len() as u64,
+        kept_whole: sr.dups.kept_whole.len() as u64,
+        skipped_groups: planned.skipped_groups,
+        copies_deleted: sr.tally.step.deleted,
+        freed_bytes: sr.tally.step.freed,
+        samples: samples.into_iter().map(pair).collect(),
+        tiles,
+    }
+}
+
 /// The skip for what one action left in place for one reason.
 fn left_skip(action: &Action, left: &Left) -> Skip {
     let (path, reason) = if left.files <= 1 {
@@ -1653,6 +1826,7 @@ fn report(
         biggest_win,
         left_for_you: plan.left_for_you().to_vec(),
         reorganized: Vec::new(),
+        duplicates: None,
         map: plan.map().clone(),
         steps,
     }

@@ -1,3 +1,4 @@
+import { Copy } from 'lucide-react';
 import { useEffect, useId, useRef, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import type { PlanSummary, Platform, Skip } from '../bridge';
@@ -31,6 +32,7 @@ export function ConfirmDialog({ plan, platform, onCancel, onGo }: Props) {
   const reminders = plan.leftForYou.length;
   const n = plan.refused.length;
   const allChanged = plan.refused.every((r) => CHANGED.has(r.kind));
+  const dups = plan.duplicates && plan.duplicates.copies > 0 ? plan.duplicates : null;
 
   // Escape goes back, before anything else hears it (the map would zoom out).
   useEffect(() => {
@@ -72,7 +74,7 @@ export function ConfirmDialog({ plan, platform, onCancel, onGo }: Props) {
     <div className="scrim" onClick={onCancel} data-no-ripple>
       <div
         ref={box}
-        className="dialog"
+        className={dups ? 'dialog dup-dialog' : 'dialog'}
         role="alertdialog"
         aria-modal="true"
         aria-labelledby={title}
@@ -92,6 +94,30 @@ export function ConfirmDialog({ plan, platform, onCancel, onGo }: Props) {
             {plan.places === 1 ? 'place' : 'places'} will be deleted for good. They skip the {bin}, so they can’t be
             brought back.
           </p>
+        )}
+        {dups && (
+          <div className="dup-confirm">
+            <Copy size={16} aria-hidden />
+            <div>
+              <b>Duplicate files: only the extra copies go.</b>
+              <p>
+                {formatCount(dups.copies)} extra {dups.copies === 1 ? 'copy' : 'copies'} ({formatBytes(dups.bytes)}){' '}
+                {dups.copies === 1 ? 'is' : 'are'} deleted.{' '}
+                <strong>
+                  One copy of each of the {formatCount(dups.groups)} {dups.groups === 1 ? 'group' : 'groups'} stays
+                  where it is.
+                </strong>
+              </p>
+              {dups.skippedGroups > 0 && (
+                <p className="dialog-quiet">
+                  {dups.skippedGroups === 1
+                    ? '1 group you unticked is left alone, every copy kept.'
+                    : `${formatCount(dups.skippedGroups)} groups you unticked are left alone, every copy kept.`}
+                </p>
+              )}
+              <p className="dialog-quiet">Before each copy goes, Vacancy checks the kept copy is still there and still the same.</p>
+            </div>
+          </div>
         )}
         {plan.moves > 0 && (
           <p className={deletes ? 'dialog-quiet' : undefined}>

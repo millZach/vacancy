@@ -170,6 +170,22 @@ pub struct Proposals {
     kinds: Vec<ActionKind>,
     /// Per proposal: its rule takes Xcode's DerivedData, whose build products are apps (see the catalog).
     built_apps: Vec<bool>,
+    /// The duplicates proposal's groups and tiles, once the duplicate finder has attached them.
+    duplicates: Option<crate::duplicates::Attached>,
+}
+
+/// One tile of the map a proposal is drawn as: most proposals are one tile; duplicates are one per personal folder
+/// holding extra copies, so a link can be drawn from where the kept copy lives to each of them.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Tile<'a> {
+    /// The proposal's index.
+    pub(crate) proposal: usize,
+    /// The category it is carved into.
+    pub(crate) category: CategoryId,
+    /// What it takes.
+    pub(crate) targets: &'a [ItemRef],
+    /// For one of several tiles: the folder it stands for, and its hover note.
+    pub(crate) part: Option<(DirId, &'a str)>,
 }
 
 impl Proposals {
@@ -181,6 +197,70 @@ impl Proposals {
         self.targets.insert(index, vec![target]);
         self.kinds.insert(index, ActionKind::DeleteDirectory);
         self.built_apps.insert(index, false);
+    }
+
+    /// Puts the duplicate finder's proposal in its place by size, with its targets (every extra copy) and its
+    /// groups and tiles. Any earlier one goes first. The caller must carve the categories again.
+    pub(crate) fn insert_duplicates(
+        &mut self,
+        proposal: Proposal,
+        targets: Vec<ItemRef>,
+        attached: crate::duplicates::Attached,
+    ) {
+        self.remove(crate::duplicates::ID);
+        let index = self.list.partition_point(|p| p.bytes >= proposal.bytes);
+        self.list.insert(index, proposal);
+        self.targets.insert(index, targets);
+        self.kinds.insert(index, ActionKind::DeleteDirectory);
+        self.built_apps.insert(index, false);
+        self.duplicates = Some(attached);
+    }
+
+    /// Takes the proposal `id` out, if there is one. The caller must carve the categories again.
+    pub(crate) fn remove(&mut self, id: &str) {
+        if let Some(i) = self.position(id) {
+            self.list.remove(i);
+            self.targets.remove(i);
+            self.kinds.remove(i);
+            self.built_apps.remove(i);
+        }
+        if id == crate::duplicates::ID {
+            self.duplicates = None;
+        }
+    }
+
+    /// The duplicates proposal's groups and tiles, if the duplicate finder attached any.
+    pub(crate) fn duplicates(&self) -> Option<&crate::duplicates::Attached> {
+        self.duplicates.as_ref()
+    }
+
+    /// Test hook: forgets the duplicates' groups but keeps their proposal and targets, as a desync would.
+    #[cfg(test)]
+    pub(crate) fn forget_duplicate_groups_for_test(&mut self) {
+        self.duplicates = None;
+    }
+
+    /// The map's tiles for the proposals, in the proposals' order: one each, the duplicates' one per folder.
+    pub(crate) fn tiles(&self) -> Vec<Tile<'_>> {
+        let mut out = Vec::with_capacity(self.list.len());
+        for (i, p) in self.list.iter().enumerate() {
+            if let (true, Some(d)) = (p.id == crate::duplicates::ID, &self.duplicates) {
+                out.extend(d.tiles.iter().map(|t| Tile {
+                    proposal: i,
+                    category: t.category,
+                    targets: &t.targets,
+                    part: Some((t.dir, t.note.as_str())),
+                }));
+                continue;
+            }
+            out.push(Tile {
+                proposal: i,
+                category: p.category,
+                targets: &self.targets[i],
+                part: None,
+            });
+        }
+        out
     }
 
     /// Trusted catalog advice carries no targets and cannot acquire deletion authority. Append before carving,

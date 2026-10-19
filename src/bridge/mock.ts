@@ -1,9 +1,12 @@
 import type { Fixture, PastRun, RunSkip } from './fixtures';
+import { coverDuplicates, DUPLICATES, mockDuplicates, type MockDuplicates } from './mockDuplicates';
 import { makePlan, mockUndo, pastReport, play, type MockPlan, type Playback } from './mockRun';
 import type {
   Bridge,
   AdvisorStatus,
   CategoryTotal,
+  DuplicateProgress,
+  DuplicatesOutcome,
   MapFolder,
   Overview,
   Proposal,
@@ -30,6 +33,11 @@ export interface MockOptions {
   unplugMs?: number;
   /** How long a mock run of a plan takes. Default: two seconds a step. Zero finishes on the next tick. */
   runMs?: number;
+  /**
+   * How long the mock duplicate finder takes after a scan, in the background. Default: 6 s. Zero finishes on the
+   * next tick.
+   */
+  dupsMs?: number;
   /** How many kept runs the history says it couldn't read. Default: none. */
   unreadableRuns?: number;
   /**
@@ -79,8 +87,19 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
     new Promise<T>((_, reject) => setTimeout(() => reject(new Error(message)), options.delayMs ?? 0));
   const system = fixture.volumes[0]!;
   let volumes = [...fixture.volumes];
-  /** Drives with a finished scan, which `browse` can open, with the map, proposals and skips their runs work from. */
-  const mapped = new Map<string, { map: Overview; proposals: Proposal[]; skips: RunSkip[]; tidy: TidyProposal[] }>();
+  /**
+   * Drives with a finished scan, which `browse` can open, with the map, proposals, sorts and skips their runs work
+   * from, and the duplicates found on them once the mock finder is done.
+   */
+  const mapped = new Map<
+    string,
+    { map: Overview; proposals: Proposal[]; skips: RunSkip[]; tidy: TidyProposal[]; dups: MockDuplicates | null }
+  >();
+  /** The mock duplicate finder running now, on one drive. */
+  let finding: { mountPoint: string; timer: number; finish: (outcome: DuplicatesOutcome) => void } | null = null;
+  const stopFinding = (mountPoint?: string) => {
+    if (finding && (mountPoint === undefined || finding.mountPoint === mountPoint)) finding.finish({ status: 'cancelled' });
+  };
   let running: { mountPoint: string; timer: number; finish: (outcome: ScanOutcome) => void } | null = null;
   /** Plans made and not yet run, by id. A new scan of their drive drops them. */
   const plans = new Map<string, MockPlan & { mountPoint: string }>();
@@ -90,6 +109,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
   const history: RunReport[] = options.pastRuns === false ? [] : fixture.history.map((past, i) => pastRun(fixture, past, i));
   let made = 0;
   const forget = (mountPoint: string) => {
+    stopFinding(mountPoint);
     mapped.delete(mountPoint);
     ran.delete(mountPoint);
     for (const [id, p] of plans) if (p.mountPoint === mountPoint) plans.delete(id);
@@ -126,6 +146,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
       if (options.fail !== undefined) return answer<ScanOutcome>({ status: 'cancelled' });
       if (playing) return Promise.reject(new Error('a plan is running: scan once it has finished'));
       running?.finish({ status: 'cancelled' });
+      stopFinding();
       forget(mountPoint);
       const volume = volumes.find((v) => v.mountPoint === mountPoint);
       if (!volume) return Promise.reject(new Error(`could not scan ${mountPoint}: the drive is not connected`));
@@ -143,7 +164,8 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
         const finish = (outcome: ScanOutcome) => {
           if (running) clearInterval(running.timer);
           running = null;
-          if (outcome.status === 'done') mapped.set(mountPoint, { map: structuredClone(map), proposals: structuredClone(proposals), skips, tidy });
+          if (outcome.status === 'done')
+            mapped.set(mountPoint, { map: structuredClone(map), proposals: structuredClone(proposals), skips, tidy, dups: null });
           resolve(outcome);
         };
         const tick = () => {
@@ -164,14 +186,69 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
       const volume = volumes.find((v) => v.mountPoint === mountPoint) ?? system;
       return folder ? answer(folderOnDrive(folder, system, volume)) : Promise.reject(new Error(`there is no folder ${id} in this scan`));
     },
-    buildPlan: (mountPoint, ids) => {
+    findDuplicates: (mountPoint, onProgress) => {
+      if (options.fail !== undefined) return failure(options.fail);
+      const scan = mapped.get(mountPoint);
+      if (!scan || ran.has(mountPoint)) return answer<DuplicatesOutcome>({ status: 'cancelled' });
+      stopFinding();
+      const total = options.dupsMs ?? 6000;
+      const started = Date.now();
+      const files = 1_204;
+      return new Promise<DuplicatesOutcome>((resolve) => {
+        const finish = (outcome: DuplicatesOutcome) => {
+          if (finding) clearInterval(finding.timer);
+          finding = null;
+          resolve(structuredClone(outcome));
+        };
+        const tick = () => {
+          const t = total <= 0 ? 1 : Math.min(1, (Date.now() - started) / total);
+          const percent = Math.round(t * 100);
+          const progress: DuplicateProgress =
+            percent < 15
+              ? { stage: 'starts', files, done: Math.round((files * percent) / 15), percent }
+              : { stage: 'contents', files: 236, done: Math.round((236 * (percent - 15)) / 85), percent };
+          onProgress(progress);
+          if (t < 1) return;
+          // Only the system drive has copies to find; elsewhere the search finds none.
+          const found = mountPoint === system.mountPoint ? mockDuplicates(fixture.platform, scan.map, fixtureHome(fixture)) : null;
+          if (found) {
+            scan.map = found.overview;
+            scan.proposals = [...scan.proposals.filter((p) => p.id !== DUPLICATES), found.proposal].sort((a, b) => b.bytes - a.bytes);
+            scan.dups = found;
+            // Delete wins over sort: a sort's move of an extra copy is marked as deleted by duplicates.
+            scan.tidy = coverDuplicates(scan.tidy, found);
+          }
+          finish({
+            status: 'done',
+            overview: scan.map,
+            proposals: scan.proposals,
+            tidy: scan.tidy,
+            duplicates: found?.duplicates ?? {
+              proposal: null,
+              groups: [],
+              folders: [],
+              compared: 0,
+              hardLinked: 0,
+              changed: 0,
+              notLocal: 0,
+              cloned: 0,
+            },
+          });
+        };
+        finding = { mountPoint, timer: window.setInterval(tick, total <= 0 ? 0 : 100), finish };
+      });
+    },
+    buildPlan: (mountPoint, ids, skippedGroups = []) => {
       if (options.fail !== undefined) return failure(options.fail);
       const scan = mapped.get(mountPoint);
       if (!scan) return failure(`there is no finished scan of ${mountPoint} to plan from`);
       if (ran.has(mountPoint)) return failure(`this scan of ${mountPoint} already ran a plan: scan again first`);
       let plan: MockPlan;
       try {
-        plan = makePlan(`plan-${++made}`, mountPoint, scan.map, scan.proposals, ids, scan.skips, scan.tidy, fixture.tidyScripts);
+        plan = makePlan(`plan-${++made}`, mountPoint, scan.map, scan.proposals, ids, scan.skips, scan.tidy, fixture.tidyScripts, {
+          found: scan.dups,
+          skipped: skippedGroups,
+        });
       } catch (error) {
         return failure(error instanceof Error ? error.message : String(error));
       }
@@ -187,6 +264,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
       const volume = volumes.find((v) => v.mountPoint === mountPoint);
       if (!volume) return Promise.reject(new Error(`could not run the plan: ${mountPoint} is not connected`));
       ran.add(mountPoint);
+      stopFinding(mountPoint);
       for (const [id, p] of plans) if (p.mountPoint === mountPoint) plans.delete(id);
       const totalMs = options.runMs ?? STEP_MS * plan.steps.length;
       return new Promise<RunReport>((resolve) => {
@@ -232,6 +310,13 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
     openGuide: () => failure('Vendor references can’t be opened from this fixture preview. No app was launched.'),
     unplug,
   };
+}
+
+/** The fixture's home folder, from its Downloads tile: `C:\Users\alex`, `/Users/alex`. */
+function fixtureHome(fixture: Fixture): string {
+  const downloads = fixture.overview.categories.flatMap((c) => c.items).find((i) => i.kind === 'folder' && i.name === 'Downloads');
+  const path = downloads?.path ?? '';
+  return path.slice(0, Math.max(0, path.length - '/Downloads'.length));
 }
 
 /** A run in the history list, as the core lists it. */

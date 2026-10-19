@@ -15,8 +15,9 @@
 //! than 260 characters, and a `Documents` folder that no cleanup may touch. For Tidy up, Downloads, Desktop and
 //! the top of Documents also hold a messy set of loose files of every kind over several years, with a name that
 //! collides in its destination, an old installer a cleanup deletes too (delete wins over sort), a file to change
-//! after the scan and one to hold open ([`TidyProfile`]). `cargo run -p vacancy-core --example fixture --
-//! <folder>` writes one.
+//! after the scan and one to hold open ([`TidyProfile`]). It also holds known duplicate files for the duplicate
+//! finder, some of them loose among Tidy up's ([`DuplicateCases`]). `cargo run -p vacancy-core --example fixture
+//! -- <folder>` writes one.
 
 use std::fs;
 use std::io;
@@ -217,8 +218,26 @@ pub struct Profile {
     pub store_file: PathBuf,
     /// Things no rule may propose: a project in use, a fresh installer.
     pub untouched: Vec<PathBuf>,
+    /// The duplicate finder's known cases.
+    pub duplicates: DuplicateCases,
     /// The loose files Tidy up sorts (Windows; the same files are written on macOS, where nothing sorts them).
     pub tidy: TidyProfile,
+}
+
+/// The duplicate files a profile holds, for the duplicate finder's tests and proofs (ticket 09).
+#[derive(Clone, Debug, Default)]
+pub struct DuplicateCases {
+    /// Each group of identical files: the copy the keeper rule keeps, then the extra copies, in the order the
+    /// rule ranks them.
+    pub groups: Vec<(PathBuf, Vec<PathBuf>)>,
+    /// The keeper of the group a proof unticks, to see that an unticked group keeps every copy.
+    pub untick: PathBuf,
+    /// The kept copy a test changes after the scan, to see that its group's extra copies then stay.
+    pub change_kept: PathBuf,
+    /// Files that look like copies but must never be proposed: same size with other contents, the same start
+    /// with another end, a hard link pair, copies under 1 MiB, a copy in a cloud-sync folder, one in a Photos
+    /// library, one only reachable through a link, and an installer another rule already deletes.
+    pub not_duplicates: Vec<PathBuf>,
 }
 
 /// The fixture's loose files for Tidy up, by role.
@@ -246,6 +265,9 @@ struct Spec {
     rel: String,
     len: usize,
     days: u64,
+    /// What is in it: varied bytes of its own, or (for the duplicate cases) the same bytes as every file with
+    /// the same seed, its last `tail` bytes flipped.
+    seed: Option<(u64, usize)>,
 }
 
 /// How long [`build`] waits at the end, so that everything it wrote is older than a scan started after it by more
@@ -292,6 +314,7 @@ fn build_options(root: &Path, bulk: usize, advice: bool) -> io::Result<Profile> 
             rel: rel.to_owned(),
             len,
             days,
+            seed: None,
         })
     };
     const OLD: u64 = 200;
@@ -430,9 +453,16 @@ fn build_options(root: &Path, bulk: usize, advice: bool) -> io::Result<Profile> 
     }
     let tidy = tidy_files(&mut file);
 
+    let dups = duplicate_specs(windows);
+    specs.extend(dups.specs);
+
     let now = SystemTime::now();
     for spec in &specs {
-        write_file(&sub(&home, &spec.rel), spec.len)?;
+        let path = sub(&home, &spec.rel);
+        match spec.seed {
+            None => write_file(&path, spec.len)?,
+            Some((seed, tail)) => write_seeded(&path, spec.len, seed, tail)?,
+        }
     }
 
     // pnpm's links, the link into Documents, and the hard link into the store.
@@ -459,6 +489,10 @@ fn build_options(root: &Path, bulk: usize, advice: bool) -> io::Result<Profile> 
         &format!("{pnpm}/lodash@4.17.21/node_modules/lodash/store-linked.js"),
     );
     fs::hard_link(&store_file, &store_link)?;
+    // The duplicate cases' hard link pair, and a link from Pictures to a folder holding another copy.
+    let hard_b = sub(&home, dups.hard_link.1);
+    fs::hard_link(sub(&home, dups.hard_link.0), &hard_b)?;
+    link_dir(root, &sub(&home, dups.link.0), &sub(&home, dups.link.1))?;
     #[cfg(unix)]
     std::os::unix::fs::symlink(
         "../.pnpm/left-pad@1.3.0/node_modules/left-pad/index.js",
@@ -488,6 +522,7 @@ fn build_options(root: &Path, bulk: usize, advice: bool) -> io::Result<Profile> 
     // NTFS keeps a copy of a file's times in each folder that lists one of its names, refreshed only through that
     // name: set them through the hard link's other name too, or its folder lists it as new.
     set_age(&store_link, now, OLD)?;
+    set_age(&hard_b, now, OLD)?;
     let mut dirs: Vec<(PathBuf, u64)> = dirs.into_iter().collect();
     dirs.sort_by_key(|(d, _)| std::cmp::Reverse(d.components().count()));
     for (d, days) in &dirs {
@@ -557,6 +592,17 @@ fn build_options(root: &Path, bulk: usize, advice: bool) -> io::Result<Profile> 
         sub(&home, "code/live-app/node_modules"),
     ];
     untouched.extend(advice_files);
+    let at = |rel: &str| sub(&home, rel);
+    let duplicates = DuplicateCases {
+        groups: dups
+            .groups
+            .iter()
+            .map(|(keep, extras)| (at(keep), extras.iter().map(|e| at(e)).collect()))
+            .collect(),
+        untick: at(dups.untick),
+        change_kept: at(dups.change_kept),
+        not_duplicates: dups.not_duplicates.iter().map(|r| at(r)).collect(),
+    };
     let tidy = TidyProfile {
         files: tidy.files.iter().map(|rel| sub(&home, rel)).collect(),
         collision: sub(&home, &tidy.collision),
@@ -568,6 +614,7 @@ fn build_options(root: &Path, bulk: usize, advice: bool) -> io::Result<Profile> 
     };
     std::thread::sleep(SETTLE);
     Ok(Profile {
+        duplicates,
         root: root.to_path_buf(),
         documents,
         link_to_documents,
@@ -590,6 +637,193 @@ fn build_options(root: &Path, bulk: usize, advice: bool) -> io::Result<Profile> 
         tidy,
         home,
     })
+}
+
+/// The duplicate cases' files, relative to the home folder, and their roles.
+struct DuplicateSpecs {
+    specs: Vec<Spec>,
+    groups: Vec<(&'static str, Vec<&'static str>)>,
+    untick: &'static str,
+    change_kept: &'static str,
+    not_duplicates: Vec<&'static str>,
+    /// The hard link pair: the file written, and its second name.
+    hard_link: (&'static str, &'static str),
+    /// A folder link inside Pictures, and the folder it leads to (outside the personal folders).
+    link: (&'static str, &'static str),
+}
+
+/// The duplicate finder's known cases (ticket 09), kept apart from the rest of the profile. Every copy is a little
+/// over 1 MiB (the finder's threshold) so the profile stays small. Group by group, the keeper rule keeps the first:
+/// - the oldest photo, over a copy in Downloads and a newer one named "(1)" on the Desktop;
+/// - a video in Videos (Movies) over an older copy in Downloads;
+/// - a document with its own name over an older "- Copy";
+/// - a guide in Documents over a copy in Downloads (the group a proof unticks);
+/// - the older of two photos in Pictures;
+/// - a spreadsheet loose on the Desktop over a newer "(1)" copy in Downloads (both loose files Tidy up sorts).
+fn duplicate_specs(windows: bool) -> DuplicateSpecs {
+    const KIB: usize = 1024;
+    const MIB: usize = 1024 * KIB;
+    let mut specs = Vec::new();
+    let mut copy = |rel: &'static str, len: usize, days: u64, seed: u64, tail: usize| {
+        specs.push(Spec {
+            rel: rel.to_owned(),
+            len,
+            days,
+            seed: Some((seed, tail)),
+        });
+        rel
+    };
+    let (videos, wedding, clip, installer, installer_copy) = if windows {
+        (
+            "Videos/2024/Wedding highlights.mp4",
+            "Downloads/Wedding highlights.mp4",
+            "Videos/clip-a.mp4",
+            "Downloads/big-old-setup.exe",
+            "Desktop/big-old-setup.exe",
+        )
+    } else {
+        (
+            "Movies/2024/Wedding highlights.mov",
+            "Downloads/Wedding highlights.mov",
+            "Movies/clip-a.mov",
+            "Downloads/big-old-installer.dmg",
+            "Desktop/big-old-installer.dmg",
+        )
+    };
+    let photo = MIB + 512 * KIB;
+    let groups = vec![
+        (
+            copy("Pictures/2025/Lisbon/IMG_4471.jpg", photo, 400, 1, 0),
+            vec![
+                copy("Downloads/IMG_4471.jpg", photo, 390, 1, 0),
+                copy("Desktop/IMG_4471 (1).jpg", photo, 120, 1, 0),
+            ],
+        ),
+        (
+            copy(videos, 2 * MIB + 7 * KIB, 300, 2, 0),
+            vec![copy(wedding, 2 * MIB + 7 * KIB, 610, 2, 0)],
+        ),
+        (
+            copy(
+                "Documents/Taxes/Tax return 2025.pdf",
+                MIB + 100 * KIB,
+                100,
+                3,
+                0,
+            ),
+            vec![copy(
+                "Documents/Taxes/Tax return 2025 - Copy.pdf",
+                MIB + 100 * KIB,
+                300,
+                3,
+                0,
+            )],
+        ),
+        (
+            copy("Documents/Work/Brand guide.pdf", MIB + 300 * KIB, 75, 4, 0),
+            vec![copy("Downloads/Brand guide.pdf", MIB + 300 * KIB, 76, 4, 0)],
+        ),
+        (
+            copy(
+                "Pictures/Camera Roll/IMG_5102.jpg",
+                MIB + 50 * KIB,
+                300,
+                5,
+                0,
+            ),
+            vec![copy(
+                "Pictures/Phone import/IMG_5102.jpg",
+                MIB + 50 * KIB,
+                280,
+                5,
+                0,
+            )],
+        ),
+        // Loose at the top of the Desktop, which Tidy up sorts: deleting the Downloads copy runs first, so the
+        // kept copy is still where the scan saw it when it is checked, and only then sorted.
+        (
+            copy("Desktop/Budget 2026.xlsx", MIB + 20 * KIB, 500, 13, 0),
+            vec![copy(
+                "Downloads/Budget 2026 (1).xlsx",
+                MIB + 20 * KIB,
+                30,
+                13,
+                0,
+            )],
+        ),
+    ];
+    let not_duplicates = vec![
+        // The same length, other contents.
+        copy(
+            "Pictures/Camera Roll/IMG_6000.jpg",
+            MIB + 70 * KIB,
+            300,
+            6,
+            0,
+        ),
+        copy(
+            "Pictures/Phone import/IMG_6001.jpg",
+            MIB + 70 * KIB,
+            280,
+            7,
+            0,
+        ),
+        // The same first 64 KiB and more, another end.
+        copy(clip, MIB + 200 * KIB, 200, 8, 0),
+        copy("Downloads/clip-b.mp4", MIB + 200 * KIB, 190, 8, 16),
+        // One file, two names.
+        copy("Pictures/hardlink-a.jpg", MIB + 120 * KIB, 200, 9, 0),
+        "Desktop/hardlink-b.jpg",
+        // Copies, but under 1 MiB.
+        copy("Pictures/small.png", 512 * KIB, 200, 10, 0),
+        copy("Downloads/small.png", 512 * KIB, 190, 10, 0),
+        // A copy of the first group in a Dropbox folder, older than all of them: never kept, never deleted.
+        copy("Documents/Dropbox/IMG_4471.jpg", photo, 500, 1, 0),
+        copy("Documents/Dropbox/.dropbox", 1, 500, 12, 0),
+        // And in a Photos library.
+        copy(
+            "Pictures/Photos Library.photoslibrary/originals/IMG_4471.jpg",
+            photo,
+            600,
+            1,
+            0,
+        ),
+        // A copy of the last group behind a link from Pictures: the scan never follows it.
+        copy("code/photo-backup/IMG_5102.jpg", MIB + 50 * KIB, 350, 5, 0),
+        // An old installer the installers rule deletes, and its copy on the Desktop: no byte counted twice.
+        copy(installer, MIB + 10 * KIB, 60, 11, 0),
+        copy(installer_copy, MIB + 10 * KIB, 60, 11, 0),
+    ];
+    DuplicateSpecs {
+        specs,
+        groups,
+        untick: "Documents/Work/Brand guide.pdf",
+        change_kept: "Documents/Taxes/Tax return 2025.pdf",
+        not_duplicates,
+        hard_link: ("Pictures/hardlink-a.jpg", "Desktop/hardlink-b.jpg"),
+        link: ("Pictures/backup-link", "code/photo-backup"),
+    }
+}
+
+/// Writes `len` bytes that are the same for every file with `seed`, the last `tail` of them flipped, making the
+/// folders on the way.
+fn write_seeded(path: &Path, len: usize, seed: u64, tail: usize) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    let mut data = vec![0u8; len];
+    for b in &mut data {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *b = state as u8;
+    }
+    let from = len.saturating_sub(tail);
+    for b in &mut data[from..] {
+        *b = !*b;
+    }
+    fs::write(path, data)
 }
 
 /// The Tidy up files, relative to the home, `/`-separated.

@@ -266,11 +266,18 @@ mod windows {
             .find(|m| m.name == "old-setup.exe")
             .expect("the old installer can be sorted");
         assert_eq!(old.deleted_by, ["w-installers"]);
+        // The duplicate cases' old installer (a copy of it is on the Desktop) is the cleanup's too.
+        let big = downloads
+            .moves
+            .iter()
+            .find(|m| m.name == "big-old-setup.exe")
+            .expect("the duplicates' old installer can be sorted");
+        assert_eq!(big.deleted_by, ["w-installers"]);
         assert!(
             downloads
                 .moves
                 .iter()
-                .filter(|m| m.name != "old-setup.exe")
+                .filter(|m| m.name != "old-setup.exe" && m.name != "big-old-setup.exe")
                 .all(|m| m.deleted_by.is_empty())
         );
         let alone = plan(&fx.scanned, &fx.env, &["tidy-downloads".into()]).unwrap();
@@ -284,8 +291,8 @@ mod windows {
         assert_eq!(moves(&alone), downloads.moves.len() as u64);
         assert_eq!(
             moves(&both),
-            downloads.moves.len() as u64 - 1,
-            "the installer is deleted, not moved"
+            downloads.moves.len() as u64 - 2,
+            "the installers are deleted, not moved"
         );
         let summary = both.summary();
         assert_eq!(summary.steps.last().unwrap().kind, StepKind::Move);
@@ -538,6 +545,7 @@ mod windows {
         assert!(
             gone.iter()
                 .all(|l| l.starts_with("Users/fixture/Downloads/old-setup.exe\t")
+                    || l.starts_with("Users/fixture/Downloads/big-old-setup.exe\t")
                     || l.starts_with(&format!("{changed_line}\t"))),
             "only the deleted installer and the changed file differ: {gone:#?}"
         );

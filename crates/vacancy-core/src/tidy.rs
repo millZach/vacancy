@@ -174,6 +174,8 @@ pub struct Tidy {
 /// One folder's sort: the inventory taken for it, its drafts, and the proposal shown.
 #[derive(Debug)]
 struct FolderSort {
+    /// The folder in the scan, when the scan has it.
+    dir: Option<DirId>,
     inventory: Inventory,
     drafts: Vec<Drafted>,
     proposal: TidyProposal,
@@ -210,6 +212,56 @@ impl Tidy {
     /// Whether `id` is one of these proposals.
     pub fn has(&self, id: &str) -> bool {
         self.folders.iter().any(|f| f.proposal.id == id)
+    }
+
+    /// Marks the files the delete proposal `id` takes one by one, `files`, as covered by it, in place of what it
+    /// covered before: for a proposal that arrives after the scan (the duplicate finder's extra copies). A plan
+    /// still deleting one of them leaves it out of every sort, by identity, and the review says so. Only kept
+    /// files matter here: a loose file at the top of a sorted folder that a proposal takes is one of them.
+    pub(crate) fn cover(&mut self, snap: &Snapshot, id: &str, files: &[ItemRef]) {
+        let taken: Vec<(DirId, u128, ItemRef)> = files
+            .iter()
+            .filter_map(|&t| match t {
+                ItemRef::File(f) => snap
+                    .file_identity(f)
+                    .map(|key| (snap.file(f).parent, key, t)),
+                _ => None,
+            })
+            .collect();
+        for sort in &mut self.folders {
+            let keys: HashMap<String, u128> = sort
+                .inventory
+                .entries()
+                .iter()
+                .map(|e| (e.id.clone(), e.file_id))
+                .collect();
+            let mut names: HashMap<String, Vec<String>> = HashMap::new();
+            for d in &mut sort.drafts {
+                d.covers.retain(|(by, _)| by != id);
+                let key = keys.get(&d.draft.entry_id).copied();
+                for (dir, file_key, target) in &taken {
+                    if Some(*dir) == sort.dir && Some(*file_key) == key {
+                        d.covers.push((id.to_owned(), *target));
+                    }
+                }
+                let mut by: Vec<String> = d.covers.iter().map(|(p, _)| p.clone()).collect();
+                by.sort();
+                by.dedup();
+                names.insert(d.draft.entry_id.clone(), by);
+            }
+            // The review names moves by file name; the drafts by inventory entry.
+            let by_name: HashMap<&str, &str> = sort
+                .inventory
+                .entries()
+                .iter()
+                .map(|e| (e.name.as_str(), e.id.as_str()))
+                .collect();
+            for mv in &mut sort.proposal.moves {
+                if let Some(by) = by_name.get(mv.name.as_str()).and_then(|e| names.get(*e)) {
+                    mv.deleted_by = by.clone();
+                }
+            }
+        }
     }
 
     /// Validates the sort `id` again, now, for a plan whose delete targets still in it are `surviving`: the files
@@ -701,6 +753,7 @@ fn sort_folder(
         })
         .unwrap_or_default();
     Some(FolderSort {
+        dir,
         proposal: TidyProposal {
             id: format!("{PREFIX}{}", folder_id(at)),
             folder: at,

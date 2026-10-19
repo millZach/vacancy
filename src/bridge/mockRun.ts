@@ -1,9 +1,14 @@
 // The mock bridge's planner and executor: plans from a drive's fixture proposals, and a run that plays them back on a
 // clock, with the events and the report the core sends. Nothing is touched; the fixture's skips say what is left.
 import type { RunSkip } from './fixtures';
+import { DUPLICATES, deletedExtras, type MockDuplicates } from './mockDuplicates';
 import type { TidyScript } from './tidyFixture';
 import type {
   CategoryFreed,
+  DuplicatePair,
+  DuplicatesDone,
+  FileKind,
+  PlannedDuplicates,
   LeftForYou,
   Overview,
   PlanSummary,
@@ -30,6 +35,10 @@ interface Place {
    * stays in use (a hard link kept elsewhere).
    */
   inUse: Skip | null;
+  /** Left whole when the run gets there (an extra copy whose kept copy changed since the scan). */
+  whole?: Skip;
+  /** For an extra copy of a duplicate group: its group and its map tile. */
+  dup?: { group: string; kind: FileKind; name: string; kept: string; tile: string };
 }
 
 interface MockStep {
@@ -37,6 +46,8 @@ interface MockStep {
   places: Place[];
   /** Places planning left out, reported as skipped when the step runs. */
   refused: Skip[];
+  /** For the duplicates step: the groups the user unticked. */
+  skippedGroups?: number;
 }
 
 /** A Tidy up sort in a plan: the folder's proposal, the moves the plan makes, and what its run and Undo find. */
@@ -72,13 +83,24 @@ export function makePlan(
   skips: RunSkip[],
   tidy: TidyProposal[] = [],
   scripts: Record<string, TidyScript> = {},
+  duplicates: { found: MockDuplicates | null; skipped: string[] } = { found: null, skipped: [] },
 ): MockPlan {
   const unknown = ids.find((i) => !proposals.some((p) => p.id === i) && !tidy.some((t) => t.id === i));
   if (unknown !== undefined) throw new Error(`there is no proposal ${unknown} in this scan`);
   const chosen = proposals.filter((p) => ids.includes(p.id));
   // Delete wins over sort: a file a delete step of this plan takes stays out of the sort.
   const deleting = chosen.filter((p) => p.action === 'delete').map((p) => p.id);
+  // Duplicates delete only the extra copies of the groups left ticked: an unticked group's copies stay sortable.
+  const dupsGone = deletedExtras(duplicates.found, duplicates.skipped);
   const sorts = tidy
+    .map((t) => ({
+      ...t,
+      moves: t.moves.map((m) =>
+        m.deletedBy.includes(DUPLICATES) && !dupsGone.has(`${t.path}\\${m.name}`.toLowerCase())
+          ? { ...m, deletedBy: m.deletedBy.filter((id) => id !== DUPLICATES) }
+          : m,
+      ),
+    }))
     .filter((t) => ids.includes(t.id))
     .map((t): MockSort => ({ tidy: t, moves: activeMoves(t, deleting), script: scripts[t.id] ?? { skips: [], stuck: [], kept: [] } }))
     .filter((s) => s.moves.length > 0);
@@ -86,6 +108,7 @@ export function makePlan(
   const steps = chosen
     .filter((p) => p.action === 'delete')
     .map((p): MockStep => {
+      if (p.id === DUPLICATES && duplicates.found) return duplicateStep(p, duplicates.found, duplicates.skipped);
       const mine = skips.filter((s) => s.proposal === p.id);
       const refused = mine.filter((s) => s.when === 'plan').map((s) => s.skip);
       const inUse = mine.filter((s) => s.when === 'run').map((s) => s.skip);
@@ -99,6 +122,9 @@ export function makePlan(
       }
       return { proposal: p, places, refused };
     });
+  // Duplicates with every group unticked delete nothing: no step.
+  const kept = steps.filter((s) => s.proposal.id !== DUPLICATES || s.places.length > 0);
+  steps.splice(0, steps.length, ...kept);
   const planSteps: PlanSummary['steps'] = [
     ...steps.map((s) => ({
       id: s.proposal.id,
@@ -140,7 +166,57 @@ export function makePlan(
       steps: planSteps,
       refused: steps.flatMap((s) => s.refused),
       leftForYou: advice.map((a) => a.id),
+      duplicates: plannedDuplicates(steps),
     },
+  };
+}
+
+/**
+ * The duplicates step: one place per extra copy of each group the user didn't untick. The fixture's changed group
+ * has its kept copy changed since the scan, so the run leaves its extra copies, as the core does.
+ */
+function duplicateStep(p: Proposal, found: MockDuplicates, skipped: string[]): MockStep {
+  const places: Place[] = [];
+  for (const g of found.duplicates.groups) {
+    if (skipped.includes(g.id)) continue;
+    for (const e of g.extras) {
+      const changed = g.id === found.changedGroup;
+      places.push({
+        path: e.path,
+        bytes: e.bytes,
+        items: 1,
+        inUse: null,
+        ...(changed
+          ? {
+              whole: {
+                path: e.path,
+                reason: `The copy Vacancy keeps of it (${g.keep.path}) changed or is gone since the scan, so this copy stays`,
+                kind: 'changed' as const,
+                bytes: e.bytes,
+                items: 1,
+              },
+            }
+          : {}),
+        dup: { group: g.id, kind: g.kind, name: g.name, kept: g.keep.path, tile: e.tile },
+      });
+    }
+  }
+  const skippedGroups = found.duplicates.groups.filter((g) => skipped.includes(g.id)).length;
+  return { proposal: p, places, refused: [], skippedGroups };
+}
+
+/** What the confirm dialog says of a plan's duplicates. */
+function plannedDuplicates(steps: MockStep[]): PlannedDuplicates | null {
+  const step = steps.find((s) => s.proposal.id === DUPLICATES);
+  if (!step) return null;
+  const tiles = new Map<string, number>();
+  for (const pl of step.places) if (pl.dup) tiles.set(pl.dup.tile, (tiles.get(pl.dup.tile) ?? 0) + pl.bytes);
+  return {
+    groups: new Set(step.places.map((pl) => pl.dup?.group)).size,
+    copies: step.places.length,
+    bytes: sum(step.places, (pl) => pl.bytes),
+    skippedGroups: step.skippedGroups ?? 0,
+    tiles: [...tiles].map(([id, bytes]) => ({ id, bytes })),
   };
 }
 
@@ -181,6 +257,10 @@ export function play(
   let skipped: Skip[] = [];
   const reports: StepReport[] = [];
   let timer = 0;
+  /** What the duplicates step freed per tile, and the extra copies each group lost. */
+  const dupFreed = new Map<string, number>();
+  const dupCleared = new Map<string, number>();
+  const dupKeptWhole = new Set<string>();
 
   const skip = (s: Skip) => {
     skipped.push(s);
@@ -206,6 +286,15 @@ export function play(
     for (const r of step.refused) skip(r);
   };
   const deletePlace = (place: Place) => {
+    if (place.whole) {
+      if (place.dup) dupKeptWhole.add(place.dup.group);
+      skip(place.whole);
+      return;
+    }
+    if (place.dup) {
+      dupFreed.set(place.dup.tile, (dupFreed.get(place.dup.tile) ?? 0) + place.bytes);
+      dupCleared.set(place.dup.group, (dupCleared.get(place.dup.group) ?? 0) + 1);
+    }
     const freed = place.bytes - (place.inUse?.bytes ?? 0);
     // A name deleted while another keeps the file is deleted; only its space stays in use.
     const items = place.items - (place.inUse && !isNote(place.inUse) ? place.inUse.items : 0);
@@ -355,7 +444,8 @@ export function play(
       clearInterval(timer);
       // Preview moves (`&moves=1`) stand in only for a plan with no sorts of its own.
       const moves = records.length > 0 ? records : (run.moves ?? []);
-      resolve(runReport(run.id, plan, volume, reports, startedAt, Date.now() - startedAt, cancelled, moves));
+      const report = runReport(run.id, plan, volume, reports, startedAt, Date.now() - startedAt, cancelled, moves);
+      resolve({ ...report, duplicates: duplicatesDone(plan, reports, dupFreed, dupCleared, dupKeptWhole) });
     };
     if (plan.steps.length === 0 && plan.sorts.length === 0) {
       setTimeout(end, 0);
@@ -430,6 +520,45 @@ export function play(
       cancelled = true;
     },
     done,
+  };
+}
+
+/** What the duplicates step came to, as the core reports it. */
+function duplicatesDone(
+  plan: MockPlan,
+  reports: StepReport[],
+  freed: Map<string, number>,
+  cleared: Map<string, number>,
+  keptWhole: Set<string>,
+): DuplicatesDone | null {
+  const step = plan.steps.find((s) => s.proposal.id === DUPLICATES);
+  const report = reports.find((r) => r.id === DUPLICATES);
+  if (!step || !report) return null;
+  const planned = new Map<string, number>();
+  for (const pl of step.places) if (pl.dup) planned.set(pl.dup.tile, (planned.get(pl.dup.tile) ?? 0) + pl.bytes);
+  const groups = [...new Map(step.places.flatMap((pl) => (pl.dup ? [[pl.dup.group, pl] as const] : []))).values()];
+  const done = groups.filter((pl) => cleared.has(pl.dup!.group));
+  const pick = (want: (k: FileKind) => boolean) => done.find((pl) => want(pl.dup!.kind));
+  const samples = [
+    pick((k) => k === 'photo'),
+    pick((k) => k === 'video'),
+    pick((k) => k !== 'photo' && k !== 'video'),
+  ].filter((pl): pl is Place => !!pl);
+  return {
+    groups: groups.length,
+    clearedGroups: done.length,
+    keptWhole: keptWhole.size,
+    skippedGroups: step.skippedGroups ?? 0,
+    copiesDeleted: report.deletedItems,
+    freedBytes: report.freedBytes,
+    samples: samples.map((pl): DuplicatePair => ({
+      kind: pl.dup!.kind,
+      name: pl.dup!.name,
+      kept: pl.dup!.kept,
+      removed: pl.path,
+      copies: cleared.get(pl.dup!.group) ?? 0,
+    })),
+    tiles: [...planned].map(([id, bytes]) => ({ id, plannedBytes: bytes, freedBytes: freed.get(id) ?? 0 })),
   };
 }
 

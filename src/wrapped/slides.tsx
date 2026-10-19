@@ -230,6 +230,11 @@ export function KeptSlide({ report: r }: SlideProps) {
           ) : (
             <p className="kept-none">{r.steps.length === 0 ? 'No files were selected for deletion.' : 'Every file in the plan was free to go.'}</p>
           )}
+          {r.duplicates && r.duplicates.groups > 0 && (
+            <p className="kept-hint">
+              Duplicate files: one copy of each of {count(r.duplicates.groups, 'group')} stayed where it was.
+            </p>
+          )}
           {(inUse || changed) && (
             <p className="kept-hint">
               {inUse && 'Files in use can go next time, once nothing has them open.'}

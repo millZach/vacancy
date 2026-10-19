@@ -1,0 +1,146 @@
+/* The duplicate finder on the map (variant B, "Map links"): the toolbar pill, the linked tiles and the links. */
+
+.dup-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  padding: 4px 11px 3px;
+  border: 1px solid var(--color-line-2);
+  border-radius: var(--radius-pill);
+  background: var(--color-raise);
+  font: 500 var(--text-xs) var(--font-sans);
+  color: var(--color-text-2);
+  white-space: nowrap;
+}
+/* On a narrow map the toolbar's notes give way: plain notes truncate, the pill drops a word, and the Full Disk
+   Access button keeps only its icon (its name stays, for assistive tech and as a tooltip). */
+.atlas.is-map .atlas-toolbar {
+  container-type: inline-size;
+}
+.atlas-toolbar .scan-notes {
+  min-width: 0;
+}
+.atlas-toolbar .scan-note:not(.is-action) {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.atlas-toolbar .scan-note.is-action {
+  flex: none;
+}
+@container (max-width: 820px) {
+  .dup-pill-word,
+  .dup-pill-bar,
+  .scan-note-text {
+    display: none;
+  }
+}
+.dup-pill b {
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+}
+.dup-pill.is-quiet {
+  color: var(--color-text-3);
+}
+.dup-pill-spin {
+  animation: dup-spin 1s linear infinite;
+}
+@keyframes dup-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.dup-pill-bar {
+  width: 44px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--color-step-track);
+  overflow: hidden;
+}
+.dup-pill-bar i {
+  display: block;
+  height: 100%;
+  background: var(--color-text-2);
+  transition: width 0.12s linear;
+}
+.dup-pill.is-ready {
+  cursor: pointer;
+  border-color: rgba(var(--neon-rgb), 0.55);
+  color: var(--color-neon-ink);
+  box-shadow: 0 0 12px -4px rgba(var(--neon-rgb), 0.7);
+}
+.dup-pill.is-ready:hover,
+.dup-pill.is-open {
+  background: rgba(var(--neon-rgb), 0.12);
+}
+.dup-pill.is-ready:focus-visible {
+  outline: 2px solid var(--color-swipe);
+  outline-offset: 2px;
+}
+
+/* Tiles a picked group links: the duplicates tiles its extra copies go from, and the folder its kept copy lives in. */
+.map-tile.is-linked {
+  z-index: 4;
+  box-shadow: var(--glow-running);
+}
+.map-tile.is-linked::after {
+  border: 0;
+  box-shadow: var(--edge-running), inset 0 0 22px rgba(var(--neon-rgb), 0.4);
+  background: var(--color-selected-fill);
+}
+.map-tile.is-keeper {
+  z-index: 4;
+  box-shadow: var(--glow-swipe);
+}
+.map-tile.is-keeper::after {
+  box-shadow: inset 0 0 0 2px var(--color-swipe), inset 0 0 26px rgba(255, 255, 255, 0.14);
+}
+.dup-kept-tag {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 2px 7px 1px;
+  border-radius: var(--radius-pill);
+  background: var(--color-swipe);
+  color: #12161c;
+  font: 700 var(--text-2xs) / 1.3 var(--font-sans);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.dup-links {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+  overflow: visible;
+}
+.dup-links path {
+  fill: none;
+  stroke: var(--color-neon);
+  stroke-width: 1.6;
+  stroke-dasharray: 5 4;
+  filter: drop-shadow(0 0 4px rgba(var(--neon-rgb), 0.9));
+  animation: dup-dash 1.2s linear infinite;
+}
+.dup-links circle {
+  fill: var(--color-neon);
+  filter: drop-shadow(0 0 5px var(--color-neon));
+}
+.dup-links circle.is-keep {
+  fill: var(--color-swipe);
+  filter: drop-shadow(0 0 5px rgba(255, 255, 255, 0.8));
+}
+@keyframes dup-dash {
+  to {
+    stroke-dashoffset: -18;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dup-links path,
+  .dup-pill-spin {
+    animation: none;
+  }
+}

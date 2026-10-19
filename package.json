@@ -15,6 +15,7 @@
     "ripple-strip": "node tools/ripple-strip.mjs",
     "map-shots": "node tools/map-shots.mjs",
     "wrapped-shots": "node tools/wrapped-shots.mjs",
+    "dups-shots": "node tools/dups-shots.mjs",
     "tidy-shots": "node tools/tidy-shots.mjs"
   },
   "dependencies": {

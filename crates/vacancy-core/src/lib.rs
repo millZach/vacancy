@@ -6,6 +6,7 @@
 
 pub mod advisor;
 mod categorize;
+pub mod duplicates;
 mod exec;
 pub mod fixture;
 mod fsid;
@@ -35,6 +36,10 @@ pub use categorize::{
     Categories, Category, CategoryId, CloudRoot, Env, Item, ItemRef, KnownFolders, Platform,
     categorize,
 };
+pub use duplicates::{
+    DuplicateCopy, DuplicateGroup, DuplicateProgress, DuplicateStage, Duplicates,
+    DuplicatesOutcome, FileKind,
+};
 pub use exec::{
     Deleted, MoveProgress, RunEvent, RunProgress, Skipped, StepFinished, StepStarted, execute,
     execute_with,
@@ -46,10 +51,12 @@ pub use map::{
     ScanSummary, ScanUpdate, ScannedVolume, browse, overview, scan_for_map, scan_for_map_with,
     scan_update,
 };
-pub use plan::{Plan, PlanError, PlanStep, PlanSummary, plan};
+pub use plan::{
+    Plan, PlanError, PlanStep, PlanSummary, PlannedDuplicates, PlannedTile, plan, plan_with,
+};
 pub use report::{
-    CategoryFreed, LeftForYou, Outcome, Reorganized, RunHistory, RunListing, RunReport, Skip,
-    SkipKind, StepKind, StepReport, TidyListing, Undone,
+    CategoryFreed, DuplicatePair, DuplicatesDone, LeftForYou, Outcome, Reorganized, RunHistory,
+    RunListing, RunReport, Skip, SkipKind, StepKind, StepReport, TidyListing, TileFreed, Undone,
 };
 pub use rules::{
     ActionKind, Moment, Proposal, ProposalAction, ProposalSource, Proposals, Risk, propose,

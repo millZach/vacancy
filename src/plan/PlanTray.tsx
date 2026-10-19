@@ -1,11 +1,12 @@
-import { ChevronDown, LoaderCircle, PanelRightClose, Signpost } from 'lucide-react';
+import { ChevronDown, ChevronRight, LoaderCircle, PanelRightClose, Signpost } from 'lucide-react';
 import { useId, useState } from 'react';
 import type { Proposal, TidyProposal } from '../bridge';
 import { formatBytes, formatCount } from '../format';
 import { listOf, tidyTotals } from '../tidy/model';
 import { TidyGroup } from '../tidy/TidyGroup';
 import { Checkbox, RiskChip, SourceTag } from './bits';
-import { planTotals, tileOf } from './totals';
+import { DUPLICATES, groupTotals, included } from './duplicates';
+import { planTotals, tileOf, type GroupChoice } from './totals';
 import { HintActionButton } from './HintActionButton';
 import { AdviceText } from './AdviceText';
 import './plan.css';
@@ -36,6 +37,10 @@ interface Props {
   checking: boolean;
   /** Why the plan couldn't be made, if it couldn't. */
   error: string | null;
+  /** The duplicate groups found, and the ones unticked, once the duplicate search is done. */
+  duplicates?: GroupChoice | null;
+  /** Opens the duplicates panel in place of the tray. */
+  onOpenDuplicates?: () => void;
 }
 
 /**
@@ -59,12 +64,15 @@ export function PlanTray({
   onFree,
   checking,
   error,
+  duplicates,
+  onOpenDuplicates,
 }: Props) {
   const deletes = proposals.filter((p) => p.action === 'delete');
   const hints = proposals.filter((p) => p.action === 'hint');
   const reminders = hints.filter((p) => plan.includes(p.id)).length;
   const on = deletes.filter((p) => plan.includes(p.id)).length;
-  const t = planTotals(proposals, plan);
+  const t = planTotals(proposals, plan, duplicates ?? undefined);
+  const dupGroups = duplicates && plan.includes(DUPLICATES) ? included(duplicates.groups, duplicates.skipped).length : 0;
   const sorts = tidyTotals(tidy, plan);
   const note = useId();
   return (
@@ -88,7 +96,19 @@ export function PlanTray({
             </span>
           </h3>
           {deletes.length === 0 && <p className="tray-empty">Vacancy found nothing it can clean up on this drive.</p>}
-          {deletes.map((p) => (
+          {deletes.map((p) =>
+            p.id === DUPLICATES && duplicates ? (
+              <DuplicatesRow
+                key={p.id}
+                proposal={p}
+                choice={duplicates}
+                on={plan.includes(p.id)}
+                hot={hot === tileOf(p.id)}
+                onToggle={() => onToggle(p.id)}
+                onHot={onHot}
+                onOpen={() => onOpenDuplicates?.()}
+              />
+            ) : (
             <ProposalRow
               key={p.id}
               proposal={p}
@@ -99,7 +119,8 @@ export function PlanTray({
               onToggle={() => onToggle(p.id)}
               onHot={onHot}
             />
-          ))}
+            ),
+          )}
         </section>
         <TidyGroup tidy={tidy} plan={plan} open={drawer} onToggle={onToggle} onOpen={onDrawer} tileOf={tidyTile} hot={hot} onHot={onHot} />
         {hints.length > 0 && (
@@ -124,6 +145,11 @@ export function PlanTray({
             {formatCount(t.items)} {t.items === 1 ? 'item' : 'items'} in {t.places} {t.places === 1 ? 'place' : 'places'},
             deleted permanently
           </li> : <li>No files will be deleted.</li>}
+          {dupGroups > 0 && (
+            <li>
+              One copy of each of {formatCount(dupGroups)} duplicate {dupGroups === 1 ? 'group' : 'groups'} stays
+            </li>
+          )}
           {sorts.moves > 0 && (
             <li className="note-moves">
               {formatCount(sorts.moves)} {sorts.moves === 1 ? 'file' : 'files'} sorted in {listOf(sorts.folders)}. Moved, not
@@ -172,6 +198,57 @@ interface RowProps {
   hot: boolean;
   onToggle: () => void;
   onHot: (tile: string | null) => void;
+}
+
+interface DuplicatesRowProps {
+  proposal: Proposal;
+  choice: GroupChoice;
+  on: boolean;
+  hot: boolean;
+  onToggle: () => void;
+  onHot: (tile: string | null) => void;
+  onOpen: () => void;
+}
+
+/**
+ * Duplicate files: tick box, a title that opens the duplicates panel (where the groups are, each with its own tick
+ * box), what was found with photos and videos first, Review, and what the ticked groups free.
+ */
+function DuplicatesRow({ proposal: p, choice, on, hot, onToggle, onHot, onOpen }: DuplicatesRowProps) {
+  const tile = tileOf(p.id);
+  const kept = included(choice.groups, choice.skipped);
+  const t = groupTotals(kept);
+  const all = choice.groups.length;
+  const cls = ['tray-row', 'dup-row', on && 'is-on', hot && 'is-hot'].filter(Boolean).join(' ');
+  return (
+    <div
+      className={cls}
+      onMouseEnter={() => onHot(tile)}
+      onMouseLeave={() => onHot(null)}
+      onFocus={() => onHot(tile)}
+      onBlur={() => onHot(null)}
+    >
+      <Checkbox on={on} onChange={onToggle} label={`Include ${p.title}`} />
+      <div className="tray-row-main">
+        <button type="button" className="tray-row-title" onClick={onOpen}>
+          <span>{p.title}</span>
+          <ChevronRight size={13} aria-hidden />
+        </button>
+        <p className="tray-row-sum">
+          {on && kept.length < all
+            ? `${formatCount(kept.length)} of ${formatCount(all)} groups. One copy of each stays.`
+            : p.summary}
+        </p>
+        <div className="tray-row-meta">
+          <RiskChip risk={p.risk} />
+          <button type="button" className="link-button dup-review-link" onClick={onOpen}>
+            See them on the map
+          </button>
+        </div>
+      </div>
+      <span className="tray-row-size">{formatBytes(on ? t.bytes : p.bytes)}</span>
+    </div>
+  );
 }
 
 /** One proposal: tick box, title (which opens the why and sample paths), summary, risk, source and size. */

@@ -12,9 +12,9 @@ use tauri::{AppHandle, Manager, State};
 use vacancy_core::advisor::{self, AdvisorStatus};
 use vacancy_core::permissions::{self, FullDiskAccess};
 use vacancy_core::{
-    CancelToken, Env, MapFolder, Moment, Plan, PlanSummary, RunEvent, RunHistory, RunListing,
-    RunReport, ScanError, ScanOptions, ScanOutcome, ScanUpdate, ScannedVolume, Snapshot,
-    VolumeInfo, fixture, report, tidy,
+    CancelToken, DuplicateProgress, DuplicatesOutcome, Env, MapFolder, Moment, Plan, PlanSummary,
+    RunEvent, RunHistory, RunListing, RunReport, ScanError, ScanOptions, ScanOutcome, ScanUpdate,
+    ScannedVolume, Snapshot, VolumeInfo, duplicates, fixture, report, tidy,
 };
 
 /// What the app remembers between commands: each drive's last finished scan (which its map's drill-down reads) with
@@ -46,6 +46,23 @@ struct Scanned {
     volume: ScannedVolume,
     plan: Option<Plan>,
     spent: bool,
+    /// The scan's generation (see [`Scans`]): a duplicate search only ever attaches to the scan it read.
+    generation: u64,
+    /// The duplicate search reading this scan's files, if one is. Dropping it stops the search: a new scan of the
+    /// drive, the drive going away, or a plan starting to run.
+    duplicates: Option<Search>,
+    /// A duplicate search of this scan has attached what it found. A scan is searched once: the groups the user
+    /// unticks are named by what that search found, and another search could name them otherwise.
+    searched: bool,
+}
+
+/// A running duplicate search's stop button, pressed when it is dropped.
+struct Search(CancelToken);
+
+impl Drop for Search {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }
 
 /// Where the app works.
@@ -510,6 +527,9 @@ async fn scan_volume(
                 volume: scanned,
                 plan: None,
                 spent: false,
+                generation,
+                duplicates: None,
+                searched: false,
             };
             if session.scans.finish(&mount_point, generation, scanned) {
                 Ok(ScanOutcome::Done {
@@ -566,12 +586,84 @@ async fn browse(
     })
 }
 
+/// Looks for duplicate files in a drive's last scan, in the background: reads only the files that might be copies,
+/// streaming how far it has got to `on_progress`, then adds the "Duplicate files" proposal and its tiles to the
+/// drive's map and gives the map and proposals again with the groups found. Stopped (and answered "cancelled") by a
+/// new scan of the drive, the drive going away, a plan starting to run, or another search of the same scan.
+#[tauri::command]
+async fn find_duplicates(
+    mount_point: String,
+    on_progress: Channel<DuplicateProgress>,
+    app: AppHandle,
+) -> Result<DuplicatesOutcome, String> {
+    let env = env_for(&app, &mount_point).await?;
+    let worker = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let session = worker.state::<Session>();
+        if session.running() {
+            return Ok(DuplicatesOutcome::Cancelled);
+        }
+        let cancel = CancelToken::new();
+        // Prepared under the drive's lock, since it reads the scan (no file is read, and it stops as soon as the
+        // search is cancelled); the reading happens without it.
+        let prepared = session.scans.with_last_mut(&mount_point, |last| {
+            let scanned = last.filter(|s| !s.spent)?;
+            if scanned.searched {
+                return Some(Err(
+                    "Duplicates were already found for this scan. Scan again to look again."
+                        .to_owned(),
+                ));
+            }
+            scanned.duplicates = Some(Search(cancel.clone()));
+            let search =
+                duplicates::search_until(&scanned.volume, &env, &|| cancel.is_cancelled())?;
+            Some(Ok((scanned.generation, search)))
+        });
+        let (generation, search) = match prepared {
+            Some(Ok(prepared)) => prepared,
+            Some(Err(why)) => return Err(why),
+            None => return Ok(DuplicatesOutcome::Cancelled),
+        };
+        let found = match search.run(
+            &mut |progress| {
+                // The UI may have gone away; the search finishes either way.
+                let _ = on_progress.send(progress);
+            },
+            &cancel,
+        ) {
+            Ok(found) => found,
+            Err(duplicates::Cancelled) => return Ok(DuplicatesOutcome::Cancelled),
+        };
+        session.scans.with_last_mut(&mount_point, |last| {
+            let Some(scanned) =
+                last.filter(|s| s.generation == generation && !s.spent && !cancel.is_cancelled())
+            else {
+                return Ok(DuplicatesOutcome::Cancelled);
+            };
+            scanned.duplicates = None;
+            scanned.searched = true;
+            let duplicates = duplicates::attach(&mut scanned.volume, found);
+            Ok(DuplicatesOutcome::Done {
+                overview: Box::new(scanned.volume.overview.clone()),
+                proposals: scanned.volume.proposals.list().to_vec(),
+                // Delete wins over sort: the sorts' previews now mark the extra copies as deleted by duplicates.
+                tidy: scanned.volume.tidy.proposals(),
+                duplicates,
+            })
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Makes the plan for the proposals `ids` of a drive's last scan, for the confirm dialog, and keeps it as the
-/// drive's plan in place of any made before. Every place passes the Guard again, built afresh.
+/// drive's plan in place of any made before. Every place passes the Guard again, built afresh. Duplicate groups in
+/// `skipped_groups` (unticked in the duplicates panel) keep every copy.
 #[tauri::command]
 async fn build_plan(
     mount_point: String,
     ids: Vec<String>,
+    skipped_groups: Option<Vec<String>>,
     app: AppHandle,
 ) -> Result<PlanSummary, String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -587,8 +679,13 @@ async fn build_plan(
             if scanned.spent {
                 return Err("This scan already ran a plan. Scan again to make another.".to_owned());
             }
-            let plan =
-                vacancy_core::plan(&scanned.volume, &env, &ids).map_err(|e| e.to_string())?;
+            let plan = vacancy_core::plan_with(
+                &scanned.volume,
+                &env,
+                &ids,
+                skipped_groups.as_deref().unwrap_or_default(),
+            )
+            .map_err(|e| e.to_string())?;
             let summary = plan.summary();
             scanned.plan = Some(plan);
             Ok(summary)
@@ -621,6 +718,8 @@ async fn run_plan(
         // Taken out of the drive's state under the run's lock, so a plan can never run twice.
         let plan = session.scans.with_last_mut(&mount_point, |last| {
             let scanned = last.ok_or("There is no plan for this drive.")?;
+            // A duplicate search still reading this scan's files stops: the run changes them.
+            scanned.duplicates = None;
             match scanned.plan.take() {
                 Some(plan) if plan.id() == plan_id => {
                     scanned.spent = true;
@@ -807,6 +906,7 @@ pub fn run() {
             scan_volume,
             cancel_scan,
             browse,
+            find_duplicates,
             build_plan,
             run_plan,
             cancel_run,

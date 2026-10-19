@@ -2,6 +2,8 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import type {
   AdvisorStatus,
   Bridge,
+  DuplicateProgress,
+  DuplicatesOutcome,
   FullDiskAccess,
   MapFolder,
   PlanSummary,
@@ -31,7 +33,13 @@ export function createTauriBridge(): Bridge {
     },
     cancelScan: () => invoke<undefined>('cancel_scan'),
     browse: (mountPoint, id) => invoke<MapFolder>('browse', { mountPoint, id }),
-    buildPlan: (mountPoint, ids) => invoke<PlanSummary>('build_plan', { mountPoint, ids }),
+    findDuplicates: (mountPoint, onProgress) => {
+      const onProgressChannel = new Channel<DuplicateProgress>();
+      onProgressChannel.onmessage = onProgress;
+      return invoke<DuplicatesOutcome>('find_duplicates', { mountPoint, onProgress: onProgressChannel });
+    },
+    buildPlan: (mountPoint, ids, skippedGroups) =>
+      invoke<PlanSummary>('build_plan', { mountPoint, ids, skippedGroups: skippedGroups ?? [] }),
     runPlan: (mountPoint, planId, onEvent) => {
       const onEventChannel = new Channel<RunEvent>();
       onEventChannel.onmessage = onEvent;

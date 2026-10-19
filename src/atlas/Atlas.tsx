@@ -1,16 +1,36 @@
 import { Check, ChevronRight, LoaderCircle, Plus, RotateCcw, ShieldAlert } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { useBridge, type CategoryId, type MapFolder, type Overview, type PlanSummary, type TidyProposal } from '../bridge';
+import {
+  useBridge,
+  type CategoryId,
+  type DuplicateGroup,
+  type MapFolder,
+  type Overview,
+  type PlanSummary,
+  type TidyProposal,
+} from '../bridge';
 import { DotField, type DotFieldHandle } from '../dotfield/DotField';
 import type { ReadyDrives } from '../drives/context';
 import { GoneNotice } from '../drives/GoneNotice';
 import { errorMessage } from '../errors';
 import { formatBytes, formatCount } from '../format';
 import { Legend } from '../map/Legend';
+import { DuplicateLinks, DuplicatesPill } from '../map/Duplicates';
 import { MapView, type TileLook } from '../map/MapView';
-import { folderModel, freedModel, overviewModel, scanModel, type Freed, type Leaf, type Region } from '../map/model';
+import {
+  folderModel,
+  freedModel,
+  overviewModel,
+  scanModel,
+  type Freed,
+  type Leaf,
+  type Rect,
+  type Region,
+} from '../map/model';
 import { useSize } from '../map/useSize';
 import { RiskChip, SourceTag } from '../plan/bits';
+import { DUPLICATES, sortable } from '../plan/duplicates';
+import { DuplicatesPanel } from '../plan/DuplicatesPanel';
 import { PlanTray } from '../plan/PlanTray';
 import { tileOf } from '../plan/totals';
 import { ConfirmDialog } from '../run/ConfirmDialog';
@@ -44,6 +64,9 @@ type Level = { kind: 'category'; id: CategoryId } | { kind: 'folder'; folder: Ma
 /** Scan progress shown before the scan says it is done: never quite full. */
 const ALMOST = 0.98;
 
+const NO_GROUPS: readonly DuplicateGroup[] = [];
+const NO_IDS: readonly string[] = [];
+
 /**
  * Variant D's map screen, for the drive on screen. Before a scan: the plate with the drives on the living dot
  * field. While scanning: the HUD over the map as it fills in. After: the overview treemap, where a click zooms into
@@ -68,7 +91,6 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
   const overview = state.phase === 'done' && drives.screen === 'map' ? state.overview : null;
   const scanning = state.phase === 'scanning' ? state : null;
   const proposals = useMemo(() => (state.phase === 'done' ? state.proposals : []), [state]);
-  const tidy = useMemo(() => (state.phase === 'done' ? state.tidy : []), [state]);
   const plan = state.phase === 'done' ? state.plan : [];
   const byId = useMemo(() => new Map(proposals.map((p) => [p.id, p])), [proposals]);
   const planRun = state.phase === 'done' ? state.planRun : null;
@@ -76,18 +98,39 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
   const run: ShownRun | null = overview && planRun && planRun.phase !== 'summary' ? planRun : null;
   const summary = overview && planRun?.phase === 'summary' ? planRun : null;
   const planning = !!overview && planOpen && !planRun;
-  /** The run's steps by their tile. */
-  const runSteps = useMemo(() => new Map<string, StepView>(run?.view.steps.map((s) => [tileOf(s.id), s])), [run]);
+  /** The run's steps by their proposal's id. */
+  const runSteps = useMemo(() => new Map<string, StepView>(run?.view.steps.map((s) => [s.id, s])), [run]);
+  /** What the run has freed from each tile so far. */
+  const runFreed = useMemo(() => (run ? freedBy(run) : null), [run]);
+  // The duplicate search that runs after the scan, and the groups it found.
+  const search = state.phase === 'done' ? state.duplicates : null;
+  const skipped = state.phase === 'done' ? state.skippedGroups : NO_IDS;
+  const found = search?.phase === 'done' ? search.found : null;
+  const groups = found?.groups ?? NO_GROUPS;
+  const choice = useMemo(() => (found ? { groups: found.groups, skipped } : null), [found, skipped]);
+  // The sorts as this plan would run them: an unticked duplicate group's extra copies stay sortable (delete wins over
+  // sort only while a delete that takes the file is in the plan).
+  const tidy = useMemo(
+    () => (state.phase === 'done' ? sortable(state.tidy, groups, skipped) : []),
+    [state, groups, skipped],
+  );
+  const [dupPanel, setDupPanel] = useState(false);
+  const [picked, setPicked] = useState<string | null>(null);
+  const [hoverGroup, setHoverGroup] = useState<string | null>(null);
+  const showPanel = planning && dupPanel && groups.length > 0;
   // "Free X GB": the plan being checked, then the plan to confirm.
   const [checking, setChecking] = useState(false);
   const [confirm, setConfirm] = useState<PlanSummary | null>(null);
   const [planError, setPlanError] = useState<string | null>(null);
   // The Tidy up proposal whose drawer is open over the map, while planning.
   const [drawerId, setDrawerId] = useState<string | null>(null);
-  const [seen, setSeen] = useState(overview);
-  if (seen !== overview) {
+  // Which scan's map this is. The duplicate search redraws the map when it is done; that is still the same map, and
+  // nothing the user was doing on it is lost.
+  const mapKey = overview && state.phase === 'done' ? `${overview.volume.mountPoint}#${state.run}` : null;
+  const [seen, setSeen] = useState(mapKey);
+  if (seen !== mapKey) {
     // A new map starts at the whole disk.
-    setSeen(overview);
+    setSeen(mapKey);
     setLevels([]);
     setHot(null);
     setOpening(null);
@@ -95,6 +138,9 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
     setChecking(false);
     setConfirm(null);
     setPlanError(null);
+    setDupPanel(false);
+    setPicked(null);
+    setHoverGroup(null);
     setDrawerId(null);
   }
   // Which folder opening is still wanted. Any move on the map, or a new map, makes a pending one stale, so a
@@ -105,7 +151,7 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
   useEffect(() => {
     request.current++;
     planRequest.current++;
-  }, [overview]);
+  }, [mapKey]);
 
   const top = useMemo(() => (overview ? overviewModel(overview) : null), [overview]);
   const level = levels.at(-1);
@@ -124,8 +170,8 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
   const view = run?.view;
   const freeing = view && top && model === top ? top : null;
   const shown = useMemo(
-    () => (freeing && view ? freedModel(freeing, freedBy(view.steps), view.freedBytes) : model),
-    [freeing, view, model],
+    () => (freeing && view && runFreed ? freedModel(freeing, runFreed, view.freedBytes) : model),
+    [freeing, view, runFreed, model],
   );
 
   const progress = scanning
@@ -178,14 +224,34 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
 
   const inPlan = (leaf: Leaf) => leaf.proposal !== null && plan.includes(leaf.proposal);
   /** Changing the plan drops one still being checked, and an old reason it couldn't be made. */
-  const setInPlan = (id: string, on: boolean) => {
+  const planChanged = () => {
     planRequest.current++;
     setChecking(false);
     setPlanError(null);
+  };
+  const setInPlan = (id: string, on: boolean) => {
+    planChanged();
     drives.setInPlan(id, on);
   };
+  const toggleGroup = (id: string) => {
+    planChanged();
+    drives.setGroupSkipped(id, !skipped.includes(id));
+  };
+  /** Opens the duplicates panel beside the whole map, a group picked: `tile`'s, or the first. */
+  const openDuplicates = (tile?: string) => {
+    if (groups.length === 0) return;
+    onPlanOpen(true);
+    setDupPanel(true);
+    const inTile = tile ? groups.find((g) => g.extras.some((e) => e.tile === tile)) : undefined;
+    setPicked((p) => inTile?.id ?? p ?? groups[0]?.id ?? null);
+    if (levels.length > 0) navigate([]);
+  };
+  // The group whose links the map draws: the one under the pointer in the panel, or the one picked.
+  const lit = showPanel ? (groups.find((g) => g.id === (hoverGroup ?? picked)) ?? null) : null;
+  const goneTiles = useMemo(() => new Set(lit?.extras.map((e) => e.tile) ?? []), [lit]);
   const onLeaf = (leaf: Leaf) => {
     if (run) return;
+    if (leaf.proposal === DUPLICATES && planning && groups.length > 0) return openDuplicates(leaf.id);
     if (leaf.proposal !== null) {
       // With the tray open a reclaimable tile goes in or out of the plan; zoomed in, it goes in and opens the tray.
       if (planning) return setInPlan(leaf.proposal, !inPlan(leaf));
@@ -207,20 +273,52 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
     !run && (leaf.proposal !== null || (levels.length === 0 ? leaf.kind !== 'free' : leaf.browsable));
   const drawer = planning && levels.length === 0 ? (tidy.find((t) => t.id === drawerId) ?? null) : null;
   const drawerTile = drawer && overview ? folderTileOf(overview, drawer) : null;
-  const look = (leaf: Leaf): TileLook => {
+  /** A tile the picked duplicate group links: where its kept copy lives, or where its extra copies go from. */
+  const linkLook = (leaf: Leaf, rect: Rect): TileLook | null => {
+    if (!lit || levels.length > 0) return null;
+    if (goneTiles.has(leaf.id)) return { cls: 'is-linked' };
+    if (leaf.id !== lit.keep.tile) return null;
+    // The tag only where it clears the tile's name; a small tile keeps the white edge and the link's white end.
+    return rect.w >= 150 && rect.h >= 50
+      ? { cls: 'is-keeper', badge: <span className="dup-kept-tag">Kept here</span>, state: 'the kept copy is here' }
+      : { cls: 'is-keeper', state: 'the kept copy is here' };
+  };
+  const look = (leaf: Leaf, rect: Rect): TileLook => {
     if (leaf.id === drawerTile) return { cls: 'is-tidy-hot', state: 'loose files Vacancy can sort' };
-    if (leaf.proposal === null) return {};
-    if (run) return runLook(runSteps.get(leaf.id));
-    if (!planning) return { cls: 'is-reclaim', state: 'reclaimable' };
+    const linked = linkLook(leaf, rect);
+    if (leaf.proposal === null) return linked ?? {};
+    if (run) return runLook(runSteps.get(leaf.proposal), runFreed?.get(leaf.id));
+    // A proposal drawn as several tiles lights whole when its row in the tray is under the pointer.
+    const together = hot !== null && hot !== leaf.id && hot === tileOf(leaf.proposal) ? ' is-hot' : '';
     const on = inPlan(leaf);
-    return on
-      ? { cls: 'is-reclaim is-selected', badge: <Pin on />, state: 'reclaimable, in the plan', pressed: true }
-      : { cls: 'is-available', badge: <Pin on={false} />, state: 'reclaimable, not in the plan', pressed: false };
+    const base: TileLook = !planning
+      ? { cls: 'is-reclaim', state: 'reclaimable' }
+      : on
+        ? { cls: 'is-reclaim is-selected', badge: <Pin on />, state: 'reclaimable, in the plan', pressed: true }
+        : { cls: 'is-available', badge: <Pin on={false} />, state: 'reclaimable, not in the plan', pressed: false };
+    const cls = [base.cls, together.trim(), linked?.cls].filter(Boolean).join(' ');
+    return { ...base, ...linked, cls, badge: linked?.badge ?? base.badge };
   };
   const leafStatus = (leaf: Leaf): ReactNode => {
     const p = leaf.proposal === null ? undefined : byId.get(leaf.proposal);
     if (!p) return null;
-    if (run) return runStatus(runSteps.get(leaf.id));
+    if (run) return runStatus(runSteps.get(leaf.proposal ?? ''), runFreed?.get(leaf.id));
+    if (p.id === DUPLICATES)
+      return (
+        <>
+          <div className="map-tip-meta">
+            <RiskChip risk={p.risk} />
+            <SourceTag source={p.source} agent={agent} />
+          </div>
+          <p className="map-tip-sum">
+            {leaf.note ? `${leaf.note}, of files kept elsewhere.` : 'Extra copies of files kept elsewhere.'} One copy of
+            each stays.
+          </p>
+          <p className="map-tip-act">
+            {planning ? 'Click to see the groups.' : levels.length === 0 ? 'Click to zoom in.' : 'Click to add it to the plan.'}
+          </p>
+        </>
+      );
     const on = inPlan(leaf);
     const act = planning
       ? on
@@ -260,7 +358,7 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
     const id = ++planRequest.current;
     setChecking(true);
     setPlanError(null);
-    bridge.buildPlan(overview.volume.mountPoint, plan).then(
+    bridge.buildPlan(overview.volume.mountPoint, plan, [...skipped]).then(
       (made) => {
         if (planRequest.current !== id) return;
         setChecking(false);
@@ -347,6 +445,14 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
               </span>
             )}
           </nav>
+          {overview && !run && (
+            <DuplicatesPill
+              search={search}
+              groups={groups}
+              open={showPanel}
+              onToggle={() => (showPanel ? setDupPanel(false) : openDuplicates())}
+            />
+          )}
           {overview && (
             <>
               <ScanNotes
@@ -396,6 +502,9 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
               planning={planning}
             />
           )}
+          {lit && top && model === top && levels.length === 0 && !summary && (
+            <DuplicateLinks model={top} width={size.w} height={size.h} group={lit} />
+          )}
           {onPlate && (
             <ScanPlate
               drives={drives}
@@ -420,7 +529,28 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
           />
         )}
       </main>
-      {planning && (
+      {showPanel && found && (
+        <DuplicatesPanel
+          found={found}
+          skipped={skipped}
+          inPlan={plan.includes(DUPLICATES)}
+          platform={bridge.platform}
+          picked={lit?.id ?? picked}
+          onPick={setPicked}
+          onHover={setHoverGroup}
+          onToggleGroup={toggleGroup}
+          onClose={() => {
+            setDupPanel(false);
+            setHoverGroup(null);
+          }}
+          onAdd={() => {
+            setInPlan(DUPLICATES, true);
+            setDupPanel(false);
+            setHoverGroup(null);
+          }}
+        />
+      )}
+      {planning && !showPanel && (
         <PlanTray
           key={overview.volume.mountPoint}
           mountPoint={overview.volume.mountPoint}
@@ -441,6 +571,8 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
           onFree={free}
           checking={checking}
           error={planError}
+          duplicates={choice}
+          onOpenDuplicates={() => openDuplicates()}
         />
       )}
       {run && (
@@ -489,11 +621,34 @@ function folderTileOf(overview: Overview, t: TidyProposal): string | null {
   return null;
 }
 
-/** What each step has freed from its tile so far, and left in place, by tile. */
-function freedBy(steps: readonly StepView[]): Map<string, Freed> {
-  return new Map(
-    steps.map((s) => [tileOf(s.id), { bytes: s.freedBytes, kept: s.skips.reduce((sum, k) => sum + k.bytes, 0) }]),
-  );
+/**
+ * What each step has freed from its tile so far, and left in place, by tile. The duplicates step has a tile per
+ * folder: while it runs each gets its share of what the step has freed, by what the plan takes from it; once the run
+ * has ended, what the report says it freed there.
+ */
+function freedBy(run: ShownRun): Map<string, Freed> {
+  const out = new Map<string, Freed>();
+  for (const s of run.view.steps) {
+    const kept = s.skips.reduce((sum, k) => sum + k.bytes, 0);
+    const tiles = s.id === DUPLICATES ? (run.plan.duplicates?.tiles ?? []) : [];
+    if (tiles.length === 0) {
+      out.set(tileOf(s.id), { bytes: s.freedBytes, kept });
+      continue;
+    }
+    const done = run.phase === 'ended' ? run.report.duplicates?.tiles : undefined;
+    const total = tiles.reduce((sum, t) => sum + t.bytes, 0);
+    for (const t of tiles) {
+      const exact = done?.find((d) => d.id === t.id);
+      const share = total > 0 ? t.bytes / total : 0;
+      out.set(
+        t.id,
+        exact
+          ? { bytes: exact.freedBytes, kept: Math.max(0, exact.plannedBytes - exact.freedBytes) }
+          : { bytes: s.freedBytes * share, kept: kept * share },
+      );
+    }
+  }
+  return out;
 }
 
 /**
@@ -501,26 +656,27 @@ function freedBy(steps: readonly StepView[]): Map<string, Freed> {
  * bottom, the vacant ground it keeps above), then a sliver of vacant ground showing what it freed. The tile is the
  * freed map's, so its size and fill already say how far the step has got.
  */
-function runLook(step: StepView | undefined): TileLook {
+function runLook(step: StepView | undefined, tile?: Freed): TileLook {
   if (!step) return {};
   if (step.status === 'pending') return { cls: 'is-queued', state: 'waiting to be deleted' };
   if (step.status === 'running') return { cls: 'is-running', state: 'being deleted' };
   // A step that freed nothing (it was stopped first, or everything in it was in use) leaves its tile as it was.
-  if (step.freedBytes <= 0) return {};
+  const freed = tile?.bytes ?? step.freedBytes;
+  if (freed <= 0) return {};
   return {
     cls: 'is-vacant is-lit',
-    size: <span className="map-freed">{formatBytes(step.freedBytes)}</span>,
+    size: <span className="map-freed">{formatBytes(freed)}</span>,
     state: 'vacant',
   };
 }
 
 /** What a plan tile's hover card says while its plan runs. */
-function runStatus(step: StepView | undefined): string {
+function runStatus(step: StepView | undefined, tile?: Freed): string {
   if (!step) return 'Not in this plan.';
   if (step.status === 'pending') return 'Waiting its turn.';
   if (step.status === 'running')
     return `Being deleted now: ${formatBytes(step.freedBytes)} of ${formatBytes(step.plannedBytes)} freed.`;
-  if (step.freedBytes <= 0) return 'Nothing was deleted here.';
+  if ((tile?.bytes ?? step.freedBytes) <= 0) return 'Nothing was deleted here.';
   const left = step.skips.length;
   return `Vacant now. ${formatBytes(step.freedBytes)} freed${left > 0 ? `; ${formatCount(left)} ${left === 1 ? 'thing' : 'things'} left in place` : ''}.`;
 }
@@ -568,8 +724,14 @@ function ScanNotes(p: NotesProps) {
         </span>
       )}
       {p.missingAccess && (
-        <button type="button" className="scan-note is-action" onClick={p.onOpenAccess}>
-          <ShieldAlert size={12} aria-hidden /> Allow Full Disk Access
+        <button
+          type="button"
+          className="scan-note is-action"
+          onClick={p.onOpenAccess}
+          title="Allow Full Disk Access"
+          aria-label="Allow Full Disk Access"
+        >
+          <ShieldAlert size={12} aria-hidden /> <span className="scan-note-text">Allow Full Disk Access</span>
         </button>
       )}
     </div>

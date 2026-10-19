@@ -89,6 +89,22 @@ fn write(root: &str, bulk: usize, advice: bool) -> ExitCode {
             );
             println!("  node_modules:      {}", p.node_modules.display());
             println!("  store file:        {}", p.store_file.display());
+            let d = &p.duplicates;
+            println!(
+                "  duplicates:        {} groups; the keeper rule keeps the first of each",
+                d.groups.len()
+            );
+            for (keep, extras) in &d.groups {
+                println!("    keep {}", keep.display());
+                for e in extras {
+                    println!("      extra {}", e.display());
+                }
+            }
+            println!("  untick this group: {}", d.untick.display());
+            println!(
+                "  never proposed:    {} look-alikes",
+                d.not_duplicates.len()
+            );
             println!(
                 "  tidy up (Windows): {} loose files in Downloads, Desktop and Documents",
                 p.tidy.files.len()
