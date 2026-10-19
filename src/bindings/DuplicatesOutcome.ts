@@ -2,8 +2,13 @@
 import type { Duplicates } from "./Duplicates";
 import type { Overview } from "./Overview";
 import type { Proposal } from "./Proposal";
+import type { TidyProposal } from "./TidyProposal";
 
 /**
  * How a duplicate search ended.
  */
-export type DuplicatesOutcome = { "status": "done", overview: Overview, proposals: Array<Proposal>, duplicates: Duplicates, } | { "status": "cancelled" };
+export type DuplicatesOutcome = { "status": "done", overview: Overview, proposals: Array<Proposal>, 
+/**
+ * The Tidy up sorts again: a sort leaves out an extra copy the plan deletes (delete wins over sort).
+ */
+tidy: Array<TidyProposal>, duplicates: Duplicates, } | { "status": "cancelled" };

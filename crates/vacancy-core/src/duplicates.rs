@@ -4,7 +4,9 @@
 //! It runs after the scan, in the background, on the scan's snapshot: the overview is on screen long before it is
 //! done, and it can be stopped at any point between two reads.
 //!
-//! **What it looks at.** Files of [`MIN_BYTES`] (1 MiB) or more in the user's personal folders: Pictures, Videos
+//! **What it looks at.** Files of [`MIN_BYTES`] (1 MiB) or more, at their length, among the files the scan kept one
+//! by one (those taking 1 MiB or more on disk: a file compressed or sparse to less is never looked at), in the
+//! user's personal folders: Pictures, Videos
 //! (Movies on macOS, and a Videos folder if one is there too), Documents, Downloads and the Desktop, found by
 //! identity like every configured place. Never:
 //! - anything the Guard protects, or a category it locks (the OS, a Photos library, cloud-sync folders);
@@ -23,6 +25,13 @@
 //! file under two names, not two copies, and deleting a name frees nothing. A file that changes while it is read is
 //! dropped. Contents are read for hashing only: nothing about them is kept, shown or sent anywhere.
 //!
+//! A file not all on this disk is never read, so hashing never downloads or recalls anything: on Windows one marked
+//! offline or recalled on access (cloud placeholders, tiered storage), on macOS a dataless one (File Provider).
+//! Files the Windows Overlay Filter compresses and Data Deduplication keeps are read like any other. On macOS a file
+//! that shares its data with another (an APFS clone, as Finder's Duplicate makes) is left out like a hard link:
+//! deleting it would free next to nothing. ReFS block clones on Windows can't be told, so the space a group frees is
+//! at most its extra copies' size.
+//!
 //! **Which copy stays (the keeper rule).** In each group of identical files Vacancy keeps one copy:
 //! 1. the tidiest: a copy that is not in Downloads and not named like a copy ("copy", "- Copy", "Copy of", "(1)")
 //!    beats one that is, and one with neither mark beats one with both;
@@ -40,7 +49,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -69,10 +78,6 @@ const CHUNK: usize = 1 << 20;
 
 /// How often progress is reported.
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
-
-/// How far back from the scan's start a change still counts as since the scan (as the executor allows for coarse
-/// timestamps).
-const SINCE_MARGIN: Duration = Duration::from_secs(2);
 
 /// Sample extra copies the proposal names.
 const SAMPLES: usize = 5;
@@ -182,6 +187,14 @@ pub struct Duplicates {
     /// Files left out because they changed since the scan, or couldn't be read.
     #[ts(type = "number")]
     pub changed: u64,
+    /// Files left out because part of them isn't on this disk (in the cloud, or offline): reading them would
+    /// download or recall them.
+    #[ts(type = "number")]
+    pub not_local: u64,
+    /// Files left out because they share their data with another file (APFS clones): deleting one frees next to
+    /// nothing.
+    #[ts(type = "number")]
+    pub cloned: u64,
 }
 
 /// Which pass the duplicate finder is in.
@@ -220,6 +233,8 @@ pub enum DuplicatesOutcome {
     Done {
         overview: Box<Overview>,
         proposals: Vec<Proposal>,
+        /// The Tidy up sorts again: a sort leaves out an extra copy the plan deletes (delete wins over sort).
+        tidy: Vec<crate::tidy::TidyProposal>,
         duplicates: Duplicates,
     },
     /// It was stopped (a new scan, a run, the drive gone): nothing changed.
@@ -271,6 +286,8 @@ pub struct Found {
     compared: u64,
     hard_linked: u64,
     changed: u64,
+    not_local: u64,
+    cloned: u64,
 }
 
 impl Found {
@@ -352,16 +369,12 @@ pub fn search(scanned: &ScannedVolume, env: &Env) -> Search {
 }
 
 /// [`search`], giving up (`None`) as soon as `stop` says so.
-pub(crate) fn search_until(
-    scanned: &ScannedVolume,
-    env: &Env,
-    stop: &dyn Fn() -> bool,
-) -> Option<Search> {
+pub fn search_until(scanned: &ScannedVolume, env: &Env, stop: &dyn Fn() -> bool) -> Option<Search> {
     let snap = &scanned.snapshot;
     let cats = &scanned.categories;
     let guard = Guard::new(env, &env.root);
     let roots = personal_roots(snap, env);
-    let threshold = threshold(snap.started());
+    let threshold = crate::exec::threshold(snap.started());
 
     // Which personal folder each folder is in, and whether it is one the search never looks in.
     let n = snap.dir_count();
@@ -525,22 +538,16 @@ fn barred_folder(snap: &Snapshot, category: CategoryId, dir: DirId, guard: &Guar
             .is_some_and(|(_, ext)| PACKAGES.iter().any(|p| ext.eq_ignore_ascii_case(p)))
 }
 
-/// The moment from which a change counts as since the scan: its start, to the whole second before, less the margin.
-fn threshold(since: SystemTime) -> i128 {
-    let secs = since
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let start = Duration::from_secs(secs).saturating_sub(SINCE_MARGIN);
-    i128::try_from(start.as_nanos()).unwrap_or(0)
-}
-
 /// Why a file was dropped while it was read.
 enum Dropped {
     /// It has other names: one file, not copies.
     HardLinked,
     /// It changed since the scan, or isn't what the scan saw, or couldn't be read.
     Changed,
+    /// Part of it isn't on this disk: reading it would download or recall it.
+    NotLocal,
+    /// It shares its data with another file (an APFS clone).
+    Cloned,
 }
 
 /// What a file's handle says about it.
@@ -552,6 +559,10 @@ struct Facts {
     changed: i128,
     born: i64,
     modified: i64,
+    /// All of it is on this disk: not offline, recalled on access, or dataless.
+    local: bool,
+    /// It shares its data with another file (an APFS clone).
+    shared: bool,
 }
 
 impl Search {
@@ -618,6 +629,8 @@ impl Search {
                     Ok((hash, facts)) => by_start.entry(hash).or_default().push((i, facts)),
                     Err(Some(Dropped::HardLinked)) => found.hard_linked += 1,
                     Err(Some(Dropped::Changed)) => found.changed += 1,
+                    Err(Some(Dropped::NotLocal)) => found.not_local += 1,
+                    Err(Some(Dropped::Cloned)) => found.cloned += 1,
                     Err(None) => return Err(Cancelled),
                 }
                 report(
@@ -665,6 +678,8 @@ impl Search {
                     }
                     Ok(_) | Err(Some(Dropped::Changed)) => found.changed += 1,
                     Err(Some(Dropped::HardLinked)) => found.hard_linked += 1,
+                    Err(Some(Dropped::NotLocal)) => found.not_local += 1,
+                    Err(Some(Dropped::Cloned)) => found.cloned += 1,
                     Err(None) => return Err(Cancelled),
                 }
                 let pct = 15 + (85 * u128::from(read) / u128::from(bytes.max(1))) as u32;
@@ -714,6 +729,13 @@ impl Search {
         }
         if facts.links > 1 {
             return Err(Some(Dropped::HardLinked));
+        }
+        // Before any byte is read: nothing is downloaded or recalled.
+        if !facts.local {
+            return Err(Some(Dropped::NotLocal));
+        }
+        if facts.shared {
+            return Err(Some(Dropped::Cloned));
         }
         let want = limit.unwrap_or(c.logical).min(c.logical);
         let mut hasher = Sha256::new();
@@ -802,8 +824,17 @@ fn facts(file: &std::fs::File) -> Option<Facts> {
         ),
         born: secs(basic.CreationTime.min(basic.LastWriteTime)),
         modified: secs(basic.LastWriteTime),
+        local: basic.FileAttributes & NOT_LOCAL == 0,
+        // ReFS block clones can't be told from here.
+        shared: false,
     })
 }
+
+/// Attributes of a file not all on this disk: offline, recalled when opened, or recalled when read.
+#[cfg(windows)]
+const NOT_LOCAL: u32 = windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_OFFLINE
+    | windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_RECALL_ON_OPEN
+    | windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS;
 
 /// What an open file says: its length, how many names it has, and its times.
 #[cfg(unix)]
@@ -814,7 +845,7 @@ fn facts(file: &std::fs::File) -> Option<Facts> {
     let born = m
         .created()
         .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .and_then(|d| i64::try_from(d.as_secs()).ok())
         .map_or(m.mtime(), |b| b.min(m.mtime()));
     Some(Facts {
@@ -823,7 +854,79 @@ fn facts(file: &std::fs::File) -> Option<Facts> {
         changed: at(m.mtime(), m.mtime_nsec()).max(at(m.ctime(), m.ctime_nsec())),
         born,
         modified: m.mtime(),
+        local: local(&m),
+        shared: shared(file, m.blocks().saturating_mul(512)),
     })
+}
+
+/// Whether all of a file is on this disk. macOS marks a file whose data the File Provider keeps elsewhere dataless
+/// (`SF_DATALESS`): reading it downloads it.
+#[cfg(unix)]
+fn local(m: &std::fs::Metadata) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::MetadataExt;
+        /// `SF_DATALESS` in `<sys/stat.h>`.
+        const SF_DATALESS: u32 = 0x4000_0000;
+        m.st_flags() & SF_DATALESS == 0
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = m;
+        true
+    }
+}
+
+/// Whether a file shares its data with another (an APFS clone): its private size, the part of its allocation no
+/// other file shares (`ATTR_CMNEXT_PRIVATESIZE`), is less than its allocation. Where that can't be read, it doesn't.
+#[cfg(unix)]
+fn shared(file: &std::fs::File, allocated: u64) -> bool {
+    private_size(file).is_some_and(|private| private < allocated)
+}
+
+/// A file's private size (see [`shared`]), from `fgetattrlist`.
+#[cfg(target_os = "macos")]
+pub(crate) fn private_size(file: &std::fs::File) -> Option<u64> {
+    use std::os::fd::AsRawFd;
+    #[repr(C, packed(4))]
+    struct Answer {
+        length: u32,
+        returned: libc::attribute_set_t,
+        private: libc::off_t,
+    }
+    let mut list = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: libc::ATTR_CMN_RETURNED_ATTRS,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        // With FSOPT_ATTR_CMN_EXTENDED this group asks for the extended common attributes.
+        forkattr: libc::ATTR_CMNEXT_PRIVATESIZE,
+    };
+    // SAFETY: an all-zero Answer is a valid value of plain integers.
+    let mut answer: Answer = unsafe { std::mem::zeroed() };
+    // SAFETY: the descriptor is open; `list` and `answer` are live, writable and sized as passed.
+    let rc = unsafe {
+        libc::fgetattrlist(
+            file.as_raw_fd(),
+            (&raw mut list).cast(),
+            (&raw mut answer).cast(),
+            std::mem::size_of::<Answer>(),
+            libc::FSOPT_ATTR_CMN_EXTENDED,
+        )
+    };
+    let returned = answer.returned;
+    if rc != 0 || returned.forkattr & libc::ATTR_CMNEXT_PRIVATESIZE == 0 {
+        return None;
+    }
+    let private = answer.private;
+    u64::try_from(private).ok()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn private_size(_file: &std::fs::File) -> Option<u64> {
+    None
 }
 
 #[cfg(not(any(windows, unix)))]
@@ -947,9 +1050,12 @@ pub fn attach(scanned: &mut ScannedVolume, found: Found) -> Duplicates {
         compared: found.compared,
         hard_linked: found.hard_linked,
         changed: found.changed,
+        not_local: found.not_local,
+        cloned: found.cloned,
     };
     scanned.proposals.remove(ID);
     if found.groups.is_empty() {
+        scanned.tidy.cover(&scanned.snapshot, ID, &[]);
         scanned.reshape();
         return out;
     }
@@ -996,6 +1102,8 @@ pub fn attach(scanned: &mut ScannedVolume, found: Found) -> Duplicates {
 
     let proposal = proposal(&found);
     out.proposal = Some(proposal.id.clone());
+    // Delete wins over sort: the extra copies are covered by this proposal in the sorts' reviews.
+    scanned.tidy.cover(&scanned.snapshot, ID, &targets);
     scanned
         .proposals
         .insert_duplicates(proposal, targets, attached);
@@ -1107,11 +1215,13 @@ fn proposal(found: &Found) -> Proposal {
             if groups == 1 { "" } else { "s" }
         ),
         why: format!(
-            "Byte-for-byte copies of files over 1 MB in {folders}. Vacancy keeps one copy of each group: the oldest, \
-             preferring one outside Downloads that isn\u{2019}t named like a copy (\u{201c}copy\u{201d}, \
-             \u{201c}- Copy\u{201d}, \u{201c}(1)\u{201d}). Before each extra copy goes, it checks the kept copy is \
-             still there and unchanged. Untick a group to keep every copy of it. Copies in cloud-sync folders and \
-             in a Photos library are left alone."
+            "Byte-for-byte copies of files of 1 MB or more in {folders}. Vacancy keeps one copy of each group: the \
+             tidiest (one outside Downloads that isn\u{2019}t named like a copy: \u{201c}copy\u{201d}, \
+             \u{201c}- Copy\u{201d}, \u{201c}(1)\u{201d}), and the oldest among those. Before each extra copy goes, \
+             it checks the kept copy is still there and unchanged, and holds it while the copy is deleted. Untick \
+             a group to keep every copy of it. Copies in cloud-sync folders and in a Photos library are left alone, \
+             and so are files that aren\u{2019}t all on this disk. The space is what the extra copies take up: up \
+             to that much comes back, less where a drive shares copied files\u{2019} data."
         ),
         bytes: extras.iter().map(|m| m.cand.alloc).sum(),
         item_count: extras.len() as u64,
@@ -1160,6 +1270,158 @@ pub(crate) fn named_like_copy(name: &std::ffi::OsStr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fixture profile scanned in fixture mode, with its duplicates found.
+    fn found_fixture() -> (tempfile::TempDir, Env, ScannedVolume, Duplicates) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = if cfg!(windows) {
+            dir.path().to_path_buf()
+        } else {
+            dir.path().canonicalize().unwrap()
+        }
+        .join("fixture");
+        crate::fixture::build(&root).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3200));
+        let env = crate::fixture::env(&root);
+        let moment = crate::Moment {
+            now: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+            running_apps: Some(Vec::new()),
+            installed_apps: Vec::new(),
+        };
+        let figures = root.clone();
+        let mut scanned = crate::map::scan_for_map_with(
+            &root,
+            &env,
+            &moment,
+            &move |snap| Some(crate::fixture::volume(&figures, 1 << 30, snap)),
+            &mut |_| {},
+            &CancelToken::new(),
+        )
+        .unwrap();
+        let found = find(&mut scanned, &env, &mut |_| {}, &CancelToken::new()).unwrap();
+        (dir, env, scanned, found)
+    }
+
+    /// The planner fails closed: an extra copy whose group can't be found is refused with a reason, never planned
+    /// as a plain delete.
+    #[test]
+    fn an_extra_copy_without_its_group_is_refused_not_deleted() {
+        let (_dir, env, mut scanned, found) = found_fixture();
+        assert!(!found.groups.is_empty());
+        scanned.proposals.forget_duplicate_groups_for_test();
+        let plan = crate::plan::plan_with(&scanned, &env, &[ID.to_owned()], &[]).unwrap();
+        let summary = plan.summary();
+        assert_eq!(summary.places, 0, "nothing is planned as a plain delete");
+        let copies: usize = found.groups.iter().map(|g| g.extras.len()).sum();
+        assert_eq!(summary.refused.len(), copies, "{:#?}", summary.refused);
+        assert!(
+            summary
+                .refused
+                .iter()
+                .all(|r| r.reason.contains("which copy of it stays"))
+        );
+    }
+
+    /// The kept copy is held while each extra copy is deleted. Something deleting it in that moment (the hook runs
+    /// after every check of the extra copy, right before it goes) never leaves a group with no copy: on Windows the
+    /// held copy can't be deleted at all; on macOS the look right before the unlink finds it gone, and the extra copy
+    /// stays.
+    #[test]
+    fn the_kept_copy_is_held_while_the_extra_copy_goes() {
+        let (_dir, env, scanned, found) = found_fixture();
+        let kept_of: HashMap<PathBuf, PathBuf> = found
+            .groups
+            .iter()
+            .flat_map(|g| {
+                g.extras
+                    .iter()
+                    .map(move |e| (PathBuf::from(&e.path), PathBuf::from(&g.keep.path)))
+            })
+            .collect();
+        let plan = crate::plan::plan_with(&scanned, &env, &[ID.to_owned()], &[]).unwrap();
+        let hook = |extra: &Path| {
+            if let Some(kept) = kept_of.get(extra) {
+                // Ignored: on Windows the held copy can't be deleted.
+                let _ = std::fs::remove_file(kept);
+            }
+        };
+        let hooks = crate::exec::Hooks {
+            before_delete: Some(&hook),
+            ..crate::exec::Hooks::default()
+        };
+        let report = crate::exec::execute_inner(
+            &plan,
+            &env,
+            crate::exec::Sorts::default(),
+            &|| None,
+            &mut |_| {},
+            &CancelToken::new(),
+            &hooks,
+        );
+        for g in &found.groups {
+            let kept = Path::new(&g.keep.path).exists();
+            let extras = g
+                .extras
+                .iter()
+                .filter(|e| Path::new(&e.path).exists())
+                .count();
+            assert!(kept || extras > 0, "{} still has a copy", g.name);
+            if cfg!(windows) {
+                assert!(
+                    kept,
+                    "the held copy of {} couldn\u{2019}t be deleted",
+                    g.name
+                );
+                assert_eq!(extras, 0, "and its extra copies went");
+            } else {
+                assert!(
+                    !kept && extras == g.extras.len(),
+                    "{}: every extra copy stays",
+                    g.name
+                );
+            }
+        }
+        let d = report.duplicates.unwrap();
+        if cfg!(windows) {
+            assert_eq!(d.kept_whole, 0);
+        } else {
+            assert_eq!(d.kept_whole, d.groups);
+        }
+    }
+
+    /// Clones share their data, so deleting one frees next to nothing: macOS says so through the private size.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_apfs_clone_reports_a_shared_private_size() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.bin");
+        let b = dir.path().join("b.bin");
+        std::fs::write(&a, vec![7u8; 4 << 20]).unwrap();
+        let (ca, cb) = (
+            CString::new(a.as_os_str().as_bytes()).unwrap(),
+            CString::new(b.as_os_str().as_bytes()).unwrap(),
+        );
+        // SAFETY: both paths are NUL-terminated.
+        if unsafe { libc::clonefile(ca.as_ptr(), cb.as_ptr(), 0) } != 0 {
+            eprintln!("skipped: this volume can't clone files");
+            return;
+        }
+        let plain = dir.path().join("c.bin");
+        std::fs::write(&plain, vec![9u8; 4 << 20]).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        let alloc = |p: &Path| std::fs::metadata(p).unwrap().blocks() * 512;
+        let open = |p: &Path| std::fs::File::open(p).unwrap();
+        assert!(shared(&open(&b), alloc(&b)), "a clone shares its data");
+        assert!(
+            !shared(&open(&plain), alloc(&plain)),
+            "a plain file doesn\u{2019}t"
+        );
+    }
 
     #[test]
     fn copy_names_are_read_as_copies() {

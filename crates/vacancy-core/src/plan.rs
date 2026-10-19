@@ -461,12 +461,18 @@ pub fn plan_with(
             duplicates: None,
         };
         let is_dups = p.id == crate::duplicates::ID;
-        let dups = if is_dups { proposals.duplicates() } else { None };
+        let dups = if is_dups {
+            proposals.duplicates()
+        } else {
+            None
+        };
         let mut local: HashMap<usize, u32> = HashMap::new();
         if is_dups {
             step.duplicates = Some(StepDuplicates {
                 groups: Vec::new(),
-                tiles: dups.map_or_else(Vec::new, |d| (0..d.tiles.len()).map(|t| d.tile_id(t)).collect()),
+                tiles: dups.map_or_else(Vec::new, |d| {
+                    (0..d.tiles.len()).map(|t| d.tile_id(t)).collect()
+                }),
                 skipped_groups: dups.map_or(0, |d| {
                     d.groups
                         .iter()
@@ -490,14 +496,22 @@ pub fn plan_with(
                     _ => None,
                 };
                 let Some((f, gi, g)) = found else {
-                    step.refused.push(dup_refused(snap, at, "Vacancy can\u{2019}t tell which copy of it stays"));
+                    step.refused.push(dup_refused(
+                        snap,
+                        at,
+                        "Vacancy can\u{2019}t tell which copy of it stays",
+                    ));
                     continue;
                 };
                 if skipped_groups.contains(&g.id) {
                     continue;
                 }
                 let Some(identity) = snap.file_full_identity(g.keep) else {
-                    step.refused.push(dup_refused(snap, at, "The copy that stays can\u{2019}t be confirmed on this drive"));
+                    step.refused.push(dup_refused(
+                        snap,
+                        at,
+                        "The copy that stays can\u{2019}t be confirmed on this drive",
+                    ));
                     continue;
                 };
                 let tile = g
@@ -507,7 +521,10 @@ pub fn plan_with(
                     .and_then(|n| g.extra_tiles.get(n))
                     .copied()
                     .unwrap_or(0);
-                let planned = step.duplicates.as_mut().expect("the duplicates step has them");
+                let planned = step
+                    .duplicates
+                    .as_mut()
+                    .expect("the duplicates step has them");
                 let next = planned.groups.len() as u32;
                 let group = *local.entry(gi).or_insert_with(|| {
                     planned.groups.push(PlannedGroup {
@@ -680,7 +697,9 @@ pub fn plan_with(
 fn dup_refused(snap: &Snapshot, at: ItemRef, reason: &str) -> (Skip, u64) {
     let (path, bytes) = match at {
         ItemRef::File(f) => (snap.file_path(f).display().to_string(), snap.file(f).bytes),
-        ItemRef::Dir(d) | ItemRef::FilesIn(d) => (snap.path(d).display().to_string(), snap.tree(d).bytes),
+        ItemRef::Dir(d) | ItemRef::FilesIn(d) => {
+            (snap.path(d).display().to_string(), snap.tree(d).bytes)
+        }
         ItemRef::Proposal(_) => (String::new(), 0),
     };
     (

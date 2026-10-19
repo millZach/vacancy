@@ -610,11 +610,13 @@ async fn find_duplicates(
             let scanned = last.filter(|s| !s.spent)?;
             if scanned.searched {
                 return Some(Err(
-                    "Duplicates were already found for this scan. Scan again to look again.".to_owned(),
+                    "Duplicates were already found for this scan. Scan again to look again."
+                        .to_owned(),
                 ));
             }
             scanned.duplicates = Some(Search(cancel.clone()));
-            let search = duplicates::search_until(&scanned.volume, &env, &|| cancel.is_cancelled())?;
+            let search =
+                duplicates::search_until(&scanned.volume, &env, &|| cancel.is_cancelled())?;
             Some(Ok((scanned.generation, search)))
         });
         let (generation, search) = match prepared {

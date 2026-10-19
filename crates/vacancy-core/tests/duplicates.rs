@@ -279,7 +279,7 @@ fn no_byte_is_counted_twice_and_the_map_gets_a_tile_per_folder() {
     assert!(!dup.default_on, "off by default");
     assert!(
         dup.summary.starts_with(
-            "3 photos, 1 video and 2 other files have an exact copy elsewhere, in 5 groups."
+            "3 photos, 1 video and 3 other files have an exact copy elsewhere, in 6 groups."
         ),
         "photos and videos counted first: {}",
         dup.summary
@@ -496,4 +496,210 @@ fn every_group_unticked_deletes_nothing() {
         plan_with(&fx.scanned, &fx.env, &[ID.to_owned()], &all).is_err(),
         "an empty plan"
     );
+}
+
+/// The planner refuses what it can't vouch for: the duplicates proposal through `plan()` (which can't say which
+/// groups the user unticked), and a skipped group this scan's duplicates don't have.
+#[test]
+fn the_planner_refuses_duplicates_without_their_groups() {
+    let mut fx = Fx::new();
+    fx.find();
+    assert!(matches!(
+        vacancy_core::plan(&fx.scanned, &fx.env, &[ID.to_owned()]),
+        Err(vacancy_core::PlanError::DuplicatesNeedGroups)
+    ));
+    assert!(matches!(
+        plan_with(&fx.scanned, &fx.env, &[ID.to_owned()], &["g99".to_owned()]),
+        Err(vacancy_core::PlanError::NoSuchGroup(_))
+    ));
+}
+
+/// Tidy up and duplicates in one plan (Windows, where Tidy up runs). Delete wins over sort by identity: the extra
+/// copies the plan deletes are left out of the sorts, and the sorts' reviews say so; an unticked group's extra copies
+/// are sorted like any file. Deletes run before sorts, so a kept copy a sort moves is checked where the scan saw it,
+/// then moved. Every file is deleted or moved once, and the run's checkpoint report already tells the duplicates.
+#[cfg(windows)]
+mod with_tidy_up {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    /// The sorts' moves by folder: file name to the duplicates proposal marking it deleted.
+    fn marked(fx: &Fx) -> BTreeMap<String, bool> {
+        fx.scanned
+            .tidy
+            .proposals()
+            .iter()
+            .flat_map(|t| {
+                t.moves.iter().map(move |m| {
+                    (
+                        format!("{}/{}", t.name, m.name),
+                        m.deleted_by.iter().any(|d| d == ID),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn delete_wins_over_sort_for_duplicates_and_each_file_goes_once() {
+        let mut fx = Fx::new();
+        let before_marks = marked(&fx);
+        assert!(
+            before_marks.values().all(|m| !m),
+            "nothing is marked before the search"
+        );
+        let found = fx.find();
+
+        // The reviews mark every loose extra copy as deleted by duplicates, and nothing else.
+        let extras: BTreeSet<String> = found
+            .groups
+            .iter()
+            .flat_map(|g| &g.extras)
+            .filter(|e| e.dir == "Downloads" || e.dir == "Desktop" || e.dir == "Documents")
+            .map(|e| format!("{}/{}", e.dir, e.name))
+            .collect();
+        assert!(extras.len() >= 4, "loose extra copies: {extras:?}");
+        let marks = marked(&fx);
+        for (name, m) in &marks {
+            assert_eq!(*m, extras.contains(name), "{name}");
+        }
+
+        let untick = found
+            .groups
+            .iter()
+            .find(|g| Path::new(&g.keep.path) == fx.profile.duplicates.untick)
+            .unwrap()
+            .clone();
+        let budget = found
+            .groups
+            .iter()
+            .find(|g| g.name == "Budget 2026.xlsx")
+            .expect("the group kept loose on the Desktop")
+            .clone();
+        let sorts: Vec<String> = fx
+            .scanned
+            .tidy
+            .proposals()
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+        let mut ids = vec![ID.to_owned()];
+        ids.extend(sorts.iter().cloned());
+        let plan = plan_with(&fx.scanned, &fx.env, &ids, std::slice::from_ref(&untick.id))
+            .expect("a plan");
+        let summary = plan.summary();
+        assert!(summary.moves > 0);
+
+        let before = fx.inventory();
+        let journals = vacancy_core::tidy::Journals {
+            dir: fixture::app_data(&fx.root).join("tidy"),
+        };
+        let root = fx.root.clone();
+        let figures = move || {
+            let snap = support::scan_with(&root, 1 << 20);
+            Some(fixture::volume(&root, 1 << 30, &snap))
+        };
+        let mut checkpoints = Vec::new();
+        let report = vacancy_core::execute_with(
+            &plan,
+            &fx.env,
+            Some(&journals),
+            &mut |at| {
+                checkpoints.push(at.clone());
+                Ok(())
+            },
+            &figures,
+            &mut |_| {},
+            &CancelToken::new(),
+        );
+        let after = fx.inventory();
+        let file = |line: &String| line.contains("\tfile ");
+        let path = |line: &String| line.split('\t').next().unwrap().to_owned();
+        let content = |line: &String| line.split('\t').nth(1).unwrap().to_owned();
+        let gone: BTreeSet<String> = before
+            .difference(&after)
+            .filter(|l| file(l))
+            .map(path)
+            .collect();
+        // Files that came are moved ones, in the sorted folders (Tidy up's journals go to the fixture's app data).
+        let sorted_in = |l: &String| {
+            let home = fx.rel(&fx.profile.home);
+            ["Downloads", "Desktop", "Documents"]
+                .iter()
+                .any(|f| l.starts_with(&format!("{home}/{f}/")))
+        };
+        let came: Vec<&String> = after
+            .difference(&before)
+            .filter(|l| file(l) && sorted_in(l))
+            .collect();
+
+        // Every ticked extra copy is deleted, not moved: gone, and its contents nowhere new.
+        let home = fx.rel(&fx.profile.home);
+        let deleted: BTreeSet<String> = found
+            .groups
+            .iter()
+            .filter(|g| g.id != untick.id)
+            .flat_map(|g| g.extras.iter().map(|e| fx.rel(Path::new(&e.path))))
+            .collect();
+        for d in &deleted {
+            assert!(gone.contains(d), "{d} is deleted");
+        }
+        // Each new file is a moved one: its contents left one old place, and no deleted extra copy's did.
+        let gone_lines: Vec<&String> = before.difference(&after).filter(|l| file(l)).collect();
+        for c in &came {
+            let from: Vec<&&String> = gone_lines
+                .iter()
+                .filter(|g| content(g) == content(c))
+                .collect();
+            assert!(!from.is_empty(), "{c} came from somewhere");
+            assert!(
+                from.iter().any(|g| !deleted.contains(&path(g))),
+                "{c} is not a deleted extra copy moved"
+            );
+        }
+        // Gone files are deleted extras or moved files, once each.
+        assert_eq!(
+            gone.len(),
+            deleted.len() + came.len(),
+            "each file goes once"
+        );
+
+        // The unticked group's loose extra copy was sorted, not deleted.
+        let loose = untick
+            .extras
+            .iter()
+            .find(|e| e.dir == "Downloads")
+            .expect("its loose copy");
+        assert!(
+            !Path::new(&loose.path).exists(),
+            "it left the top of Downloads"
+        );
+        assert!(
+            came.iter().any(|c| c.contains(&loose.name)),
+            "{} was sorted",
+            loose.name
+        );
+        // The Budget group: its extra copy deleted first, then its kept copy (loose on the Desktop) sorted.
+        assert!(!Path::new(&budget.extras[0].path).exists());
+        assert!(
+            !Path::new(&budget.keep.path).exists(),
+            "the kept copy was sorted"
+        );
+        assert!(
+            came.iter()
+                .any(|c| c.starts_with(&format!("{home}/Desktop/"))
+                    && c.contains("Budget 2026.xlsx")),
+            "the kept copy is in a Desktop folder now: {came:#?}"
+        );
+        let d = report
+            .duplicates
+            .as_ref()
+            .expect("the report tells the duplicates");
+        assert_eq!(d.kept_whole, 0, "every kept copy was where the scan saw it");
+        assert_eq!(d.skipped_groups, 1);
+
+        // The checkpoint report kept before any file moved already had the duplicates.
+        let at = checkpoints.first().expect("a checkpoint before the sorts");
+        assert_eq!(at.duplicates.as_ref(), Some(d));
+    }
 }

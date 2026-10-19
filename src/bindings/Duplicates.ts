@@ -28,4 +28,14 @@ hardLinked: number,
 /**
  * Files left out because they changed since the scan, or couldn't be read.
  */
-changed: number, };
+changed: number, 
+/**
+ * Files left out because part of them isn't on this disk (in the cloud, or offline): reading them would
+ * download or recall them.
+ */
+notLocal: number, 
+/**
+ * Files left out because they share their data with another file (APFS clones): deleting one frees next to
+ * nothing.
+ */
+cloned: number, };

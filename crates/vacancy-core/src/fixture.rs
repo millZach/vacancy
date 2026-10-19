@@ -220,6 +220,8 @@ pub struct Profile {
     pub untouched: Vec<PathBuf>,
     /// The duplicate finder's known cases.
     pub duplicates: DuplicateCases,
+    /// The loose files Tidy up sorts (Windows; the same files are written on macOS, where nothing sorts them).
+    pub tidy: TidyProfile,
 }
 
 /// The duplicate files a profile holds, for the duplicate finder's tests and proofs (ticket 09).
@@ -236,8 +238,6 @@ pub struct DuplicateCases {
     /// with another end, a hard link pair, copies under 1 MiB, a copy in a cloud-sync folder, one in a Photos
     /// library, one only reachable through a link, and an installer another rule already deletes.
     pub not_duplicates: Vec<PathBuf>,
-    /// The loose files Tidy up sorts (Windows; the same files are written on macOS, where nothing sorts them).
-    pub tidy: TidyProfile,
 }
 
 /// The fixture's loose files for Tidy up, by role.

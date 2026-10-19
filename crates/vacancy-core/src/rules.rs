@@ -234,6 +234,12 @@ impl Proposals {
         self.duplicates.as_ref()
     }
 
+    /// Test hook: forgets the duplicates' groups but keeps their proposal and targets, as a desync would.
+    #[cfg(test)]
+    pub(crate) fn forget_duplicate_groups_for_test(&mut self) {
+        self.duplicates = None;
+    }
+
     /// The map's tiles for the proposals, in the proposals' order: one each, the duplicates' one per folder.
     pub(crate) fn tiles(&self) -> Vec<Tile<'_>> {
         let mut out = Vec::with_capacity(self.list.len());
