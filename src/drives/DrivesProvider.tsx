@@ -5,6 +5,7 @@ import {
   type FullDiskAccess,
   type PlanSummary,
   type RunEvent,
+  type ScanUpdate,
   type VolumeInfo,
 } from '../bridge';
 import { errorMessage } from '../errors';
@@ -117,10 +118,11 @@ export function DrivesProvider({ children }: { children: ReactNode }) {
   }, [missing, recheckAccess]);
 
   const startScan = useCallback(
-    (mountPoint: string) => {
+    (mountPoint: string, fast: boolean) => {
       const run = ++lastRun;
-      dispatch({ type: 'scanStarted', mountPoint, run });
-      bridge.scan(mountPoint, (update) => dispatch({ type: 'scanUpdate', mountPoint, run, update })).then(
+      dispatch({ type: 'scanStarted', mountPoint, run, fast });
+      const onUpdate = (update: ScanUpdate) => dispatch({ type: 'scanUpdate', mountPoint, run, update });
+      (fast ? bridge.scan(mountPoint, onUpdate, { fast }) : bridge.scan(mountPoint, onUpdate)).then(
         (outcome) => {
           dispatch({ type: 'scanEnded', mountPoint, run, outcome, at: Date.now() });
           // The duplicate search starts as soon as the map is up, and never holds it up.
@@ -197,7 +199,7 @@ function drivesValue(
   session: Session,
   dispatch: Dispatch<Action>,
   bridge: Bridge,
-  startScan: (mountPoint: string) => void,
+  startScan: (mountPoint: string, fast: boolean) => void,
   runPlan: (plan: PlanSummary) => void,
 ): Drives {
   if (info.status !== 'ready') return info;
@@ -227,8 +229,8 @@ function drivesValue(
     switchTo: (mountPoint) => leave(mountPoint, 'switch'),
     openMap: () => dispatch({ type: 'openMap' }),
     showScanScreen: () => dispatch({ type: 'showScanScreen' }),
-    scan: () => {
-      if (!session.locked) startScan(session.current);
+    scan: (options) => {
+      if (!session.locked) startScan(session.current, options?.fast ?? false);
     },
     cancelScan: () => {
       dispatch({ type: 'scanCancelled', mountPoint: session.current });

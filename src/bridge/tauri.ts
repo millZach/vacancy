@@ -26,10 +26,11 @@ export function createTauriBridge(): Bridge {
     forgetDrive: (mountPoint) => invoke<undefined>('forget_drive', { mountPoint }),
     fullDiskAccess: () => invoke<FullDiskAccess>('full_disk_access'),
     openFullDiskAccessSettings: () => invoke<undefined>('open_full_disk_access_settings'),
-    scan: (mountPoint, onUpdate) => {
+    scan: (mountPoint, onUpdate, options) => {
       const onUpdateChannel = new Channel<ScanUpdate>();
       onUpdateChannel.onmessage = onUpdate;
-      return invoke<ScanOutcome>('scan_volume', { mountPoint, onUpdate: onUpdateChannel });
+      const fast = options?.fast ?? false;
+      return invoke<ScanOutcome>('scan_volume', { mountPoint, fast, onUpdate: onUpdateChannel });
     },
     cancelScan: () => invoke<undefined>('cancel_scan'),
     browse: (mountPoint, id) => invoke<MapFolder>('browse', { mountPoint, id }),

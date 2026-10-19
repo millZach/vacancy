@@ -1,13 +1,16 @@
-import { Check, ChevronRight, LoaderCircle, Plus, RotateCcw, ShieldAlert } from 'lucide-react';
+import { Check, ChevronRight, LoaderCircle, Lock, Plus, RotateCcw, ShieldAlert, Zap } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   useBridge,
-  type CategoryId,
   type DuplicateGroup,
+  type FastFallback,
+  type LockedGroup,
   type MapFolder,
   type Overview,
   type PlanSummary,
+  type ScanMethod,
   type TidyProposal,
+  type VolumeInfo,
 } from '../bridge';
 import { DotField, type DotFieldHandle } from '../dotfield/DotField';
 import type { ReadyDrives } from '../drives/context';
@@ -18,8 +21,10 @@ import { Legend } from '../map/Legend';
 import { DuplicateLinks, DuplicatesPill } from '../map/Duplicates';
 import { MapView, type TileLook } from '../map/MapView';
 import {
+  LOCKED_ID,
   folderModel,
   freedModel,
+  lockedTotals,
   overviewModel,
   scanModel,
   type Freed,
@@ -36,6 +41,7 @@ import { tileOf } from '../plan/totals';
 import { ConfirmDialog } from '../run/ConfirmDialog';
 import type { StepView } from '../run/progress';
 import { RunPanel, type ShownRun } from '../run/RunPanel';
+import { fallbackLabel, isAsking, scanProgress } from '../scan/fast';
 import { ScanHud } from '../scan/ScanHud';
 import { ScanPlate } from '../scan/ScanPlate';
 import { TidyDrawer } from '../tidy/TidyDrawer';
@@ -58,11 +64,11 @@ interface Props {
   onUndo: (runId: string, tidyId: string) => Promise<unknown>;
 }
 
-/** Where the map is zoomed: a category, then folders opened inside it. */
-type Level = { kind: 'category'; id: CategoryId } | { kind: 'folder'; folder: MapFolder };
-
-/** Scan progress shown before the scan says it is done: never quite full. */
-const ALMOST = 0.98;
+/**
+ * Where the map is zoomed: a region (a category, or a fast scan's Locked folders), then folders opened inside a
+ * category.
+ */
+type Level = { kind: 'category'; id: string } | { kind: 'folder'; folder: MapFolder };
 
 const NO_GROUPS: readonly DuplicateGroup[] = [];
 const NO_IDS: readonly string[] = [];
@@ -90,6 +96,8 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
   const state = drive.scan;
   const overview = state.phase === 'done' && drives.screen === 'map' ? state.overview : null;
   const scanning = state.phase === 'scanning' ? state : null;
+  // A fast scan waiting on Windows' admin prompt: nothing is scanning yet, so the plate stays.
+  const asking = !!scanning && isAsking(scanning, drive.volume);
   const proposals = useMemo(() => (state.phase === 'done' ? state.proposals : []), [state]);
   const plan = state.phase === 'done' ? state.plan : [];
   const byId = useMemo(() => new Map(proposals.map((p) => [p.id, p])), [proposals]);
@@ -156,14 +164,14 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
   const top = useMemo(() => (overview ? overviewModel(overview) : null), [overview]);
   const level = levels.at(-1);
   const model = useMemo(() => {
-    if (scanning) return scanModel(drive.volume, scanning.preview, scanning.update?.bytes ?? 0);
+    if (scanning) return asking ? null : scanModel(drive.volume, scanning.preview, scanning.update?.bytes ?? 0);
     if (!overview || !top) return null;
     if (level?.kind === 'folder') {
       const cat = overview.categories.find((c) => c.id === level.folder.category);
       return folderModel(level.folder, { name: cat?.name ?? '', protected: cat?.protected ?? false }, overview.volume);
     }
     return top;
-  }, [scanning, drive.volume, overview, top, level]);
+  }, [scanning, asking, drive.volume, overview, top, level]);
   const focus = level?.kind === 'category' ? level.id : null;
   // While a run frees space its tiles shrink by what their steps freed and free space grows by it all, laid out
   // against the map the run started from so nothing moves but the sizes. The run holds the map at the whole disk.
@@ -174,9 +182,7 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
     [freeing, view, runFreed, model],
   );
 
-  const progress = scanning
-    ? Math.min(ALMOST, (scanning.update?.bytes ?? 0) / Math.max(1, drive.volume.usedBytes))
-    : 0;
+  const progress = scanning && !asking ? scanProgress(scanning.update, drive.volume.usedBytes) : 0;
 
   const navigate = useCallback((next: Level[] | ((levels: Level[]) => Level[])) => {
     request.current++;
@@ -260,12 +266,12 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
         return onPlanOpen(true);
       }
     }
-    if (levels.length === 0) navigate([{ kind: 'category', id: leaf.regionId as CategoryId }]);
+    if (levels.length === 0) navigate([{ kind: 'category', id: leaf.regionId }]);
     else if (leaf.browsable) open(leaf);
   };
   const onRegion = (region: Region) => {
     if (run) return;
-    if (levels.length === 0 && region.category) navigate([{ kind: 'category', id: region.category }]);
+    if (levels.length === 0 && !region.free) navigate([{ kind: 'category', id: region.id }]);
     else up();
   };
   // Reclaimable tiles always react; other tiles zoom in at the top and open folders below. A run holds the map still.
@@ -284,6 +290,7 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
       : { cls: 'is-keeper', state: 'the kept copy is here' };
   };
   const look = (leaf: Leaf, rect: Rect): TileLook => {
+    if (leaf.kind === 'locked') return lockedLook(leaf, rect, levels.length > 0);
     if (leaf.id === drawerTile) return { cls: 'is-tidy-hot', state: 'loose files Vacancy can sort' };
     const linked = linkLook(leaf, rect);
     if (leaf.proposal === null) return linked ?? {};
@@ -380,23 +387,30 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
   };
   const freedSoFar = run?.view.freedBytes ?? 0;
 
-  const startScan = (button: HTMLButtonElement) => {
+  const startScan = (button: HTMLButtonElement, options?: { fast: boolean }) => {
     const b = button.getBoundingClientRect();
     field.current?.drop(b.left + b.width / 2, b.top + b.height / 2, 'splash');
-    drives.scan();
+    drives.scan(options);
   };
 
-  const onPlate = !overview && !scanning;
+  const onPlate = !overview && (!scanning || asking);
   const bytesInView =
     level?.kind === 'folder'
       ? level.folder.item.bytes
-      : (focus && overview?.categories.find((c) => c.id === focus)?.bytes) || (overview?.volume.totalBytes ?? 0);
+      : (focus && top?.regionById.get(focus)?.bytes) || (overview?.volume.totalBytes ?? 0);
 
   return (
     <>
       {/* Kept while the finish is up (hidden), so the map's size is still followed when it comes back. */}
       <main className={overview ? 'atlas is-map' : 'atlas is-scan'} hidden={!!summary}>
-        {!overview && <DotField ref={field} calm={onPlate ? calm : null} scan={scanning ? progress : null} out={progress > 0.85} />}
+        {!overview && (
+          <DotField
+            ref={field}
+            calm={onPlate ? calm : null}
+            scan={scanning && !asking ? progress : null}
+            out={progress > 0.85}
+          />
+        )}
         <div className="atlas-toolbar">
           <nav className="crumbs" aria-label="Map location">
             {levels.length === 0 || !overview ? (
@@ -411,10 +425,7 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
             {overview &&
               levels.map((l, i) => {
                 const last = i === levels.length - 1;
-                const name =
-                  l.kind === 'category'
-                    ? (overview.categories.find((c) => c.id === l.id)?.name ?? l.id)
-                    : l.folder.item.name;
+                const name = l.kind === 'category' ? (top?.regionById.get(l.id)?.name ?? l.id) : l.folder.item.name;
                 return (
                   <span key={i} className="crumb-step">
                     <ChevronRight size={13} aria-hidden />
@@ -432,12 +443,14 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
               })}
             {overview && level && (
               <span className="crumb-blurb">
-                {level.kind === 'category'
-                  ? overview.categories.find((c) => c.id === level.id)?.blurb
-                  : level.folder.item.path}
+                {level.kind === 'category' ? top?.regionById.get(level.id)?.blurb : level.folder.item.path}
               </span>
             )}
-            {scanning && <span className="crumb-blurb">Mapping as it scans</span>}
+            {scanning && !asking && (
+              <span className="crumb-blurb">
+                {scanning.update?.method === 'fast' ? 'Mapping from the file index' : 'Mapping as it scans'}
+              </span>
+            )}
             {opening && <LoaderCircle className="crumb-spin" size={13} aria-label="Opening" />}
             {browseError && (
               <span className="crumb-error" role="alert">
@@ -456,6 +469,12 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
           {overview && (
             <>
               <ScanNotes
+                volume={overview.volume}
+                method={overview.scan.method}
+                fallback={overview.scan.fallback}
+                durationMs={overview.scan.durationMs}
+                locked={levels.length === 0 ? overview.scan.locked : []}
+                lockedBlurb={top?.regionById.get(LOCKED_ID)?.blurb ?? ''}
                 unreadable={overview.scan.unreadable}
                 samples={overview.scan.unreadableSamples}
                 overCount={overview.scan.overCountBytes}
@@ -511,11 +530,16 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
               onOpenFullDiskAccess={() => void bridge.openFullDiskAccessSettings()}
               advisorNote={advisorNote}
               failure={state.phase === 'failed' ? state.message : null}
+              offerFast={bridge.platform === 'windows'}
+              asking={asking}
               onScan={startScan}
               contentRef={setCalm}
             />
           )}
-          {scanning && <ScanHud update={scanning.update} progress={progress} onCancel={drives.cancelScan} />}
+          {scanning && !asking && (
+            <ScanHud update={scanning.update} volume={drive.volume} progress={progress} onCancel={drives.cancelScan} />
+          )}
+          {overview && focus === LOCKED_ID && !summary && <LockedCard groups={overview.scan.locked} />}
           {drives.gone && <GoneNotice gone={drives.gone} onDismiss={drives.dismissGone} />}
         </div>
         {drawer && (
@@ -681,6 +705,45 @@ function runStatus(step: StepView | undefined, tile?: Freed): string {
   return `Vacant now. ${formatBytes(step.freedBytes)} freed${left > 0 ? `; ${formatCount(left)} ${left === 1 ? 'thing' : 'things'} left in place` : ''}.`;
 }
 
+/**
+ * A tile of the Locked folders block: a lock, and where it has room its name and total. It has nothing else to show:
+ * no names from inside, nothing to open, nothing to propose.
+ */
+function lockedLook(leaf: Leaf, rect: Rect, zoomed: boolean): TileLook {
+  const roomy = rect.w >= 110 && rect.h >= 64;
+  return {
+    label: (
+      <div className="locked-label">
+        <Lock size={zoomed ? 16 : 12} strokeWidth={2.2} aria-hidden />
+        {roomy && <span className="locked-name">{leaf.name}</span>}
+        {roomy && <span className="locked-size">{formatBytes(leaf.bytes)} · totals only</span>}
+      </div>
+    ),
+    state: 'locked, totals only',
+  };
+}
+
+/** The opened Locked folders block: what it is, said once, beside its totals. */
+function LockedCard({ groups }: { groups: LockedGroup[] }) {
+  const { bytes, folders } = lockedTotals(groups);
+  return (
+    <aside className="locked-card" aria-label="About locked folders" data-no-ripple>
+      <p className="locked-card-h">
+        <Lock size={14} aria-hidden /> {formatBytes(bytes)} in {formatCount(folders)} locked{' '}
+        {folders === 1 ? 'folder' : 'folders'}
+      </p>
+      <p>
+        Your account can’t open these folders, even though fast scan could count them. So Vacancy shows only how much
+        space they take: no names, nothing to propose, nothing to delete.
+      </p>
+      <p className="locked-card-quiet">
+        To clean up another account’s files, sign in to Windows as that account and run Vacancy there. Admin from a
+        fast scan is never used to open them.
+      </p>
+    </aside>
+  );
+}
+
 /** The round + or tick in a reclaimable tile's corner while the plan tray is open. */
 function Pin({ on }: { on: boolean }) {
   return (
@@ -691,6 +754,15 @@ function Pin({ on }: { on: boolean }) {
 }
 
 interface NotesProps {
+  volume: VolumeInfo;
+  /** How the drive was read, and why a fast scan asked for wasn't, if it wasn't. */
+  method: ScanMethod;
+  fallback: FastFallback | null;
+  durationMs: number;
+  /** A fast scan's locked folders, to note at the top level (none when zoomed in). */
+  locked: LockedGroup[];
+  /** The Locked folders block's blurb, for the note's tooltip. */
+  lockedBlurb: string;
   unreadable: number;
   samples: string[];
   /** Bytes the scan counted beyond what the OS reports in use. */
@@ -702,14 +774,28 @@ interface NotesProps {
 }
 
 /**
- * After a scan: how many folders could not be read; if the scan counted more than the OS says is in use (files
- * that grew or appeared while it ran), by how much, since the map then holds more than the header's used figure;
- * and on a Mac without Full Disk Access, the way to fix it.
+ * After a scan: a fast scan says so, how long it took, and how much is in locked folders; a normal scan that ran in
+ * place of a fast one says why. Then how many folders could not be read; if the scan counted more than the OS says
+ * is in use (files that grew or appeared while it ran), by how much, since the map then holds more than the
+ * header's used figure; and on a Mac without Full Disk Access, the way to fix it.
  */
 function ScanNotes(p: NotesProps) {
-  if (p.unreadable === 0 && p.overCount <= 0 && !p.missingAccess) return null;
+  const fast = p.method === 'fast';
+  const locked = lockedTotals(p.locked).bytes;
+  if (!fast && !p.fallback && p.unreadable === 0 && p.overCount <= 0 && !p.missingAccess) return null;
   return (
     <div className="scan-notes">
+      {fast && (
+        <span className="scan-note is-fast" title="Read from the drive’s file index, with admin, then admin was given back.">
+          <Zap size={11} aria-hidden /> Fast scan, {Math.max(1, Math.round(p.durationMs / 1000))} s
+        </span>
+      )}
+      {fast && locked > 0 && (
+        <span className="scan-note" title={p.lockedBlurb}>
+          <Lock size={11} aria-hidden /> {formatBytes(locked, 0)} in locked folders, totals only
+        </span>
+      )}
+      {!fast && p.fallback && <span className="scan-note">{fallbackLabel(p.fallback, p.volume)}</span>}
       {p.overCount > 0 && (
         <span
           className="scan-note"

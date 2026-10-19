@@ -30,6 +30,12 @@ import type { SkipKind } from '../bindings/SkipKind';
 import type { StepReport } from '../bindings/StepReport';
 import type { VolumeInfo } from '../bindings/VolumeInfo';
 import type { GuideId } from '../bindings/GuideId';
+import type { FastFallback } from '../bindings/FastFallback';
+import type { FastStage } from '../bindings/FastStage';
+import type { IndexRead } from '../bindings/IndexRead';
+import type { LockedGroup } from '../bindings/LockedGroup';
+import type { LockedKind } from '../bindings/LockedKind';
+import type { ScanMethod } from '../bindings/ScanMethod';
 import type { DuplicateCopy } from '../bindings/DuplicateCopy';
 import type { DuplicateGroup } from '../bindings/DuplicateGroup';
 import type { DuplicatePair } from '../bindings/DuplicatePair';
@@ -67,10 +73,15 @@ export type {
   Duplicates,
   DuplicatesDone,
   DuplicatesOutcome,
+  FastFallback,
+  FastStage,
   FileKind,
   FullDiskAccess,
+  IndexRead,
   ItemKind,
   LeftForYou,
+  LockedGroup,
+  LockedKind,
   MapCategory,
   MapFolder,
   MapItem,
@@ -89,6 +100,7 @@ export type {
   RunHistory,
   RunListing,
   RunReport,
+  ScanMethod,
   ScanOutcome,
   ScanSummary,
   ScanUpdate,
@@ -140,8 +152,14 @@ export interface Bridge {
    * preview of the categories. Resolves with the map and the cleanups the rules propose (each with its own tile on
    * the map), or with `{ status: 'cancelled' }` after `cancelScan`. Each drive keeps its own map and proposals; one
    * scan runs at a time, so starting one cancels the scan running on any drive.
+   *
+   * With `fast` (Windows), it asks for a fast scan: Windows shows its admin prompt (`stage: 'asking'`), and a small
+   * read-only helper reads the drive's file index (`'reading'`) before the core sorts it into categories
+   * (`'sorting'`). Admin is used for that read only. Where it can't (the prompt is declined, the drive isn't NTFS,
+   * the helper doesn't start, the index can't be read) the normal scan runs, every update and the map saying why in
+   * `fallback`. Nothing is remembered: each fast scan asks again.
    */
-  scan(mountPoint: string, onUpdate: (update: ScanUpdate) => void): Promise<ScanOutcome>;
+  scan(mountPoint: string, onUpdate: (update: ScanUpdate) => void, options?: { fast?: boolean }): Promise<ScanOutcome>;
   /** Stops the running scan, on whichever drive. */
   cancelScan(): Promise<void>;
   /** Opens a folder tile of a drive's map. */

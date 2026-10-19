@@ -43,6 +43,8 @@ export type DriveScan =
   | {
       phase: 'scanning';
       run: number;
+      /** A fast scan was asked for (Windows): until the core says otherwise, Windows' admin prompt may be up. */
+      fast: boolean;
       update: ScanUpdate | null;
       /** The categories so far, from the last update that carried a preview. */
       preview: CategoryTotal[];
@@ -110,7 +112,7 @@ export type Action =
   | { type: 'openMap' }
   /** From the map to the drive's scan screen ("Scan again"). */
   | { type: 'showScanScreen' }
-  | { type: 'scanStarted'; mountPoint: string; run: number }
+  | { type: 'scanStarted'; mountPoint: string; run: number; fast?: boolean }
   | { type: 'scanUpdate'; mountPoint: string; run: number; update: ScanUpdate }
   | { type: 'scanEnded'; mountPoint: string; run: number; outcome: ScanOutcome; at: number }
   | { type: 'scanFailed'; mountPoint: string; run: number; message: string }
@@ -262,7 +264,7 @@ export function reduce(s: Session, a: Action): Session {
       if (s.locked || !s.drives.some((d) => d.mountPoint === a.mountPoint)) return s;
       return {
         ...s,
-        scans: { ...s.scans, [a.mountPoint]: { phase: 'scanning', run: a.run, update: null, preview: [] } },
+        scans: { ...s.scans, [a.mountPoint]: { phase: 'scanning', run: a.run, fast: a.fast ?? false, update: null, preview: [] } },
       };
     case 'scanUpdate':
       return onRun(s, a.mountPoint, a.run, (scan) => ({

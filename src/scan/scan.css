@@ -155,3 +155,73 @@
   background: var(--color-text);
   transition: width 0.3s linear;
 }
+
+/* ---------- fast scan (Windows) ---------- */
+/* The plate's second button, the line under both, and the quiet line while Windows' admin prompt is up. */
+.fast-btn svg {
+  color: var(--color-outside);
+}
+.fast-btn-ask {
+  font-weight: 500;
+  color: var(--color-text-3);
+}
+.fast-fine {
+  max-width: 500px;
+  margin: var(--space-5) 0 0;
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--color-text-2);
+  text-wrap: pretty;
+}
+.fast-fine + .agent-note {
+  margin-top: 22px;
+}
+.plate-wait {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-4) 0 0;
+  font-size: var(--text-sm);
+  color: var(--color-text-3);
+}
+.plate-wait svg {
+  flex: none;
+}
+
+/* The HUD of a fast scan: a tag before the counts, the bar in the fast colour. */
+.hud-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: center;
+  padding: 3px 8px 2px;
+  border: 1px solid var(--color-outside-line);
+  border-radius: var(--radius-pill);
+  font: 700 var(--text-tag) / 1.3 var(--font-sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-outside);
+}
+.hud.is-fast .hud-bar i {
+  background: var(--color-outside);
+}
+/* Why a normal scan runs where a fast one was asked for. */
+.hud-note {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding-top: 11px;
+  border-top: 1px solid var(--color-line);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--color-text-2);
+}
+.hud-note svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--color-review);
+}
+.hud-note b {
+  color: var(--color-text);
+  font-weight: 600;
+}

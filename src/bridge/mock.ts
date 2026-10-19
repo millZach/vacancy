@@ -1,11 +1,13 @@
 import type { Fixture, PastRun, RunSkip } from './fixtures';
 import { coverDuplicates, DUPLICATES, mockDuplicates, type MockDuplicates } from './mockDuplicates';
+import { askingUpdate, fallbackFor, fastOverview, fastUpdate, UAC_MS, type MockFast } from './mockFast';
 import { makePlan, mockUndo, pastReport, play, type MockPlan, type Playback } from './mockRun';
 import type {
   Bridge,
   AdvisorStatus,
   CategoryTotal,
   DuplicateProgress,
+  FastFallback,
   DuplicatesOutcome,
   MapFolder,
   Overview,
@@ -47,6 +49,14 @@ export interface MockOptions {
   moves?: boolean;
   /** Start with the fixture's past runs in the history. Default: yes. */
   pastRuns?: boolean;
+  /**
+   * How a fast scan of an NTFS drive goes: `ok` reads the file index (the default); `declined` (Windows' admin prompt
+   * is answered No), `failed` (the helper doesn't start) and `unreadable` (the index can't be read) run the normal
+   * scan, saying why. A drive that isn't NTFS always gets the normal scan, with no prompt.
+   */
+  fast?: MockFast;
+  /** How long the mock's admin prompt is up before a fast scan. Default: 1.2 s. */
+  uacMs?: number;
 }
 
 /** A mock run's length when `runMs` isn't given, per step. */
@@ -142,7 +152,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
     },
     fullDiskAccess: () => answer(options.fullDiskAccess ?? fixture.fullDiskAccess),
     openFullDiskAccessSettings: () => answer(undefined),
-    scan: (mountPoint, onUpdate) => {
+    scan: (mountPoint, onUpdate, scanOptions) => {
       if (options.fail !== undefined) return answer<ScanOutcome>({ status: 'cancelled' });
       if (playing) return Promise.reject(new Error('a plan is running: scan once it has finished'));
       running?.finish({ status: 'cancelled' });
@@ -150,7 +160,13 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
       forget(mountPoint);
       const volume = volumes.find((v) => v.mountPoint === mountPoint);
       if (!volume) return Promise.reject(new Error(`could not scan ${mountPoint}: the drive is not connected`));
-      const map = onDrive(structuredClone(fixture.overview), system, volume);
+      const normal = onDrive(structuredClone(fixture.overview), system, volume);
+      // A fast scan asked for: Windows' prompt first (NTFS only), then the index, or the normal scan saying why.
+      const fallback: FastFallback | null = scanOptions?.fast ? fallbackFor(volume, options.fast ?? 'ok') : null;
+      const fast = !!scanOptions?.fast && fallback === null;
+      const asking = scanOptions?.fast && fallback !== 'notNtfs' ? (options.uacMs ?? UAC_MS) : 0;
+      const map = fast ? fastOverview(normal, volume.usedBytes / system.usedBytes) : normal;
+      if (fallback) map.scan.fallback = fallback;
       const proposals = proposalsOnDrive(structuredClone(fixture.proposals), system, volume);
       const skips = skipsOnDrive(structuredClone(fixture.runSkips), system, volume);
       // Tidy up sorts the home's folders: only the system drive has them.
@@ -158,7 +174,8 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
       const paths = map.categories.flatMap((c) => c.items.map((i) => i.path)).filter(Boolean);
       // Interleaved, so the ticker jumps around the disk the way a real walk does.
       const ticker = paths.map((p, i) => paths[(i * 7) % paths.length] ?? p);
-      const total = options.scanMs ?? 4000;
+      // A fast scan takes half the time of a normal one here, so its stages can still be watched.
+      const total = (options.scanMs ?? 4000) * (fast ? 0.5 : 1);
       const started = Date.now();
       return new Promise<ScanOutcome>((resolve) => {
         const finish = (outcome: ScanOutcome) => {
@@ -169,11 +186,16 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
           resolve(outcome);
         };
         const tick = () => {
-          const t = total <= 0 ? 1 : Math.min(1, (Date.now() - started) / total);
-          onUpdate(update(map, ticker, t, Date.now() - started));
+          const elapsed = Date.now() - started;
+          if (elapsed < asking) {
+            onUpdate(askingUpdate(elapsed));
+            return;
+          }
+          const t = total <= 0 ? 1 : Math.min(1, (elapsed - asking) / total);
+          onUpdate(fast ? fastUpdate(map, t, elapsed) : { ...update(map, ticker, t, elapsed), fallback });
           if (t >= 1) finish({ status: 'done', overview: map, proposals, tidy });
         };
-        running = { mountPoint, timer: window.setInterval(tick, total <= 0 ? 0 : 100), finish };
+        running = { mountPoint, timer: window.setInterval(tick, total <= 0 && asking <= 0 ? 0 : 100), finish };
       });
     },
     cancelScan: () => {
@@ -435,6 +457,10 @@ function update(map: ScanOutcomeMap, ticker: string[], t: number, elapsedMs: num
     currentPath: ticker[Math.floor(t * 70) % Math.max(1, ticker.length)] ?? '',
     elapsedMs: Math.round(elapsedMs),
     categories,
+    method: 'normal',
+    fallback: null,
+    stage: null,
+    index: null,
   };
 }
 

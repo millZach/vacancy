@@ -5,7 +5,10 @@
 // stick on Windows) 20 seconds in, `&run=6000` for a mock run of a plan that takes six seconds, `&dups=8000` for a
 // duplicate search after the scan that takes eight seconds (default six), `&moves=1` for runs
 // that also report the fixture's folder moves (to see the finish's Moved slide), `&unreadable=2` for a history
-// with two kept runs it can't read, and `&history=0` to start with no past runs. `&advisor=notChecked` previews
+// with two kept runs it can't read, and `&history=0` to start with no past runs. A fast scan reads the drive's file
+// index (`&fast=ok`, the default); `&fast=declined` answers Windows' admin prompt No, `&fast=failed` has the helper
+// not start and `&fast=unreadable` has the index unreadable, each running the normal scan with its note; `&uac=3000`
+// keeps the mock's prompt up three seconds (default 1.2). `&advisor=notChecked` previews
 // native fixture bypass; `&advisor=error` fails only the advisor status read. These browser fixtures never enable AI.
 import { isTauri } from '@tauri-apps/api/core';
 import { fixtures, isFixtureName } from './fixtures';
@@ -21,6 +24,7 @@ export type * from './types';
 
 const ACCESS: readonly FullDiskAccess[] = ['granted', 'missing', 'unknown', 'notApplicable'];
 const ADVISOR_PREVIEW = ['notChecked', 'error'] as const;
+const FAST = ['ok', 'declined', 'failed', 'unreadable'] as const;
 
 /** The bridge for wherever the UI is running. */
 export function defaultBridge(search = window.location.search): Bridge {
@@ -36,6 +40,8 @@ export function defaultBridge(search = window.location.search): Bridge {
   const dups = q.get('dups');
   const unreadable = Number(q.get('unreadable'));
   const advisor = ADVISOR_PREVIEW.find((a) => a === q.get('advisor'));
+  const fast = FAST.find((f) => f === q.get('fast'));
+  const uac = q.get('uac');
   return createMockBridge(fixtures[isFixtureName(name) ? name : 'windows'], {
     ...(delay > 0 ? { delayMs: delay } : {}),
     ...(fail !== null ? { fail } : {}),
@@ -48,5 +54,7 @@ export function defaultBridge(search = window.location.search): Bridge {
     ...(unreadable > 0 ? { unreadableRuns: unreadable } : {}),
     ...(q.get('history') === '0' ? { pastRuns: false } : {}),
     ...(advisor ? { advisor } : {}),
+    ...(fast ? { fast } : {}),
+    ...(uac !== null && Number.isFinite(Number(uac)) ? { uacMs: Number(uac) } : {}),
   });
 }

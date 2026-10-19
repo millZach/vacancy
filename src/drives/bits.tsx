@@ -55,8 +55,8 @@ export function UsageBar({
 }
 
 /**
- * "Not scanned yet", "Scanning now", "Scanned 4 min ago, 120 GB to reclaim", "Cleaning up now" or "Freed 74 GB 2 min
- * ago", with a dot that lights once the drive has a scan.
+ * "Not scanned yet", "Waiting for admin" (a fast scan's prompt), "Scanning now", "Scanned 4 min ago, 120 GB to
+ * reclaim", "Cleaning up now" or "Freed 74 GB 2 min ago", with a dot that lights once the drive has a scan.
  */
 export function DriveStatus({ scan, now, id }: { scan: DriveScan; now: number; id?: string }) {
   const lit = scan.phase === 'done' ? ' is-scanned' : scan.phase === 'scanning' ? ' is-scanning' : '';
@@ -69,7 +69,11 @@ export function DriveStatus({ scan, now, id }: { scan: DriveScan; now: number; i
 }
 
 function statusText(scan: DriveScan, now: number): string {
-  if (scan.phase === 'scanning') return 'Scanning now';
+  if (scan.phase === 'scanning') {
+    // A fast scan asked for, before the core has read anything: Windows' admin prompt is up.
+    const asking = scan.update ? scan.update.stage === 'asking' : scan.fast;
+    return asking ? 'Waiting for admin' : 'Scanning now';
+  }
   if (scan.phase !== 'done') return 'Not scanned yet';
   if (scan.planRun?.phase === 'running') return 'Cleaning up now';
   const report = reportOf(scan);

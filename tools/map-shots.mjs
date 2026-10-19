@@ -20,6 +20,10 @@
 //                        and --cdp http://127.0.0.1:9333 (the window keeps its own size; --viewport is ignored)
 //   --run                over CDP, also free the plan. The app deletes for real, so only ever pass this to an app
 //                        in fixture mode (VACANCY_FIXTURE_ROOT). Against the mock bridge the plan is always freed.
+//   --fast               press "Fast scan (asks for admin)" instead of "Scan <drive>" (Windows). The app waits on
+//                        Windows' admin prompt first: answer it on the real desktop (the mock answers itself); the
+//                        scanning shot is taken once the HUD shows, and the map may take up to --timeout. Works
+//                        over CDP with --run, to free a plan made from a fast scan's map.
 //
 // Writes <name>-1-plate.png, -2-scanning.png, -3-map.png, -4-hover.png, -5-category.png, -6-folder.png,
 // -7-plan.png (the tray open, a reclaimable tile's hover card), -8-plan-why.png (the biggest proposal's why and
@@ -41,6 +45,7 @@ const { values: o } = parseArgs({
     timeout: { type: 'string', default: '600000' },
     cdp: { type: 'string' },
     run: { type: 'boolean', default: false },
+    fast: { type: 'boolean', default: false },
   },
 });
 const [vw, vh] = o.viewport.split('x').map(Number);
@@ -57,19 +62,25 @@ try {
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
   if (!remote) await page.goto(o.url);
 
-  const scan = page.locator('button.cta', { hasText: /^\s*Scan / });
+  const scan = o.fast
+    ? page.getByRole('button', { name: 'Fast scan (asks for admin)' })
+    : page.locator('button.cta', { hasText: /^\s*Scan / });
   await scan.waitFor({ timeout: 30_000 });
   await settle(page, 1200);
   await shot(page, '1-plate');
 
   const started = Date.now();
   await scan.click();
-  await page.locator('.hud').waitFor({ timeout: 30_000 });
+  // A fast scan waits on Windows' admin prompt before the HUD shows, as long as a person takes to answer it; a
+  // small fixture folder's may then be done before the HUD is caught, so its map will do too.
+  if (o.fast) await page.locator('.hud, .atlas.is-map').first().waitFor({ timeout: Number(o.timeout) });
+  else await page.locator('.hud').waitFor({ timeout: 30_000 });
   await settle(page, Number(o['scanning-at']));
   await shot(page, '2-scanning');
 
   await page.locator('.atlas.is-map').waitFor({ timeout: Number(o.timeout) });
-  console.log(`The scan took ${((Date.now() - started) / 1000).toFixed(1)} s from pressing Scan to the map.`);
+  const how = (await page.locator('.scan-note.is-fast').count()) ? 'a fast scan' : 'a normal scan';
+  console.log(`The scan took ${((Date.now() - started) / 1000).toFixed(1)} s from pressing Scan to the map (${how}).`);
   await settle(page, 1400);
   await shot(page, '3-map');
 

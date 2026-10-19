@@ -118,7 +118,7 @@ export function MapView(p: MapViewProps) {
         const shown = !p.focus || p.focus === r.id;
         const cls = ['map-region', r.free && 'is-free', r.protected && 'is-locked'].filter(Boolean).join(' ');
         return (
-          <div key={r.id} className={cls} data-cat={r.category ?? undefined} style={place(rect, shown)}>
+          <div key={r.id} className={cls} data-cat={r.category ?? undefined} data-region={r.id} style={place(rect, shown)}>
             {!r.free && rect.w > 40 && (
               <button
                 type="button"

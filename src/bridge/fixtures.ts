@@ -188,6 +188,10 @@ function build(
         linksSkipped: 212,
         hardLinksMerged: 84_120,
         durationMs: scan.seconds * 1000,
+        method: 'normal',
+        fallback: null,
+        locked: [],
+        recordsBytes: 0,
       },
       categories,
     },
@@ -234,13 +238,31 @@ function tileOf(ps: Proposal[], id: string): Spec {
   return { name: p.title, gb: p.bytes / GB, files: p.itemCount, days: 120, proposal: p.id };
 }
 
-/** A drive as the core reports it, from its capacity and used space in gigabytes. */
-function drive(name: string, mountPoint: string, kind: DriveKind, system: boolean, totalGb: number, usedGb: number): VolumeInfo {
+/** A drive as the core reports it, from its capacity and used space in gigabytes, and its file system. */
+function drive(
+  name: string,
+  mountPoint: string,
+  kind: DriveKind,
+  system: boolean,
+  totalGb: number,
+  usedGb: number,
+  fileSystem: string,
+): VolumeInfo {
   const id = `fx-${name}`;
-  return { name, mountPoint, id, kind, system, totalBytes: totalGb * GB, usedBytes: usedGb * GB, freeBytes: (totalGb - usedGb) * GB };
+  return {
+    name,
+    mountPoint,
+    id,
+    kind,
+    system,
+    totalBytes: totalGb * GB,
+    usedBytes: usedGb * GB,
+    freeBytes: (totalGb - usedGb) * GB,
+    fileSystem,
+  };
 }
 
-const winVolume = drive('Local Disk (C:)', 'C:\\', 'internal', true, 476, 431);
+const winVolume = drive('Local Disk (C:)', 'C:\\', 'internal', true, 476, 431, 'NTFS');
 const home = 'C:\\Users\\alex';
 const local = `${home}\\AppData\\Local`;
 const roaming = `${home}\\AppData\\Roaming`;
@@ -437,7 +459,7 @@ const win = build(
           name: "Space Vacancy can't see",
           gb: 4,
           kind: 'hidden',
-          note: "Windows counts this as used, but Vacancy can't see it: 111 folders it isn't allowed to open (such as System Volume Information and WindowsApps), restore points and the file system's own records.",
+          note: "Windows counts this as used, but Vacancy can't see it: 111 folders it isn't allowed to open (such as System Volume Information and WindowsApps), restore points and the file system's own records. A fast scan counts this space, as totals only.",
         },
       ],
     },
@@ -498,7 +520,7 @@ const win = build(
   ],
 );
 
-const macVolume = drive('Macintosh HD', '/', 'internal', true, 494, 460);
+const macVolume = drive('Macintosh HD', '/', 'internal', true, 494, 460, 'apfs');
 const mhome = '/Users/alex';
 const mlib = `${mhome}/Library`;
 
@@ -747,8 +769,8 @@ export const fixtures = {
     machineName: 'DESKTOP-ALEX',
     volumes: [
       winVolume,
-      drive('Data (D:)', 'D:\\', 'internal', false, 2000, 700),
-      drive('SanDisk (E:)', 'E:\\', 'usb', false, 64, 41),
+      drive('Data (D:)', 'D:\\', 'internal', false, 2000, 700, 'NTFS'),
+      drive('SanDisk (E:)', 'E:\\', 'usb', false, 64, 41, 'exFAT'),
     ],
     fullDiskAccess: 'notApplicable',
     advisorStatus: {
@@ -817,7 +839,7 @@ export const fixtures = {
   macos: {
     platform: 'macos',
     machineName: 'Alex’s MacBook Air',
-    volumes: [macVolume, drive('Samsung T7', '/Volumes/Samsung T7', 'external', false, 1000, 380)],
+    volumes: [macVolume, drive('Samsung T7', '/Volumes/Samsung T7', 'external', false, 1000, 380, 'exFAT')],
     fullDiskAccess: 'missing',
     advisorStatus: {
       enabled: false,
