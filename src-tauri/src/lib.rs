@@ -6,11 +6,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State};
 use vacancy_core::advisor::{self, AdvisorStatus};
+use vacancy_core::claude::{self, ClaudeCode, Cli, Control, Failure, Progress};
 use vacancy_core::permissions::{self, FullDiskAccess};
+use vacancy_core::tidy::{TidyLayout, TidyProposal};
 use vacancy_core::{
     CancelToken, DuplicateProgress, DuplicatesOutcome, Env, MapFolder, Moment, Plan, PlanSummary,
     RunEvent, RunHistory, RunListing, RunReport, ScanError, ScanOptions, ScanOutcome, ScanUpdate,
@@ -24,6 +27,10 @@ struct Session {
     mode: Mode,
     /// The plan running now, if one is: its drive and how to stop it. One at a time, and no scan while it runs.
     run: Mutex<Option<(String, CancelToken)>>,
+    /// Claude's requests running now, by request id, with how to stop each.
+    claude: Mutex<HashMap<String, CancelToken>>,
+    /// The last request id handed out.
+    claude_next: AtomicU64,
 }
 
 impl Session {
@@ -32,6 +39,8 @@ impl Session {
             scans: Scans::default(),
             mode,
             run: Mutex::new(None),
+            claude: Mutex::new(HashMap::new()),
+            claude_next: AtomicU64::new(0),
         }
     }
 
@@ -403,6 +412,261 @@ async fn advisor_status(app: AppHandle) -> Result<AdvisorStatus, String> {
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+/// Where Vacancy keeps Claude's settings and makes each call's empty working folder: the app's data folder, or in
+/// fixture mode the fixture's.
+fn claude_home(app: &AppHandle) -> Result<PathBuf, String> {
+    app.state::<Session>()
+        .mode
+        .app_data(app)
+        .ok_or_else(|| "Vacancy can't find its data folder, so Claude stays off.".to_owned())
+}
+
+/// Claude's status now: whether Claude Code is found, whether Claude is on (and then signed in), and privacy mode.
+/// Looks for Claude Code again each time ("Check again"). Fixture mode looks too: only reads are confined there.
+fn claude_status_now(app: &AppHandle) -> Result<claude::Status, String> {
+    let home = claude_home(app)?;
+    let settings = claude::settings::load(&home);
+    let found = claude::discovery::locate();
+    let fixture = !matches!(app.state::<Session>().mode, Mode::Real);
+    Ok(claude::Status::of(
+        settings,
+        found.is_some(),
+        fixture,
+        || {
+            found.as_deref().is_some_and(|exe| {
+                claude::runner::signed_in(exe, &home.join("claude-work")).unwrap_or(false)
+            })
+        },
+    ))
+}
+
+/// Claude's status: not found, signed out, off or on, with privacy mode and the always-hidden places.
+#[tauri::command]
+async fn claude_status(app: AppHandle) -> Result<claude::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || claude_status_now(&app))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Turns Claude on (after the privacy notice) or off, and says the status after. Turning it off stops every
+/// request running and keeps Claude's items already in the plan.
+#[tauri::command]
+async fn claude_set_enabled(on: bool, app: AppHandle) -> Result<claude::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = claude_home(&app)?;
+        let mut settings = claude::settings::load(&home);
+        settings.enabled = on;
+        claude::settings::save(&home, settings)
+            .map_err(|e| format!("Vacancy couldn't keep the setting: {e}"))?;
+        if !on {
+            for cancel in lock(&app.state::<Session>().claude).values() {
+                cancel.cancel();
+            }
+        }
+        claude_status_now(&app)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Turns privacy mode on or off (the UI confirms turning it off first). Remembered, also while Claude is off.
+#[tauri::command]
+async fn claude_set_privacy(on: bool, app: AppHandle) -> Result<claude::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let home = claude_home(&app)?;
+        let mut settings = claude::settings::load(&home);
+        settings.privacy = on;
+        claude::settings::save(&home, settings)
+            .map_err(|e| format!("Vacancy couldn't keep the setting: {e}"))?;
+        claude_status_now(&app)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Starts a Claude job on a drive's last scan and gives its request id at once. `on_event` then hears Working,
+/// Slow (after 20 seconds), and Done with the checked answer or Failed with why. One request may run per job
+/// and drive at a time; [`claude_cancel`] stops one.
+#[tauri::command]
+async fn claude_start(
+    mount_point: String,
+    job: claude::Job,
+    on_event: Channel<claude::Event>,
+    app: AppHandle,
+) -> Result<String, String> {
+    let session = app.state::<Session>();
+    let n = session.claude_next.fetch_add(1, Ordering::Relaxed) + 1;
+    let request_id = format!("claude-{n}");
+    let cancel = CancelToken::new();
+    lock(&session.claude).insert(request_id.clone(), cancel.clone());
+    let worker = app.clone();
+    let id = request_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let send = |event| {
+            // The UI may have gone away; the request ends either way.
+            let _ = on_event.send(event);
+        };
+        send(claude::Event::Working {
+            request_id: id.clone(),
+        });
+        let result = claude_job(&worker, &mount_point, &job, &cancel, &mut || {
+            send(claude::Event::Slow {
+                request_id: id.clone(),
+            })
+        });
+        lock(&worker.state::<Session>().claude).remove(&id);
+        send(match result {
+            Ok(answer) => claude::Event::Done {
+                request_id: id,
+                answer: Box::new(answer),
+            },
+            Err(failure) => claude::Event::Failed {
+                request_id: id,
+                failure,
+            },
+        });
+    });
+    Ok(request_id)
+}
+
+/// Sends a chat message: [`claude_start`] with Ask, the whole conversation so far with the newest message last.
+#[tauri::command]
+async fn claude_chat(
+    mount_point: String,
+    about: claude::About,
+    messages: Vec<claude::Message>,
+    on_event: Channel<claude::Event>,
+    app: AppHandle,
+) -> Result<String, String> {
+    claude_start(
+        mount_point,
+        claude::Job::Ask { about, messages },
+        on_event,
+        app,
+    )
+    .await
+}
+
+/// Stops a running request: its Claude Code process tree is killed, and it ends Failed with Cancelled.
+#[tauri::command]
+fn claude_cancel(request_id: String, session: State<'_, Session>) {
+    if let Some(cancel) = lock(&session.claude).get(&request_id) {
+        cancel.cancel();
+    }
+}
+
+/// One job, start to end: prepared from the drive's scan, asked of Claude Code without holding the scan, and
+/// applied to the same scan only if it is still the drive's and hasn't run a plan.
+fn claude_job(
+    app: &AppHandle,
+    mount_point: &str,
+    job: &claude::Job,
+    cancel: &CancelToken,
+    slow: &mut dyn FnMut(),
+) -> Result<claude::Answer, Failure> {
+    let session = app.state::<Session>();
+    let home = claude_home(app).map_err(Failure::error)?;
+    let settings = claude::settings::load(&home);
+    if !settings.enabled {
+        return Err(Failure::error("Claude is off. Turn it on first."));
+    }
+    let program = claude::discovery::locate().ok_or(Failure::NotFound)?;
+    let env = session.mode.env_for(mount_point).map_err(Failure::error)?;
+    let readable = if settings.privacy {
+        None
+    } else {
+        let drives = match &session.mode {
+            Mode::Real => vacancy_core::list_volumes()
+                .map(|v| v.into_iter().map(|v| v.mount_point).collect())
+                .unwrap_or_else(|_| vec![mount_point.to_owned()]),
+            _ => Vec::new(),
+        };
+        Some(claude::readable(&env, &drives))
+    };
+    let prepared = session.scans.with_last(mount_point, |last| {
+        let scanned = last
+            .filter(|s| !s.spent)
+            .ok_or_else(|| Failure::error("Scan this drive first, then ask Claude."))?;
+        if scanned.duplicates.is_some() && adds_items(job) {
+            return Err(Failure::error(
+                "Vacancy is still looking for duplicate files. Ask Claude when it has finished.",
+            ));
+        }
+        let prepared = claude::prepare(job, &scanned.volume, &env, readable.as_deref(), cancel)?;
+        Ok((scanned.generation, prepared))
+    });
+    let (generation, prepared) = prepared?;
+    let cli = ClaudeCode {
+        program,
+        access: match readable {
+            None => claude::Access::Private,
+            Some(roots) => claude::Access::Read(roots),
+        },
+        work: home.join("claude-work"),
+    };
+    let reply = cli.call(
+        prepared.call(),
+        &Control::new(cancel.clone()),
+        &mut |p| match p {
+            Progress::Slow => slow(),
+        },
+    )?;
+    session.scans.with_last_mut(mount_point, |last| {
+        let scanned = last
+            .filter(|s| s.generation == generation && !s.spent)
+            .ok_or_else(|| {
+                Failure::error("The scan changed while Claude was answering. Ask again.")
+            })?;
+        if scanned.duplicates.is_some() && adds_items(job) {
+            return Err(Failure::error(
+                "Vacancy started looking for duplicate files meanwhile. Ask Claude again when it has finished.",
+            ));
+        }
+        claude::apply(prepared, reply, &mut scanned.volume, &env, cancel)
+    })
+}
+
+/// Whether a job may add items to the scan's proposals.
+fn adds_items(job: &claude::Job) -> bool {
+    matches!(
+        job,
+        claude::Job::PickPlan { .. } | claude::Job::ExplainFolders
+    )
+}
+
+/// Picks the layout a Tidy up sort uses from now on: the built-in rules', or Claude's once it has suggested one.
+/// Gives the sorts in use again.
+#[tauri::command]
+async fn claude_choose_layout(
+    mount_point: String,
+    tidy_id: String,
+    layout: TidyLayout,
+    session: State<'_, Session>,
+) -> Result<Vec<TidyProposal>, String> {
+    session.scans.with_last_mut(&mount_point, |last| {
+        let scanned = last
+            .filter(|s| !s.spent)
+            .ok_or("Scan this drive again first.")?;
+        scanned.volume.tidy.choose(&tidy_id, layout)?;
+        Ok(scanned.volume.tidy.proposals())
+    })
+}
+
+/// Takes Claude's items `ids` out of the drive's proposals again (Keep mine). Only Claude's own items.
+#[tauri::command]
+async fn claude_remove_items(
+    mount_point: String,
+    ids: Vec<String>,
+    session: State<'_, Session>,
+) -> Result<claude::Refreshed, String> {
+    session.scans.with_last_mut(&mount_point, |last| {
+        let scanned = last
+            .filter(|s| !s.spent)
+            .ok_or("Scan this drive again first.")?;
+        claude::remove_items(&mut scanned.volume, &ids)
+    })
 }
 
 /// The drives to offer for scanning, the system drive first. Read-only. Runs on a blocking thread: a drive slow to
@@ -916,6 +1180,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             machine_name,
             advisor_status,
+            claude_status,
+            claude_set_enabled,
+            claude_set_privacy,
+            claude_start,
+            claude_chat,
+            claude_cancel,
+            claude_choose_layout,
+            claude_remove_items,
             list_volumes,
             forget_drive,
             full_disk_access,
