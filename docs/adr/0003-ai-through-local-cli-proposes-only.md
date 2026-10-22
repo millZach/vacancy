@@ -1,6 +1,6 @@
 # 0003: AI runs through the user's local Claude Code or Codex CLI, and only proposes
 
-Date: 2026-10-16. Status: accepted (Zach).
+Date: 2026-10-16. Status: accepted (Zach); narrowed to Claude Code only, with a privacy mode, by ADR 0008.
 
 Built-in rules find known junk offline. When Claude Code (`claude`) or Codex (`codex`) is installed, Vacancy uses it for the judgment calls rules can't make: explaining big unknown folders and proposing a tidier layout for messy folders. Zach chose this over an API key, so the user's own subscription pays and no keys are stored.
 
