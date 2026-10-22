@@ -1709,6 +1709,7 @@ fn step_report(step: &PlanStep, tally: Tally) -> StepReport {
         kind: StepKind::Delete,
         moved_items: 0,
         places: step.actions.len() as u64,
+        source: step.source,
         outcome,
         skipped,
     }
@@ -1731,11 +1732,17 @@ fn sort_report(approved: &Approved, skips: Vec<Skip>, moved: u64) -> StepReport 
     StepReport {
         id: approved.id.clone(),
         title: approved.title(),
-        why: format!(
-            "Loose files at the top of {} sorted into folders by kind and year, by Vacancy's built-in rules. Moved, \
-             not deleted.",
-            approved.name
-        ),
+        why: match approved.source() {
+            crate::ProposalSource::Claude => format!(
+                "Loose files at the top of {} sorted into the folders Claude suggested. Moved, not deleted.",
+                approved.name
+            ),
+            crate::ProposalSource::Rule => format!(
+                "Loose files at the top of {} sorted into folders by kind and year, by Vacancy's built-in rules. \
+                 Moved, not deleted.",
+                approved.name
+            ),
+        },
         category: approved.category(),
         regenerable: false,
         planned_bytes: 0,
@@ -1746,6 +1753,7 @@ fn sort_report(approved: &Approved, skips: Vec<Skip>, moved: u64) -> StepReport 
         kind: StepKind::Move,
         moved_items: moved,
         places: 0,
+        source: approved.source(),
         outcome,
         skipped: skips,
     }

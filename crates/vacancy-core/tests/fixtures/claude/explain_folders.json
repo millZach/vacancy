@@ -1,0 +1,33 @@
+{
+  "is_error": false,
+  "models": [
+    "claude-haiku-5-5"
+  ],
+  "permission_denials": [],
+  "result": "{\"folders\":[{\"id\":\"e0\",\"short\":\"Your saved render images, about 15 MB, plus a small 'tiles' subfolder.\",\"explanation\":\"From the names and sizes alone, this looks like image renders (four PNG files) and a 'tiles' folder with one .bin file. The folder was used today, so it may still matter to you. I can't tell what the renders are for or whether you have copies elsewhere. Nothing here is clearly safe to delete, so I'm not suggesting any items. Check the images yourself before removing anything.\",\"remove\":[]},{\"id\":\"e7\",\"short\":\"A folder called 'Elsewhere' holding one 2 MB file named other.bin.\",\"explanation\":\"This is a small folder with a single unnamed binary file. I can't tell what the file is or which program made it, so I can't say it's safe to delete. Leave it alone unless you know what created it.\",\"remove\":[]},{\"id\":\"e9\",\"short\":\"A photo backup folder in your code area, holding one JPG (about 1 MB).\",\"explanation\":\"This looks like a backup copy of a photo, last used in November 2025. Backups are often the only other copy of a file, so deleting it could mean losing that photo. I'm not suggesting removal. If you're sure the original is safe somewhere else, you can decide that yourself.\",\"remove\":[]}],\"opened\":[]}",
+  "structured_output": {
+    "folders": [
+      {
+        "explanation": "From the names and sizes alone, this looks like image renders (four PNG files) and a 'tiles' folder with one .bin file. The folder was used today, so it may still matter to you. I can't tell what the renders are for or whether you have copies elsewhere. Nothing here is clearly safe to delete, so I'm not suggesting any items. Check the images yourself before removing anything.",
+        "id": "e0",
+        "remove": [],
+        "short": "Your saved render images, about 15 MB, plus a small 'tiles' subfolder."
+      },
+      {
+        "explanation": "This is a small folder with a single unnamed binary file. I can't tell what the file is or which program made it, so I can't say it's safe to delete. Leave it alone unless you know what created it.",
+        "id": "e7",
+        "remove": [],
+        "short": "A folder called 'Elsewhere' holding one 2 MB file named other.bin."
+      },
+      {
+        "explanation": "This looks like a backup copy of a photo, last used in November 2025. Backups are often the only other copy of a file, so deleting it could mean losing that photo. I'm not suggesting removal. If you're sure the original is safe somewhere else, you can decide that yourself.",
+        "id": "e9",
+        "remove": [],
+        "short": "A photo backup folder in your code area, holding one JPG (about 1 MB)."
+      }
+    ],
+    "opened": []
+  },
+  "subtype": "success",
+  "type": "result"
+}

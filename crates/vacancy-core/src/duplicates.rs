@@ -1228,7 +1228,7 @@ fn proposal(found: &Found) -> Proposal {
         place_count: extras.len() as u64,
         risk: Risk::Review,
         source: ProposalSource::Rule,
-        ai_note: None,
+        claude_note: None,
         action: ProposalAction::Delete,
         hint_action: None,
         regenerable: false,

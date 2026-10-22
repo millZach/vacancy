@@ -206,6 +206,11 @@ impl AdvisorInput<'_> {
     pub fn payload(&self) -> &MetadataPayload {
         &self.payload
     }
+    /// The payload and what each of its entries is in the scan, for a caller that must let go of the scan while
+    /// a request runs and checks it is the same scan before using them.
+    pub(crate) fn into_parts(self) -> (MetadataPayload, Vec<ItemRef>) {
+        (self.payload, self.bindings)
+    }
     pub fn to_json(&self) -> Result<String, AdvisorError> {
         serde_json::to_string(&self.payload).map_err(|_| AdvisorError::InvalidOutput)
     }
@@ -325,6 +330,15 @@ pub fn summarize<'a>(
                 continue;
             }
             if claims.overlaps(snapshot, at) {
+                continue;
+            }
+            // The places that always stay hidden from Claude (ADR 0008) are never listed, nor what is in them.
+            let path = match at {
+                ItemRef::Dir(d) => snapshot.path(d),
+                ItemRef::File(f) => snapshot.file_path(f),
+                _ => unreachable!(),
+            };
+            if crate::claude::hidden::hides(&path).is_some() {
                 continue;
             }
             let (name, bytes, files, used, kind) = match at {
@@ -757,8 +771,8 @@ fn apply_with_check(
                     item_count: entry.file_count,
                     place_count: 1,
                     risk: Risk::Review,
-                    source: ProposalSource::Ai,
-                    ai_note: Some(format!(
+                    source: ProposalSource::Claude,
+                    claude_note: Some(format!(
                         "Suggested by {}: {}",
                         provider.label(),
                         removal.reason

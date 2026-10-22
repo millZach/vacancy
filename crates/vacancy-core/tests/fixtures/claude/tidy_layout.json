@@ -1,0 +1,121 @@
+{
+  "is_error": false,
+  "models": [
+    "claude-haiku-5-5"
+  ],
+  "permission_denials": [],
+  "result": "{\"folders\":[{\"id\":\"tidy-downloads\",\"note\":\"I grouped files by purpose (money, travel, work, photos, videos, installers, screenshots, audio) and put anything unclear into Sort later.\",\"files\":[{\"folder\":\"Installers\",\"name\":\"big-old-setup.exe\"},{\"folder\":\"Videos/Family\",\"name\":\"birthday.mov\"},{\"folder\":\"Travel\",\"name\":\"boarding-pass.png\"},{\"folder\":\"Work\",\"name\":\"Brand guide.pdf\"},{\"folder\":\"Money & paperwork\",\"name\":\"Budget 2026 (1).xlsx\"},{\"folder\":\"Sort later\",\"name\":\"clip-b.mp4\"},{\"folder\":\"Sort later\",\"name\":\"data.bin\"},{\"folder\":\"Installers\",\"name\":\"drivers.7z\"},{\"folder\":\"Sort later\",\"name\":\"export_1734\"},{\"folder\":\"Sort later\",\"name\":\"floorplan-v3.png\"},{\"folder\":\"Installers\",\"name\":\"fonts.zip\"},{\"folder\":\"Photos/2025\",\"name\":\"IMG_2041.jpg\"},{\"folder\":\"Photos/2026\",\"name\":\"IMG_3301.jpg\"},{\"folder\":\"Photos/2025\",\"name\":\"IMG_4471.jpg\"},{\"folder\":\"Work\",\"name\":\"logo-final.svg\"},{\"folder\":\"Installers\",\"name\":\"new-setup.exe\"},{\"folder\":\"Money & paperwork\",\"name\":\"old-lease.pdf\"},{\"folder\":\"Installers\",\"name\":\"old-setup.exe\"},{\"folder\":\"Work\",\"name\":\"resume-2025.docx\"},{\"folder\":\"Screenshots\",\"name\":\"screen-recording.mp4\"},{\"folder\":\"Sort later\",\"name\":\"small.png\"},{\"folder\":\"Money & paperwork\",\"name\":\"statement-2026-09.pdf\"},{\"folder\":\"Audio\",\"name\":\"voice-memo.m4a\"},{\"folder\":\"Installers\",\"name\":\"VSCodeUserSetup-x64.exe\"},{\"folder\":\"Videos/Family\",\"name\":\"Wedding highlights.mp4\"}]}],\"opened\":[]}",
+  "structured_output": {
+    "folders": [
+      {
+        "files": [
+          {
+            "folder": "Installers",
+            "name": "big-old-setup.exe"
+          },
+          {
+            "folder": "Videos/Family",
+            "name": "birthday.mov"
+          },
+          {
+            "folder": "Travel",
+            "name": "boarding-pass.png"
+          },
+          {
+            "folder": "Work",
+            "name": "Brand guide.pdf"
+          },
+          {
+            "folder": "Money & paperwork",
+            "name": "Budget 2026 (1).xlsx"
+          },
+          {
+            "folder": "Sort later",
+            "name": "clip-b.mp4"
+          },
+          {
+            "folder": "Sort later",
+            "name": "data.bin"
+          },
+          {
+            "folder": "Installers",
+            "name": "drivers.7z"
+          },
+          {
+            "folder": "Sort later",
+            "name": "export_1734"
+          },
+          {
+            "folder": "Sort later",
+            "name": "floorplan-v3.png"
+          },
+          {
+            "folder": "Installers",
+            "name": "fonts.zip"
+          },
+          {
+            "folder": "Photos/2025",
+            "name": "IMG_2041.jpg"
+          },
+          {
+            "folder": "Photos/2026",
+            "name": "IMG_3301.jpg"
+          },
+          {
+            "folder": "Photos/2025",
+            "name": "IMG_4471.jpg"
+          },
+          {
+            "folder": "Work",
+            "name": "logo-final.svg"
+          },
+          {
+            "folder": "Installers",
+            "name": "new-setup.exe"
+          },
+          {
+            "folder": "Money & paperwork",
+            "name": "old-lease.pdf"
+          },
+          {
+            "folder": "Installers",
+            "name": "old-setup.exe"
+          },
+          {
+            "folder": "Work",
+            "name": "resume-2025.docx"
+          },
+          {
+            "folder": "Screenshots",
+            "name": "screen-recording.mp4"
+          },
+          {
+            "folder": "Sort later",
+            "name": "small.png"
+          },
+          {
+            "folder": "Money & paperwork",
+            "name": "statement-2026-09.pdf"
+          },
+          {
+            "folder": "Audio",
+            "name": "voice-memo.m4a"
+          },
+          {
+            "folder": "Installers",
+            "name": "VSCodeUserSetup-x64.exe"
+          },
+          {
+            "folder": "Videos/Family",
+            "name": "Wedding highlights.mp4"
+          }
+        ],
+        "id": "tidy-downloads",
+        "note": "I grouped files by purpose (money, travel, work, photos, videos, installers, screenshots, audio) and put anything unclear into Sort later."
+      }
+    ],
+    "opened": []
+  },
+  "subtype": "success",
+  "type": "result"
+}

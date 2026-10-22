@@ -12,6 +12,7 @@ use ts_rs::TS;
 
 use crate::categorize::CategoryId;
 use crate::map::Overview;
+use crate::rules::ProposalSource;
 
 /// How a step ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -134,6 +135,10 @@ pub struct StepReport {
     /// Places the plan took files from.
     #[ts(type = "number")]
     pub places: u64,
+    /// Who proposed it: a built-in rule, or Claude (its own item, or for a sort, Claude's layout). Older reports
+    /// have only the rules'.
+    #[serde(default)]
+    pub source: ProposalSource,
     pub outcome: Outcome,
     /// What was left in place, and why.
     pub skipped: Vec<Skip>,
@@ -427,6 +432,10 @@ pub struct RunListing {
     pub cancelled: bool,
     /// The folders it reorganized, with whether each can still be undone.
     pub tidy: Vec<TidyListing>,
+    /// Steps Claude proposed (its own items, and sorts into Claude's layout), so Past runs can mark the run.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub claude_steps: u64,
 }
 
 impl From<&RunReport> for RunListing {
@@ -442,6 +451,11 @@ impl From<&RunReport> for RunListing {
             moved_items: r.moved_items,
             cancelled: r.cancelled,
             tidy: r.reorganized.iter().map(TidyListing::from).collect(),
+            claude_steps: r
+                .steps
+                .iter()
+                .filter(|s| s.source == ProposalSource::Claude)
+                .count() as u64,
         }
     }
 }
@@ -573,6 +587,7 @@ mod tests {
                 kind: StepKind::Delete,
                 moved_items: 0,
                 places: 1,
+                source: ProposalSource::Rule,
                 outcome: Outcome::Partial,
                 skipped: vec![Skip {
                     path: "C:\\x".into(),

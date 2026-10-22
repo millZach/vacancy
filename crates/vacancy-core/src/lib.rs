@@ -6,6 +6,7 @@
 
 pub mod advisor;
 mod categorize;
+pub mod claude;
 pub mod duplicates;
 mod exec;
 pub mod fast;

@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 use std::ffi::OsString;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -243,7 +243,25 @@ fn locate(search: &[PathBuf], name: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-fn run(mut command: Command, limits: Limits, cancel: &CancelToken) -> Output {
+fn run(command: Command, limits: Limits, cancel: &CancelToken) -> Output {
+    run_contained(command, limits, cancel, None, &mut |_| {})
+}
+
+/// Runs `command` in its own process tree (a kill-on-close job on Windows, a process group elsewhere), with both
+/// pipes drained and bounded, until it exits, `limits.timeout` passes or `cancel` is pressed; either of the last two
+/// kills the whole tree. `stdin`, if given, is written to the child's input from a thread of its own and then
+/// closed. `tick` hears the time elapsed about every 10 ms, for a caller's "slow" note. A program that can't be
+/// found ends [`Status::Missing`].
+pub(crate) fn run_contained(
+    mut command: Command,
+    limits: Limits,
+    cancel: &CancelToken,
+    stdin: Option<Vec<u8>>,
+    tick: &mut dyn FnMut(Duration),
+) -> Output {
+    if stdin.is_some() {
+        command.stdin(Stdio::piped());
+    }
     let tree = match process_tree::prepare(&mut command) {
         Ok(tree) => tree,
         Err(e) => {
@@ -252,6 +270,7 @@ fn run(mut command: Command, limits: Limits, cancel: &CancelToken) -> Output {
     };
     let mut child = match command.spawn() {
         Ok(child) => child,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Output::stopped(Status::Missing),
         Err(e) => return Output::stopped(Status::Refused(e.to_string())),
     };
     let _tree = match tree.attach(&child) {
@@ -262,6 +281,13 @@ fn run(mut command: Command, limits: Limits, cancel: &CancelToken) -> Output {
             return Output::stopped(Status::Refused(format!("Cannot contain tool process: {e}")));
         }
     };
+    if let (Some(bytes), Some(mut input)) = (stdin, child.stdin.take()) {
+        // A thread of its own: a long prompt fills the pipe before the child reads it. A child that exits early
+        // or is killed breaks the pipe, which ends the thread.
+        std::thread::spawn(move || {
+            let _ = input.write_all(&bytes);
+        });
+    }
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
     if let Err(e) = pipe::prepare(&stdout).and_then(|()| pipe::prepare(&stderr)) {
@@ -289,6 +315,7 @@ fn run(mut command: Command, limits: Limits, cancel: &CancelToken) -> Output {
         };
         // Captured buffers stop growing at the cap; discarded bytes are still useful drain progress.
         let progressed = out_read.bytes > 0 || err_read.bytes > 0;
+        tick(start.elapsed());
         let stop = if cancel.is_cancelled() {
             Some(Status::Cancelled)
         } else if start.elapsed() >= limits.timeout {

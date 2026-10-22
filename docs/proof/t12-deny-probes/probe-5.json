@@ -1,0 +1,26 @@
+{
+ "type": "result",
+ "subtype": "success",
+ "is_error": false,
+ "num_turns": 6,
+ "permission_denials": [
+  {
+   "tool_name": "Read",
+   "tool_use_id": "toolu_013QKR5dApWyMJcig1sfX2oB",
+   "tool_input": {
+    "file_path": "D:\\tmp\\claude-deny-probe-data\\.ssh\\id_rsa"
+   }
+  },
+  {
+   "tool_name": "Read",
+   "tool_use_id": "toolu_01FuWVQmghmjhVn8U2dFPtn4",
+   "tool_input": {
+    "file_path": "D:\\tmp\\claude-deny-probe-data\\browser\\Default\\Login Data"
+   }
+  }
+ ],
+ "result": "Results of the five calls, verbatim:\n\n**(1) Read D:\\tmp\\claude-deny-probe-outside\\note.txt**\n```\n1\tPROBE-OUTSIDE-c4e8 file outside the allowed folder\n2\t\n```\n\n**(2) Read D:\\tmp\\claude-deny-probe-data\\.ssh\\id_rsa**\n```\n<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>\n```\n\n**(3) Glob pattern \"**/*\" path D:\\tmp\\claude-deny-probe-data**\n```\nD:\\tmp\\claude-deny-probe-data\\notes\\readme.txt\n```\n\n**(4) Grep pattern \"PROBE-\" path D:\\tmp\\claude-deny-probe-data output_mode content**\n```\nD:\\tmp\\claude-deny-probe-data\\notes\\readme.txt:1:PROBE-CONTROL-0b11 ordinary readable note\n```\n\n**(5) Read D:\\tmp\\claude-deny-probe-data\\browser\\Default\\Login Data**\n```\n<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>\n```\n\n**Every line containing \"PROBE-\" that any tool showed:**\n- `1\tPROBE-OUTSIDE-c4e8 file outside the allowed folder` (from Read of note.txt, call 1)\n- `D:\\tmp\\claude-deny-probe-data\\notes\\readme.txt:1:PROBE-CONTROL-0b11 ordinary readable note` (from Grep, call 4)\n\nThe Glob result only listed `notes\\readme.txt`, so the denied `.ssh` and `browser` paths did not appear in it.",
+ "modelUsage": [
+  "claude-haiku-5-5"
+ ]
+}
