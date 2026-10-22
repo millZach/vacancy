@@ -17,7 +17,10 @@
     "wrapped-shots": "node tools/wrapped-shots.mjs",
     "dups-shots": "node tools/dups-shots.mjs",
     "tidy-shots": "node tools/tidy-shots.mjs",
-    "fast-shots": "node tools/fast-shots.mjs"
+    "fast-shots": "node tools/fast-shots.mjs",
+    "prototype:ai-advisor": "vite --config prototypes/ai-advisor/vite.config.ts",
+    "prototype:ai-advisor:check": "tsc --noEmit -p prototypes/ai-advisor/tsconfig.json",
+    "prototype:ai-advisor:build": "vite build --config prototypes/ai-advisor/vite.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/overpass": "^5.3.0",
