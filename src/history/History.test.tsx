@@ -42,7 +42,7 @@ it('reopens a saved move-only run with legacy advice without claiming no files m
   const r = moveAdviceReport;
   vi.spyOn(bridge, 'listRuns').mockResolvedValue({ unreadable: 0, runs: [{
     id: r.id, mountPoint: r.mountPoint, volumeName: r.volumeName, volumeId: r.map.volume.id,
-    startedAt: r.startedAt, freedBytes: 0, deletedItems: 0, movedItems: 4, cancelled: false, tidy: [],
+    startedAt: r.startedAt, freedBytes: 0, deletedItems: 0, movedItems: 4, cancelled: false, tidy: [], claudeSteps: 0,
   }] });
   vi.spyOn(bridge, 'openRun').mockResolvedValue(r);
   await openHistory();
@@ -61,7 +61,7 @@ it('opens a saved vendor reference after restart without scanning or accepting a
   }] };
   vi.spyOn(bridge, 'listRuns').mockResolvedValue({ unreadable: 0, runs: [{
     id: r.id, mountPoint: r.mountPoint, volumeName: r.volumeName, volumeId: r.map.volume.id,
-    startedAt: r.startedAt, freedBytes: 0, deletedItems: 0, movedItems: 0, cancelled: false, tidy: [],
+    startedAt: r.startedAt, freedBytes: 0, deletedItems: 0, movedItems: 0, cancelled: false, tidy: [], claudeSteps: 0,
   }] });
   vi.spyOn(bridge, 'openRun').mockResolvedValue(r);
   const scan = vi.spyOn(bridge, 'scan');

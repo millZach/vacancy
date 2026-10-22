@@ -11,8 +11,8 @@ export const plan: PlanSummary = {
   places: 67,
   moves: 0,
   steps: [
-    { id: 'w-node', title: 'node_modules in 61 idle projects', category: 'dev', bytes: 21 * GB, items: 412_118, places: 61, kind: 'delete', moves: 0 },
-    { id: 'w-browser', title: 'Browser caches', category: 'caches', bytes: 6.3 * GB, items: 48_310, places: 6, kind: 'delete', moves: 0 },
+    { id: 'w-node', title: 'node_modules in 61 idle projects', category: 'dev', bytes: 21 * GB, items: 412_118, places: 61, kind: 'delete', moves: 0, source: 'rule' },
+    { id: 'w-browser', title: 'Browser caches', category: 'caches', bytes: 6.3 * GB, items: 48_310, places: 6, kind: 'delete', moves: 0, source: 'rule' },
   ],
   refused: [],
   movesRefused: [],
@@ -62,6 +62,7 @@ export function stepReport(over: Partial<StepReport> & Pick<StepReport, 'id' | '
     kind: 'delete',
     movedItems: 0,
     places: 1,
+    source: 'rule',
     outcome: 'done',
     skipped: [],
     ...over,

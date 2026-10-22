@@ -130,7 +130,7 @@ const movePlan: PlanSummary = {
   items: 0,
   places: 0,
   moves: 186,
-  steps: [{ id: 'tidy-downloads', title: 'Sort Downloads', category: 'downloads', bytes: 0, items: 0, places: 0, kind: 'move', moves: 186 }],
+  steps: [{ id: 'tidy-downloads', title: 'Sort Downloads', category: 'downloads', bytes: 0, items: 0, places: 0, kind: 'move', moves: 186, source: 'rule' }],
   refused: [],
   movesRefused: [],
   leftForYou: [],
@@ -169,7 +169,7 @@ describe('a plan with moves', () => {
       cancelled: false,
       steps: [{
         id: 'tidy-downloads', title: 'Sort Downloads', why: '', category: 'downloads', regenerable: false,
-        plannedBytes: 0, freedBytes: 0, plannedItems: 186, deletedItems: 0, kind: 'move', movedItems: 185, places: 0,
+        plannedBytes: 0, freedBytes: 0, plannedItems: 186, deletedItems: 0, kind: 'move', movedItems: 185, places: 0, source: 'rule',
         outcome: 'partial', skipped: [skip],
       }],
       plannedBytes: 0,

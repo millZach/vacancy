@@ -1,4 +1,5 @@
 import type { Fixture, PastRun, RunSkip } from './fixtures';
+import { createMockClaude, type MockClaudeOptions } from './mockClaude';
 import { coverDuplicates, DUPLICATES, mockDuplicates, type MockDuplicates } from './mockDuplicates';
 import { askingUpdate, fallbackFor, fastOverview, fastUpdate, UAC_MS, type MockFast } from './mockFast';
 import { makePlan, mockUndo, pastReport, play, type MockPlan, type Playback } from './mockRun';
@@ -20,7 +21,7 @@ import type {
   VolumeInfo,
 } from './types';
 
-export interface MockOptions {
+export interface MockOptions extends MockClaudeOptions {
   /** Advisor-only browser preview: native fixture bypass, or a failed read. Never enables a provider. */
   advisor?: 'notChecked' | 'error';
   /** Answer after this many milliseconds, to see loading states. Default: next tick. */
@@ -103,8 +104,20 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
    */
   const mapped = new Map<
     string,
-    { map: Overview; proposals: Proposal[]; skips: RunSkip[]; tidy: TidyProposal[]; dups: MockDuplicates | null }
+    {
+      map: Overview;
+      proposals: Proposal[];
+      skips: RunSkip[];
+      tidy: TidyProposal[];
+      dups: MockDuplicates | null;
+      /** Each sort's layout not in use, once the mock Claude has suggested one. */
+      others: TidyProposal[];
+    }
   >();
+  // Claude answers from the drive's scan, and changes it the way the core does (its items, its layouts).
+  const claude = createMockClaude(fixture.platform, options, (mountPoint) =>
+    ran.has(mountPoint) ? null : (mapped.get(mountPoint) ?? null),
+  );
   /** The mock duplicate finder running now, on one drive. */
   let finding: { mountPoint: string; timer: number; finish: (outcome: DuplicatesOutcome) => void } | null = null;
   const stopFinding = (mountPoint?: string) => {
@@ -182,7 +195,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
           if (running) clearInterval(running.timer);
           running = null;
           if (outcome.status === 'done')
-            mapped.set(mountPoint, { map: structuredClone(map), proposals: structuredClone(proposals), skips, tidy, dups: null });
+            mapped.set(mountPoint, { map: structuredClone(map), proposals: structuredClone(proposals), skips, tidy, dups: null, others: [] });
           resolve(outcome);
         };
         const tick = () => {
@@ -330,6 +343,14 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
     // Browser fixtures never open host apps or claim an external launch succeeded.
     openHint: () => failure('External advice can’t be opened from this fixture preview. No app was launched.'),
     openGuide: () => failure('Vendor references can’t be opened from this fixture preview. No app was launched.'),
+    claudeStatus: () => (options.fail !== undefined ? failure(options.fail) : claude.status()),
+    claudeSetEnabled: (on) => claude.setEnabled(on),
+    claudeSetPrivacy: (on) => claude.setPrivacy(on),
+    claudeStart: (mountPoint, job, onEvent) => claude.start(mountPoint, job, onEvent),
+    claudeChat: (mountPoint, about, messages, onEvent) => claude.chat(mountPoint, about, messages, onEvent),
+    claudeCancel: (requestId) => claude.cancel(requestId),
+    claudeChooseLayout: (mountPoint, tidyId, layout) => claude.chooseLayout(mountPoint, tidyId, layout),
+    claudeRemoveItems: (mountPoint, ids) => claude.removeItems(mountPoint, ids),
     unplug,
   };
 }
@@ -353,6 +374,7 @@ function listing(r: RunReport): RunListing {
     deletedItems: r.deletedItems,
     movedItems: r.movedItems,
     cancelled: r.cancelled,
+    claudeSteps: r.steps.filter((s) => s.source === 'claude').length,
     tidy: r.reorganized.map((m) => ({
       id: m.id,
       folder: m.folder,

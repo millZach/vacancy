@@ -58,6 +58,28 @@ import type { TidyProposal } from '../bindings/TidyProposal';
 import type { TidyStay } from '../bindings/TidyStay';
 import type { TidySubfolder } from '../bindings/TidySubfolder';
 import type { Undone } from '../bindings/Undone';
+import type { ClaudeAbout } from '../bindings/ClaudeAbout';
+import type { ClaudeAnswer } from '../bindings/ClaudeAnswer';
+import type { ClaudeBasis } from '../bindings/ClaudeBasis';
+import type { ClaudeChange } from '../bindings/ClaudeChange';
+import type { ClaudeChangeKind } from '../bindings/ClaudeChangeKind';
+import type { ClaudeDropped } from '../bindings/ClaudeDropped';
+import type { ClaudeEvent } from '../bindings/ClaudeEvent';
+import type { ClaudeFailure } from '../bindings/ClaudeFailure';
+import type { ClaudeFine } from '../bindings/ClaudeFine';
+import type { ClaudeFlag } from '../bindings/ClaudeFlag';
+import type { ClaudeFolderNote } from '../bindings/ClaudeFolderNote';
+import type { ClaudeHidden } from '../bindings/ClaudeHidden';
+import type { ClaudeHiddenGroup } from '../bindings/ClaudeHiddenGroup';
+import type { ClaudeJob } from '../bindings/ClaudeJob';
+import type { ClaudeJobKind } from '../bindings/ClaudeJobKind';
+import type { ClaudeMessage } from '../bindings/ClaudeMessage';
+import type { ClaudeRefreshed } from '../bindings/ClaudeRefreshed';
+import type { ClaudeResult } from '../bindings/ClaudeResult';
+import type { ClaudeSpeaker } from '../bindings/ClaudeSpeaker';
+import type { ClaudeState } from '../bindings/ClaudeState';
+import type { ClaudeStatus } from '../bindings/ClaudeStatus';
+import type { TidyLayout } from '../bindings/TidyLayout';
 
 export type {
   AdvisorStatus,
@@ -119,6 +141,28 @@ export type {
   TidyStay,
   TidySubfolder,
   Undone,
+  ClaudeAbout,
+  ClaudeAnswer,
+  ClaudeBasis,
+  ClaudeChange,
+  ClaudeChangeKind,
+  ClaudeDropped,
+  ClaudeEvent,
+  ClaudeFailure,
+  ClaudeFine,
+  ClaudeFlag,
+  ClaudeFolderNote,
+  ClaudeHidden,
+  ClaudeHiddenGroup,
+  ClaudeJob,
+  ClaudeJobKind,
+  ClaudeMessage,
+  ClaudeRefreshed,
+  ClaudeResult,
+  ClaudeSpeaker,
+  ClaudeState,
+  ClaudeStatus,
+  TidyLayout,
 };
 
 /** Which desktop the UI is running on. It decides the window chrome (macOS draws traffic lights over the header). */
@@ -209,4 +253,44 @@ export interface Bridge {
   openHint(mountPoint: string, proposalId: string): Promise<void>;
   /** Opens a compiled vendor reference, including from history with no current scan. */
   openGuide(guide: GuideId): Promise<void>;
+
+  // Live Claude (ADR 0008), through the user's own Claude Code. Claude proposes; it never executes. Everything it adds
+  // is a proposal with `source: 'claude'`, unticked, risk Review, that passed the Guard; `dropped` names what didn't.
+
+  /**
+   * Claude's status: `notFound` (no Claude Code on this computer), `off` (the default: nothing is sent), `signedOut`
+   * (on, but Claude Code isn't signed in) or `on`; privacy mode; whether this is fixture mode (reads confined to the
+   * fixture); and what always stays hidden, for the privacy screens. Looks for Claude Code again each time.
+   */
+  claudeStatus(): Promise<ClaudeStatus>;
+  /** Turns Claude on (after the privacy notice) or off. Off stops running requests; Claude's items stay in the plan. */
+  claudeSetEnabled(on: boolean): Promise<ClaudeStatus>;
+  /** Turns privacy mode on or off (confirm before turning it off). Remembered, also while Claude is off. */
+  claudeSetPrivacy(on: boolean): Promise<ClaudeStatus>;
+  /**
+   * Starts a job on a drive's last scan and resolves with its request id at once. `onEvent` then hears `working`,
+   * `slow` (still running after 20 s), and `done` with the checked answer or `failed` with why (`notFound`,
+   * `signedOut`, `timedOut` after 180 s, `cancelled`, or `error` with Claude's text, such as a rate limit). A `done`
+   * answer that changed the map carries `refreshed`: the overview, proposals and Tidy up sorts to show from now on.
+   */
+  claudeStart(mountPoint: string, job: ClaudeJob, onEvent: (event: ClaudeEvent) => void): Promise<string>;
+  /**
+   * Sends a chat message about one proposal or folder: `claudeStart` with the `ask` job. Nothing is kept between
+   * turns, so pass the whole conversation so far, the person's newest message last (it is capped).
+   */
+  claudeChat(
+    mountPoint: string,
+    about: ClaudeAbout,
+    messages: ClaudeMessage[],
+    onEvent: (event: ClaudeEvent) => void,
+  ): Promise<string>;
+  /** Stops a running request (its Claude Code is killed); it ends `failed` with `cancelled`. */
+  claudeCancel(requestId: string): Promise<void>;
+  /**
+   * Picks the layout a Tidy up sort (`tidy-downloads`...) uses from now on: `builtin`, or `claude` once Claude has
+   * suggested one (a `tidyLayout` answer). Resolves with the sorts in use. Windows only.
+   */
+  claudeChooseLayout(mountPoint: string, tidyId: string, layout: TidyLayout): Promise<TidyProposal[]>;
+  /** Takes Claude's items `ids` back out of the drive's proposals (Keep mine). Rejects for a rule's item. */
+  claudeRemoveItems(mountPoint: string, ids: string[]): Promise<ClaudeRefreshed>;
 }

@@ -135,6 +135,7 @@ export function makePlan(
       places: s.places.length,
       kind: 'delete' as const,
       moves: 0,
+      source: s.proposal.source,
     })),
     ...sorts.map((s) => ({
       id: s.tidy.id,
@@ -145,6 +146,7 @@ export function makePlan(
       places: 0,
       kind: 'move' as const,
       moves: s.moves.length,
+      source: s.tidy.layout === 'claude' ? ('claude' as const) : ('rule' as const),
     })),
   ];
   const advice = chosen
@@ -321,6 +323,7 @@ export function play(
       kind: 'delete',
       movedItems: 0,
       places: step.places.length,
+      source: p.source,
       outcome: left.length === 0 ? 'done' : stepFreed > 0 ? 'partial' : 'skipped',
       skipped,
     };
@@ -406,7 +409,10 @@ export function play(
     const report: StepReport = {
       id: sort.tidy.id,
       title: `Sort ${sort.tidy.name}`,
-      why: `Loose files at the top of ${sort.tidy.name} sorted into folders by kind and year, by Vacancy’s built-in rules. Moved, not deleted.`,
+      why:
+        sort.tidy.layout === 'claude'
+          ? `Loose files at the top of ${sort.tidy.name} sorted into the folders Claude suggested. Moved, not deleted.`
+          : `Loose files at the top of ${sort.tidy.name} sorted into folders by kind and year, by Vacancy’s built-in rules. Moved, not deleted.`,
       category: sort.tidy.folder === 'downloads' ? 'downloads' : 'media',
       regenerable: false,
       plannedBytes: 0,
@@ -416,6 +422,7 @@ export function play(
       kind: 'move',
       movedItems: moved,
       places: 0,
+      source: sort.tidy.layout === 'claude' ? 'claude' : 'rule',
       outcome: sortSkips.length === 0 ? 'done' : moved > 0 ? 'partial' : 'skipped',
       skipped: sortSkips,
     };
@@ -600,6 +607,7 @@ export function pastReport(id: string, plan: MockPlan, volume: VolumeInfo, start
       kind: 'delete',
       movedItems: 0,
       places: step.places.length,
+      source: p.source,
       outcome: left.length === 0 && step.refused.length === 0 ? 'done' : freed > 0 ? 'partial' : 'skipped',
       skipped: [...step.refused, ...found],
     };

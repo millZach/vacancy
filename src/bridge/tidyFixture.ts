@@ -83,6 +83,8 @@ function build(home: string, spec: FolderSpec): TidyProposal {
     limit: 512,
     capped: false,
     later: 0,
+    layout: 'builtin',
+    note: null,
   };
 }
 

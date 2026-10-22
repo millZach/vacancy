@@ -201,6 +201,7 @@ describe('the mock bridge', () => {
         movedItems: 0,
         cancelled: false,
         tidy: [],
+        claudeSteps: 0,
       });
       expect(await bridge.openRun(report.id)).toEqual(report);
       expect(report.map.volume.mountPoint).toBe('C:\\');

@@ -50,9 +50,9 @@ risk: Risk,
  */
 source: ProposalSource, 
 /**
- * What the AI agent said, for AI proposals.
+ * What Claude said about it, for Claude's proposals ("Suggested by Claude: ...").
  */
-aiNote: string | null, 
+claudeNote: string | null, 
 /**
  * What carrying it out does.
  */

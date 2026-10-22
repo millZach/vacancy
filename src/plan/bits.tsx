@@ -13,13 +13,13 @@ export function RiskChip({ risk }: { risk: Risk }) {
   );
 }
 
-/** Who proposed it: a built-in rule, or the AI agent (ticket 07). */
+/** Who proposed it: a built-in rule, or Claude (ADR 0008). */
 export function SourceTag({ source, agent }: { source: ProposalSource; agent: string | null }) {
-  if (source === 'ai')
+  if (source === 'claude')
     return (
       <span className="source source--ai">
         <Sparkles size={11} strokeWidth={2.2} aria-hidden />
-        Suggested by {agent ?? 'your AI agent'}
+        Suggested by {agent ?? 'Claude'}
       </span>
     );
   return <span className="source">Built-in rule</span>;

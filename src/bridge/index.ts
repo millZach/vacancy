@@ -9,10 +9,14 @@
 // index (`&fast=ok`, the default); `&fast=declined` answers Windows' admin prompt No, `&fast=failed` has the helper
 // not start and `&fast=unreadable` has the index unreadable, each running the normal scan with its note; `&uac=3000`
 // keeps the mock's prompt up three seconds (default 1.2). `&advisor=notChecked` previews
-// native fixture bypass; `&advisor=error` fails only the advisor status read. These browser fixtures never enable AI.
+// native fixture bypass; `&advisor=error` fails only the advisor status read (the old status dialog). Live Claude's
+// mock: `&claude=off` (the default: off until turned on), `notfound`, `signedout`, `on`, `slow` (answers take 8 s,
+// slow after 1.5 s), `error` (a rate limit) or `timeout`; `&privacy=off` starts with privacy mode off; and
+// `&claudeMs=3000` makes answers take three seconds (default 0.9). The mock never calls Claude.
 import { isTauri } from '@tauri-apps/api/core';
 import { fixtures, isFixtureName } from './fixtures';
 import { createMockBridge } from './mock';
+import { MOCK_CLAUDE_STATES } from './mockClaude';
 import { createTauriBridge } from './tauri';
 import type { Bridge, FullDiskAccess } from './types';
 
@@ -42,6 +46,9 @@ export function defaultBridge(search = window.location.search): Bridge {
   const advisor = ADVISOR_PREVIEW.find((a) => a === q.get('advisor'));
   const fast = FAST.find((f) => f === q.get('fast'));
   const uac = q.get('uac');
+  const claude = MOCK_CLAUDE_STATES.find((s) => s === q.get('claude'));
+  const privacy = q.get('privacy');
+  const claudeMs = q.get('claudeMs');
   return createMockBridge(fixtures[isFixtureName(name) ? name : 'windows'], {
     ...(delay > 0 ? { delayMs: delay } : {}),
     ...(fail !== null ? { fail } : {}),
@@ -56,5 +63,8 @@ export function defaultBridge(search = window.location.search): Bridge {
     ...(advisor ? { advisor } : {}),
     ...(fast ? { fast } : {}),
     ...(uac !== null && Number.isFinite(Number(uac)) ? { uacMs: Number(uac) } : {}),
+    ...(claude ? { claude } : {}),
+    ...(privacy === 'on' || privacy === 'off' ? { privacy } : {}),
+    ...(claudeMs !== null && Number.isFinite(Number(claudeMs)) ? { claudeMs: Number(claudeMs) } : {}),
   });
 }
