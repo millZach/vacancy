@@ -205,7 +205,7 @@ function PanelOn(p: OnProps) {
   const about = c.entries.find((e): e is ChatEntry => e.kind === 'chat' && e.id === c.about) ?? null;
   const running = (job: JobKind) => c.entries.some((e) => e.kind === 'job' && e.job === job && (e.phase === 'working' || e.phase === 'slow'));
   const chip = (job: JobKind) => (
-    <button type="button" className="cl-chip" onClick={() => claude.start(scope, job)} disabled={running(job)}>
+    <button type="button" className="cl-chip" onClick={() => claude.start(scope, job)} disabled={running(job) || claude.privacyChanging}>
       {ASKED[job]}
     </button>
   );
@@ -250,7 +250,7 @@ function PanelOn(p: OnProps) {
         </div>
         <Composer
           key={about?.id ?? 'none'}
-          disabled={!about || about.turns.length < 2 || aboutBusy}
+          disabled={!about || about.turns.length < 2 || aboutBusy || claude.privacyChanging}
           placeholder={about ? `Ask about ${about.name}` : 'Ask Claude about a row or a folder first'}
           onSend={(q) => about && claude.ask(scope, about.about, about.name, q)}
         >

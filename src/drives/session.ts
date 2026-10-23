@@ -54,6 +54,10 @@ export type DriveScan =
       phase: 'done';
       /** Which scan this is (see `scanStarted`): the duplicate search of an earlier scan never lands on it. */
       run: number;
+      /** The core's id for this scan (`ScanOutcome`'s `scan`), which every Claude command about it names. */
+      scan: number;
+      /** The newest `ClaudeRefreshed.revision` shown: an older one, arriving late, is ignored. */
+      claudeRevision: number;
       overview: Overview;
       /** The cleanups proposed for this drive, biggest first. */
       proposals: Proposal[];
@@ -135,7 +139,8 @@ export type Action =
   | { type: 'skipGroup'; mountPoint: string; id: string; skipped: boolean }
   /**
    * Claude's answer about the scan `run` changed the map (its own items, unticked, or a layout): the map, proposals
-   * and sorts to show from now on. The plan keeps what is still there.
+   * and sorts to show from now on, unless a newer one (a higher `revision`) is already shown. The plan keeps what is
+   * still there.
    */
   | { type: 'claudeApplied'; mountPoint: string; run: number; refreshed: ClaudeRefreshed }
   /**
@@ -143,8 +148,6 @@ export type Action =
    * while the plan is still at that version: an edit made meanwhile is never overwritten.
    */
   | { type: 'setPlan'; mountPoint: string; run: number; ids: string[]; from?: number }
-  /** The sorts of the scan `run` after a layout was picked for one of them. */
-  | { type: 'tidyChosen'; mountPoint: string; run: number; tidy: TidyProposal[] }
   /** The user confirmed the plan and it started: drive switching and scanning wait until it ends. */
   | { type: 'runStarted'; mountPoint: string; plan: PlanSummary }
   /** What the run did since the last batch, in order. */
@@ -320,6 +323,8 @@ export function reduce(s: Session, a: Action): Session {
           ? {
               phase: 'done',
               run: a.run,
+              scan: a.outcome.scan,
+              claudeRevision: 0,
               overview: a.outcome.overview,
               proposals: a.outcome.proposals,
               tidy: a.outcome.tidy,
@@ -382,12 +387,14 @@ export function reduce(s: Session, a: Action): Session {
     }
     case 'claudeApplied':
       return onScan(s, a.mountPoint, a.run, (scan) => {
+        if (a.refreshed.revision <= scan.claudeRevision) return scan;
         const ids = new Set([...a.refreshed.proposals.map((p) => p.id), ...a.refreshed.tidy.map((t) => t.id)]);
         return {
           ...withPlan(scan, scan.plan.filter((id) => ids.has(id))),
           overview: a.refreshed.overview,
           proposals: a.refreshed.proposals,
           tidy: a.refreshed.tidy,
+          claudeRevision: a.refreshed.revision,
         };
       });
     case 'setPlan':
@@ -396,8 +403,6 @@ export function reduce(s: Session, a: Action): Session {
         const known = (id: string) => scan.proposals.some((p) => p.id === id) || scan.tidy.some((t) => t.id === id);
         return withPlan(scan, [...new Set(a.ids)].filter(known));
       });
-    case 'tidyChosen':
-      return onScan(s, a.mountPoint, a.run, (scan) => ({ ...scan, tidy: a.tidy }));
     case 'runStarted': {
       if (s.locked || a.plan.mountPoint !== a.mountPoint) return s;
       const next = onPlanRun(s, a.mountPoint, (run) =>

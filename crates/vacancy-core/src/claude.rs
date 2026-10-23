@@ -16,12 +16,14 @@
 //! applied to the scan afterwards (the caller checks it is still the same scan).
 //!
 //! What Claude said with privacy mode off can come from files it read, so it never goes back to Claude with privacy
-//! mode on: each chat turn carries the mode it was made in, and the scan keeps a record ([`PrivacyOff`]) of the
-//! replies and items Claude gave with privacy mode off. A call with privacy mode on refuses a chat that holds any of
-//! them, and sends such an item by its name in the scan only, without what Claude said about it.
+//! mode on. The core owns every chat ([`Chats`], per scan): the UI sends only a chat's id and the new question. A
+//! chat keeps the privacy mode it began in, and each of its turns the mode it was made in; a privacy change (or
+//! Claude turned off) ends every chat, and a question to an ended chat is refused ([`Failure::ChatEnded`]), so a
+//! prompt only ever holds turns made in its own mode. The scan also keeps which of Claude's items were made with
+//! privacy mode off ([`PrivacyOff`]): a call with it on sends such an item by its name in the scan only, without
+//! what Claude said about it.
 
-use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -40,7 +42,7 @@ pub mod runner;
 pub mod settings;
 
 pub use fake::FakeClaude;
-pub use jobs::{PRIVACY_TURNS, Prepared, SYSTEM, apply, prepare, remove_items, run};
+pub use jobs::{Prepared, SYSTEM, apply, prepare, remove_items, run};
 pub use runner::{Access, Call, ClaudeCode, Cli, Control, Failure, Progress, Reply};
 pub use settings::Settings;
 
@@ -113,9 +115,9 @@ impl Status {
                         runner::AUTH_TIMEOUT.as_secs()
                     )),
                 ),
-                Err(failure @ (Failure::Cancelled | Failure::Error { .. })) => {
-                    (State::CheckFailed, Some(failure.to_string()))
-                }
+                Err(
+                    failure @ (Failure::Cancelled | Failure::ChatEnded | Failure::Error { .. }),
+                ) => (State::CheckFailed, Some(failure.to_string())),
             }
         };
         Self {
@@ -137,12 +139,9 @@ pub enum Job {
     ReviewPlan { ids: Vec<String> },
     /// Let Claude pick: ticks and unticks among the scan's proposals (the plan is `ids` now), and may add its own.
     PickPlan { ids: Vec<String> },
-    /// Ask Claude about one proposal or folder. The whole conversation so far, the person's newest message last;
-    /// nothing is kept between turns, so it is sent again each time (capped).
-    Ask {
-        about: About,
-        messages: Vec<Message>,
-    },
+    /// Ask Claude the person's newest question `text` in the chat `conversation` (from [`Chats::open`]). The core
+    /// sends the chat's turns so far with it (capped); the UI never sends them.
+    Ask { conversation: String, text: String },
     /// Explain the biggest folders the rules don't recognize, with anything removable in them.
     ExplainFolders,
     /// Suggest Tidy up layouts for these sorts (`tidy-downloads`...); all of them when empty. Windows only.
@@ -187,51 +186,124 @@ pub enum About {
     Folder { path: String },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, rename = "ClaudeSpeaker")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Speaker {
     Person,
     Claude,
 }
 
-/// One message of a chat.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, rename = "ClaudeMessage")]
+/// One turn of a chat, as the core keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Message {
     pub from: Speaker,
     pub text: String,
-    /// Privacy mode when the message was made: a call with privacy mode on never sends one made with it off.
+    /// Privacy mode when the turn was made. Every turn of a chat has its chat's mode: a privacy change ends it.
     pub privacy: bool,
 }
 
-/// What Claude gave about one scan with privacy mode off, which may come from files it read: its chat replies (by
-/// fingerprint) and its own items. A call with privacy mode on never sends them back to Claude.
+/// One chat about a proposal or folder, as the core keeps it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Chat {
+    about: About,
+    /// The privacy mode the chat began in. Only questions asked in it are sent in it.
+    privacy: bool,
+    /// The questions answered so far, each with Claude's reply, oldest first.
+    turns: Vec<Message>,
+    /// A privacy change, or Claude turned off, ended it: nothing more is sent in it.
+    ended: bool,
+}
+
+/// The chats about one scan: the core keeps them, each by an id it gives out, so the UI sends only a chat's id and
+/// the person's newest question. A chat holds the privacy mode it began in and only turns made in that mode; a
+/// question in another mode, or to a chat that has ended, is refused with [`Failure::ChatEnded`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Chats {
+    next: u64,
+    chats: HashMap<String, Chat>,
+}
+
+impl Chats {
+    /// Begins a chat about `about` with privacy mode `privacy`, and gives its id.
+    pub fn open(&mut self, about: About, privacy: bool) -> String {
+        self.next += 1;
+        let id = format!("chat-{}", self.next);
+        self.chats.insert(
+            id.clone(),
+            Chat {
+                about,
+                privacy,
+                turns: Vec::new(),
+                ended: false,
+            },
+        );
+        id
+    }
+
+    /// Ends every chat: privacy mode changed, or Claude was turned off.
+    pub fn end_all(&mut self) {
+        for chat in self.chats.values_mut() {
+            chat.ended = true;
+        }
+    }
+
+    /// What chat `id` is about and its turns so far, to ask a question in with privacy mode `privacy`. Refused if
+    /// there is no such chat, it has ended, or it began in the other mode.
+    pub(crate) fn asking(&self, id: &str, privacy: bool) -> Result<(&About, &[Message]), Failure> {
+        match self.chats.get(id) {
+            Some(chat)
+                if !chat.ended
+                    && chat.privacy == privacy
+                    && chat.turns.iter().all(|t| t.privacy == privacy) =>
+            {
+                Ok((&chat.about, &chat.turns))
+            }
+            _ => Err(Failure::ChatEnded),
+        }
+    }
+
+    /// The question `question`, asked in chat `id` with privacy mode `privacy`, was answered with `reply`: both
+    /// join its turns. Refused, keeping nothing, if the chat ended (or its mode changed) meanwhile.
+    pub(crate) fn answered(
+        &mut self,
+        id: &str,
+        privacy: bool,
+        question: String,
+        reply: String,
+    ) -> Result<(), Failure> {
+        self.asking(id, privacy)?;
+        let chat = self.chats.get_mut(id).ok_or(Failure::ChatEnded)?;
+        chat.turns.push(Message {
+            from: Speaker::Person,
+            text: question,
+            privacy,
+        });
+        chat.turns.push(Message {
+            from: Speaker::Claude,
+            text: reply,
+            privacy,
+        });
+        Ok(())
+    }
+}
+
+/// What Claude's jobs keep with one scan: its chats, which of its items were made with privacy mode off, and how
+/// many times the map was given out again since the scan.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OnScan {
+    pub chats: Chats,
+    pub off: PrivacyOff,
+    /// The last [`Refreshed::revision`] given out.
+    revision: u64,
+}
+
+/// Which of Claude's items about one scan were made with privacy mode off, from files it may have read. A call with
+/// privacy mode on sends such an item by its name in the scan only, never what Claude said about it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PrivacyOff {
-    replies: HashSet<u64>,
     items: HashSet<String>,
 }
 
 impl PrivacyOff {
-    /// A chat text's fingerprint, as a prompt would send it (trimmed, and as long as a sent message is at most).
-    fn key(text: &str) -> u64 {
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        let kept: String = text.trim().chars().take(jobs::MAX_MESSAGE_CHARS).collect();
-        kept.trim().hash(&mut h);
-        h.finish()
-    }
-
-    pub(crate) fn reply(&mut self, text: &str) {
-        self.replies.insert(Self::key(text));
-    }
-
-    /// Whether `text` is a reply Claude gave with privacy mode off.
-    pub fn said(&self, text: &str) -> bool {
-        self.replies.contains(&Self::key(text))
-    }
-
     /// Claude's item `id` was made with privacy mode off (`off`), or on.
     pub(crate) fn item(&mut self, id: &str, off: bool) {
         if off {
@@ -385,6 +457,10 @@ pub enum JobResult {
 #[serde(rename_all = "camelCase")]
 #[ts(export, rename = "ClaudeRefreshed")]
 pub struct Refreshed {
+    /// Goes up by one each time the scan's map is given out again: the UI shows only the newest, so a slow answer
+    /// never puts back a map that a later change replaced.
+    #[ts(type = "number")]
+    pub revision: u64,
     pub overview: Box<Overview>,
     pub proposals: Vec<Proposal>,
     /// The Tidy up sorts in use.
@@ -394,14 +470,26 @@ pub struct Refreshed {
 }
 
 impl Refreshed {
-    pub fn of(scanned: &ScannedVolume) -> Self {
+    /// The scan's map, proposals and sorts as they are now, with the next revision.
+    pub fn of(scanned: &mut ScannedVolume) -> Self {
+        scanned.claude.revision += 1;
         Self {
+            revision: scanned.claude.revision,
             overview: Box::new(scanned.overview.clone()),
             proposals: scanned.proposals.list().to_vec(),
             tidy: scanned.tidy.proposals(),
             tidy_others: scanned.tidy.others(),
         }
     }
+}
+
+/// A chat question sent: its request (as [`Event`]s name it) and the chat it is in, new or not.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename = "ClaudeChatStarted")]
+pub struct ChatStarted {
+    pub request_id: String,
+    pub conversation: String,
 }
 
 /// Claude's answer to a job, checked.

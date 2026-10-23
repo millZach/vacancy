@@ -1,5 +1,5 @@
 import { createContext, use } from 'react';
-import type { ClaudeRefreshed, FullDiskAccess, PlanSummary, RunReport, TidyProposal, VolumeInfo } from '../bridge';
+import type { ClaudeRefreshed, FullDiskAccess, PlanSummary, RunReport, VolumeInfo } from '../bridge';
 import type { DriveScan, Gone, Screen } from './session';
 
 /** The drives, this computer's name and (on macOS) whether Vacancy can see everything, once they are known. */
@@ -49,7 +49,8 @@ export interface ReadyDrives {
   setGroupSkipped: (id: string, skipped: boolean) => void;
   /**
    * Claude's answer about a drive's scan `run` changed its map (its own items, unticked, or a layout): shows the map,
-   * proposals and sorts it sent. Ignored once that scan has been replaced or has run its plan.
+   * proposals and sorts it sent. Ignored once that scan has been replaced or has run its plan, and for a map older
+   * than the one shown (a lower `revision`: a slow reply never puts back what a later change replaced).
    */
   claudeApplied: (mountPoint: string, run: number, refreshed: ClaudeRefreshed) => void;
   /**
@@ -57,8 +58,6 @@ export interface ReadyDrives {
    * only while the plan is still at that version (`planVersion`): an edit made meanwhile is never overwritten.
    */
   setPlan: (mountPoint: string, run: number, ids: string[], from?: number) => void;
-  /** A drive's sorts for its scan `run`, after a layout was picked for one of them. */
-  setTidy: (mountPoint: string, run: number, tidy: TidyProposal[]) => void;
   /** While a plan runs, switching drives is disabled. `runPlan` sets it; this is for anything else that must hold. */
   setRunning: (running: boolean) => void;
   /**

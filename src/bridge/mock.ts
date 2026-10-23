@@ -1,5 +1,5 @@
 import type { Fixture, PastRun, RunSkip } from './fixtures';
-import { createMockClaude, type MockClaudeOptions } from './mockClaude';
+import { createMockClaude, type MockClaudeOptions, type MockClaudeScan } from './mockClaude';
 import { coverDuplicates, DUPLICATES, mockDuplicates, type MockDuplicates } from './mockDuplicates';
 import { askingUpdate, fallbackFor, fastOverview, fastUpdate, UAC_MS, type MockFast } from './mockFast';
 import { makePlan, mockUndo, pastReport, play, type MockPlan, type Playback } from './mockRun';
@@ -11,13 +11,11 @@ import type {
   FastFallback,
   DuplicatesOutcome,
   MapFolder,
-  Overview,
   Proposal,
   RunListing,
   RunReport,
   ScanOutcome,
   ScanUpdate,
-  TidyProposal,
   VolumeInfo,
 } from './types';
 
@@ -104,20 +102,20 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
    */
   const mapped = new Map<
     string,
-    {
-      map: Overview;
-      proposals: Proposal[];
+    MockClaudeScan & {
       skips: RunSkip[];
-      tidy: TidyProposal[];
       dups: MockDuplicates | null;
-      /** Each sort's layout not in use, once the mock Claude has suggested one. */
-      others: TidyProposal[];
     }
   >();
-  // Claude answers from the drive's scan, and changes it the way the core does (its items, its layouts).
-  const claude = createMockClaude(fixture.platform, options, (mountPoint) =>
-    ran.has(mountPoint) ? null : (mapped.get(mountPoint) ?? null),
-  );
+  /** The last scan id given out, on any drive: each finished scan gets the next, as the core's generations go. */
+  let scans = 0;
+  // Claude answers from the drive's scan `scan` only, and changes it the way the core does (its items, its layouts).
+  const claude = createMockClaude(fixture.platform, options, (mountPoint, scan) => {
+    const s = mapped.get(mountPoint);
+    return ran.has(mountPoint) || s?.scan !== scan ? null : s;
+  }, () => {
+    for (const s of mapped.values()) for (const c of s.chats.values()) c.ended = true;
+  });
   /** The mock duplicate finder running now, on one drive. */
   let finding: { mountPoint: string; timer: number; finish: (outcome: DuplicatesOutcome) => void } | null = null;
   const stopFinding = (mountPoint?: string) => {
@@ -190,12 +188,23 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
       // A fast scan takes half the time of a normal one here, so its stages can still be watched.
       const total = (options.scanMs ?? 4000) * (fast ? 0.5 : 1);
       const started = Date.now();
+      const scan = ++scans;
       return new Promise<ScanOutcome>((resolve) => {
         const finish = (outcome: ScanOutcome) => {
           if (running) clearInterval(running.timer);
           running = null;
           if (outcome.status === 'done')
-            mapped.set(mountPoint, { map: structuredClone(map), proposals: structuredClone(proposals), skips, tidy, dups: null, others: [] });
+            mapped.set(mountPoint, {
+              scan,
+              map: structuredClone(map),
+              proposals: structuredClone(proposals),
+              skips,
+              tidy,
+              dups: null,
+              others: [],
+              revision: 0,
+              chats: new Map(),
+            });
           resolve(outcome);
         };
         const tick = () => {
@@ -206,7 +215,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
           }
           const t = total <= 0 ? 1 : Math.min(1, (elapsed - asking) / total);
           onUpdate(fast ? fastUpdate(map, t, elapsed) : { ...update(map, ticker, t, elapsed), fallback });
-          if (t >= 1) finish({ status: 'done', overview: map, proposals, tidy });
+          if (t >= 1) finish({ status: 'done', scan, overview: map, proposals, tidy });
         };
         running = { mountPoint, timer: window.setInterval(tick, total <= 0 && asking <= 0 ? 0 : 100), finish };
       });
@@ -346,11 +355,12 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
     claudeStatus: () => (options.fail !== undefined ? failure(options.fail) : claude.status()),
     claudeSetEnabled: (on) => claude.setEnabled(on),
     claudeSetPrivacy: (on) => claude.setPrivacy(on),
-    claudeStart: (mountPoint, job, onEvent) => claude.start(mountPoint, job, onEvent),
-    claudeChat: (mountPoint, about, messages, onEvent) => claude.chat(mountPoint, about, messages, onEvent),
+    claudeStart: (mountPoint, scan, job, onEvent) => claude.start(mountPoint, scan, job, onEvent),
+    claudeChat: (mountPoint, scan, conversation, about, text, onEvent) =>
+      claude.chat(mountPoint, scan, conversation, about, text, onEvent),
     claudeCancel: (requestId) => claude.cancel(requestId),
-    claudeChooseLayout: (mountPoint, tidyId, layout) => claude.chooseLayout(mountPoint, tidyId, layout),
-    claudeRemoveItems: (mountPoint, ids) => claude.removeItems(mountPoint, ids),
+    claudeChooseLayout: (mountPoint, scan, tidyId, layout) => claude.chooseLayout(mountPoint, scan, tidyId, layout),
+    claudeRemoveItems: (mountPoint, scan, ids) => claude.removeItems(mountPoint, scan, ids),
     unplug,
   };
 }

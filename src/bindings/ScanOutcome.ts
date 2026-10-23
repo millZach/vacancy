@@ -8,6 +8,11 @@ import type { TidyProposal } from "./TidyProposal";
  */
 export type ScanOutcome = { "status": "done", 
 /**
+ * Which scan this is, unique in the app's run: every command that changes Claude's part of a scan names
+ * it, and is refused once the drive has a newer scan.
+ */
+scan: number, 
+/**
  * The map.
  */
 overview: Overview, 

@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { App } from '../App';
 import {
   BridgeProvider,
@@ -8,12 +8,12 @@ import {
   fixtures,
   type Bridge,
   type ClaudeAnswer,
+  type ClaudeChatStarted,
   type ClaudeEvent,
   type MockOptions,
   type RunListing,
 } from '../bridge';
-import { PRIVACY_TURNS } from '../bridge/mockClaude';
-import { PANEL_KEY } from './ClaudeProvider';
+import { FIRST_QUESTION, PANEL_KEY } from './ClaudeProvider';
 import { DrivesProvider } from '../drives/DrivesProvider';
 import { HistoryMenu } from '../history/HistoryMenu';
 import { ConfirmDialog } from '../run/ConfirmDialog';
@@ -58,6 +58,9 @@ async function job(name: string, kind: string) {
   await waitFor(() => expect(panel().querySelectorAll(`.cp-entry[data-job="${kind}"] .cp-msg`).length).toBe(before + 1));
   return [...panel().querySelectorAll<HTMLElement>(`.cp-entry[data-job="${kind}"]`)].at(-1)!;
 }
+
+/** What call `i` of a spied `claudeChat` resolved with: its request, and the chat's id in the core. */
+const started = (chat: MockInstance<Bridge['claudeChat']>, i: number) => chat.mock.results.at(i)!.value as Promise<ClaudeChatStarted>;
 
 const checked = (name: string) => within(tray()).getByRole('checkbox', { name: `Include ${name}` }).getAttribute('aria-checked') === 'true';
 
@@ -269,7 +272,7 @@ describe('privacy mode', () => {
     expect(panel().querySelector('.cp-entry')).toBeNull();
   });
 
-  it('a chat sends the privacy mode of each turn, and one from privacy mode off is never sent with it on', async () => {
+  it('a chat sends only its id and the newest question; a privacy change ends it, in the core too', async () => {
     const bridge = windows({ claude: 'on', privacy: 'off' });
     const chat = vi.spyOn(bridge, 'claudeChat');
     await toMap(bridge);
@@ -277,20 +280,89 @@ describe('privacy mode', () => {
     const row = within(tray()).getByText('Rust build output in 12 projects').closest('.tray-row') as HTMLElement;
     await userEvent.click(within(row).getByRole('button', { name: 'Ask Claude' }));
     await waitFor(() => expect(panel().querySelector('.cp-entry[data-chat] .cl-first')).toBeTruthy());
-    expect(chat.mock.calls[0]?.[2]).toEqual([{ from: 'person', text: expect.any(String) as string, privacy: false }]);
+    // A new chat: no id yet, the first question only. No turns go from the UI, ever.
+    const [, scan, conversation, about, text] = chat.mock.calls[0]!;
+    expect([conversation, about, text]).toEqual([null, { kind: 'proposal', id: 'w-rust' }, FIRST_QUESTION]);
+    const first = await started(chat, 0);
 
     await userEvent.click(within(panel()).getByRole('switch', { name: 'Privacy mode' }));
     await waitFor(() => expect(panel().querySelector('.cp-entry')).toBeNull());
+    await waitFor(() => expect(within(panel()).getByRole('switch', { name: 'Privacy mode' })).toHaveAttribute('aria-checked', 'true'));
     await userEvent.click(within(row).getByRole('button', { name: 'Ask Claude' }));
     await waitFor(() => expect(panel().querySelector('.cp-entry[data-chat] .cl-first')).toBeTruthy());
-    // A new chat, every turn of it made with privacy mode on.
-    expect(chat.mock.calls.at(-1)?.[2]).toEqual([{ from: 'person', text: expect.any(String) as string, privacy: true }]);
+    // A new chat again, begun in the core with privacy mode on.
+    expect(chat.mock.calls.at(-1)?.[2]).toBeNull();
+    expect((await started(chat, -1)).conversation).not.toBe(first.conversation);
 
-    // And the core (here the mock, as the core does) refuses a chat that still holds a privacy-off turn.
+    // And the core (here the mock, as the core does) refuses a question to the chat the privacy change ended.
     const events: ClaudeEvent[] = [];
-    await bridge.claudeChat('C:\\', { kind: 'proposal', id: 'w-rust' }, [{ from: 'person', text: 'Old question', privacy: false }, { from: 'person', text: 'New', privacy: true }], (e) => events.push(e));
+    await bridge.claudeChat('C:\\', scan, first.conversation, { kind: 'proposal', id: 'w-rust' }, 'New', (e) => events.push(e));
     await waitFor(() => expect(events.some((e) => e.kind === 'failed')).toBe(true));
-    expect(events.find((e) => e.kind === 'failed')).toMatchObject({ failure: { kind: 'error', message: PRIVACY_TURNS } });
+    expect(events.find((e) => e.kind === 'failed')).toMatchObject({ failure: { kind: 'chatEnded' } });
+  });
+
+  it('asks nothing while privacy mode is changing, then asks in the new mode, never stuck on the old one', async () => {
+    const bridge = windows({ claude: 'on', privacy: 'off' });
+    // The core keeps the new mode at once, and answers only after it has asked Claude Code whether it's signed in.
+    const real = bridge.claudeSetPrivacy.bind(bridge);
+    let release = () => {};
+    vi.spyOn(bridge, 'claudeSetPrivacy').mockImplementation((on) => {
+      const kept = real(on);
+      return new Promise((resolve) => {
+        release = () => void kept.then(resolve);
+      });
+    });
+    const chat = vi.spyOn(bridge, 'claudeChat');
+    await toMap(bridge);
+    await openPlan();
+    const toggle = within(panel()).getByRole('switch', { name: 'Privacy mode' });
+    await userEvent.click(toggle);
+    expect(toggle).toBeDisabled();
+    expect(within(panel()).getByRole('button', { name: 'Review my plan' })).toBeDisabled();
+    // Asked while it changes: nothing goes, in either mode.
+    const row = within(tray()).getByText('Rust build output in 12 projects').closest('.tray-row') as HTMLElement;
+    await userEvent.click(within(row).getByRole('button', { name: 'Ask Claude' }));
+    expect(chat).not.toHaveBeenCalled();
+    expect(panel().querySelector('.cp-entry')).toBeNull();
+
+    act(() => release());
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'true'));
+    expect(toggle).toBeEnabled();
+    await userEvent.click(within(row).getByRole('button', { name: 'Ask Claude' }));
+    const entry = await waitFor(() => {
+      const e = panel().querySelector<HTMLElement>('.cp-entry[data-chat] .cl-first');
+      expect(e).toBeTruthy();
+      return e!;
+    });
+    expect(within(panel()).queryByRole('alert')).toBeNull();
+    expect(entry).toHaveTextContent(/Compiled output of 12 Rust projects/);
+  });
+
+  it('a chat the core ended as it was asked goes again once, in a new chat, and is answered', async () => {
+    const bridge = windows({ claude: 'on' });
+    const chat = vi.spyOn(bridge, 'claudeChat');
+    await toMap(bridge);
+    await openPlan();
+    const row = within(tray()).getByText('Rust build output in 12 projects').closest('.tray-row') as HTMLElement;
+    await userEvent.click(within(row).getByRole('button', { name: 'Ask Claude' }));
+    const entry = await waitFor(() => {
+      const e = panel().querySelector<HTMLElement>('.cp-entry[data-chat="Rust build output in 12 projects"]');
+      expect(e?.querySelector('.cl-first')).toBeTruthy();
+      return e!;
+    });
+    // The core ends every chat (privacy mode changed in the core as the question went), and the UI hasn't heard yet.
+    await bridge.claudeSetPrivacy(true);
+    const input = within(panel()).getByRole('textbox', { name: 'Ask about Rust build output in 12 projects' });
+    await userEvent.type(input, 'Does it come back?{Enter}');
+    await waitFor(() => expect(chat).toHaveBeenCalledTimes(3));
+    const [asked, again] = chat.mock.calls.slice(1);
+    expect(asked?.[2]).toBe((await started(chat, 0)).conversation);
+    expect(again?.[2]).toBeNull();
+    expect(again?.[4]).toBe('Does it come back?');
+    // Answered in the new chat, which holds that question alone: done, with its follow-ups, and no error.
+    expect(await within(entry).findByRole('button', { name: 'What would you do?' })).toBeInTheDocument();
+    expect(within(entry).queryByRole('alert')).toBeNull();
+    expect(within(entry).getAllByText('Does it come back?')).toHaveLength(1);
   });
 });
 
@@ -303,7 +375,7 @@ describe('the jobs', () => {
     const items = within(tray()).getAllByRole('checkbox').length;
     const review = await job('Review my plan', 'reviewPlan');
 
-    expect(start.mock.calls[0]?.[1]).toMatchObject({ job: 'reviewPlan' });
+    expect(start.mock.calls[0]?.[2]).toMatchObject({ job: 'reviewPlan' });
     expect(within(review).getByText(/look like versions you might keep/)).toBeInTheDocument();
     expect(within(tray()).getAllByRole('checkbox')).toHaveLength(items);
     expect(checked('Old installers in Downloads')).toBe(true);
@@ -335,7 +407,7 @@ describe('the jobs', () => {
 
     await userEvent.click(within(pick).getByRole('button', { name: 'Keep mine' }));
     expect(await within(pick).findByText(/You kept your plan/)).toBeInTheDocument();
-    expect(remove).toHaveBeenCalledWith('C:\\', ['claude-android', 'claude-public']);
+    expect(remove).toHaveBeenCalledWith('C:\\', expect.any(Number), ['claude-android', 'claude-public']);
     expect(checked('Old installers in Downloads')).toBe(true);
     expect(within(tray()).queryByText('Android emulator images')).toBeNull();
     expect(within(tray()).getByText(/will be freed/).previousSibling?.textContent).toBe(total);
@@ -373,7 +445,7 @@ describe('the jobs', () => {
     // The edit stays, and Claude's ticks never went in: the installers are still ticked, the game not.
     expect(checked('Temp folders')).toBe(false);
     expect(checked('Old installers in Downloads')).toBe(true);
-    await waitFor(() => expect(remove).toHaveBeenCalledWith('C:\\', ['claude-android', 'claude-public']));
+    await waitFor(() => expect(remove).toHaveBeenCalledWith('C:\\', expect.any(Number), ['claude-android', 'claude-public']));
     await waitFor(() => expect(within(tray()).queryByText('Android emulator images')).toBeNull());
     expect(await within(pick).findByText(/my own items are out of the tray again/)).toBeInTheDocument();
     expect(within(pick).getByRole('button', { name: 'Let Claude pick again' })).toBeInTheDocument();
@@ -402,6 +474,47 @@ describe('the jobs', () => {
     expect(within(first).queryByRole('button', { name: 'Use Claude’s plan' })).toBeNull();
   });
 
+  it('never takes Claude’s items out of a scan that replaced the one it picked on', async () => {
+    const bridge = windows({ claude: 'on' });
+    const listeners: ((e: ClaudeEvent) => void)[] = [];
+    const start = vi.spyOn(bridge, 'claudeStart').mockImplementation((_m, _s, _j, onEvent) => {
+      listeners.push(onEvent);
+      return Promise.resolve(`claude-p${listeners.length}`);
+    });
+    const remove = vi.spyOn(bridge, 'claudeRemoveItems');
+    await toMap(bridge);
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Let Claude pick' }));
+    await waitFor(() => expect(listeners).toHaveLength(1));
+    const first = start.mock.calls[0]![1];
+    // While Claude picks, the drive is scanned again.
+    await userEvent.click(screen.getByRole('button', { name: 'Scan again' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Scan again' }));
+    await screen.findByLabelText('Map key');
+    await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'Finding duplicates' })).toBeNull());
+    // The old scan's answer comes anyway, with an item of Claude's: nothing is taken out of the new scan.
+    const answer: ClaudeAnswer = {
+      job: 'pickPlan',
+      basis: { privacy: true, text: 'From names, sizes and dates only.', opened: [], refused: [] },
+      result: {
+        kind: 'pick',
+        summary: 'A pick.',
+        changes: [{ id: 'claude-android', title: 'Android emulator images', change: 'add', why: 'Old.', bytes: 1 }],
+        plan: [],
+        bytesBefore: 0,
+        bytesAfter: 0,
+      },
+      dropped: [],
+      refreshed: null,
+    };
+    act(() => listeners[0]!({ kind: 'done', requestId: 'claude-p1', answer }));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(remove).not.toHaveBeenCalled();
+    // The new scan's jobs name the new scan.
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Review my plan' }));
+    await waitFor(() => expect(start).toHaveBeenCalledTimes(2));
+    expect(start.mock.calls[1]![1]).not.toBe(first);
+  });
+
   it('Let Claude pick never changes the tick of Claude’s own items', async () => {
     const bridge = windows({ claude: 'on' });
     await toMap(bridge);
@@ -417,9 +530,9 @@ describe('the jobs', () => {
   it('a cancelled chat’s late answer neither shows nor ends its retry', async () => {
     const bridge = windows({ claude: 'on' });
     const listeners: ((e: ClaudeEvent) => void)[] = [];
-    vi.spyOn(bridge, 'claudeChat').mockImplementation((_m, _a, _msgs, onEvent) => {
+    vi.spyOn(bridge, 'claudeChat').mockImplementation((_m, _s, _c, _a, _t, onEvent) => {
       listeners.push(onEvent);
-      return Promise.resolve(`claude-r${listeners.length}`);
+      return Promise.resolve({ requestId: `claude-r${listeners.length}`, conversation: 'chat-1' });
     });
     const cancel = vi.spyOn(bridge, 'claudeCancel').mockResolvedValue(undefined);
     await toMap(bridge);
@@ -466,16 +579,17 @@ describe('the jobs', () => {
       expect(e?.querySelector('.cl-first')).toBeTruthy();
       return e!;
     });
-    expect(chat.mock.calls[0]?.[1]).toEqual({ kind: 'proposal', id: 'w-rust' });
+    expect(chat.mock.calls[0]?.[3]).toEqual({ kind: 'proposal', id: 'w-rust' });
     expect(within(entry).getByText(/Compiled output of 12 Rust projects/)).toBeInTheDocument();
     expect(within(panel()).getByRole('button', { name: 'Stop asking about it' })).toBeInTheDocument();
 
     const input = within(panel()).getByRole('textbox', { name: 'Ask about Rust build output in 12 projects' });
     await userEvent.type(input, 'Can I get it back from the Recycle Bin?{Enter}');
     expect(await within(entry).findByText(/skips the Recycle Bin and the Trash/)).toBeInTheDocument();
-    const sent = chat.mock.calls.at(-1)?.[2];
-    expect(sent?.at(-1)).toEqual({ from: 'person', text: 'Can I get it back from the Recycle Bin?', privacy: true });
-    expect(sent).toHaveLength(3);
+    // Only the chat's id and the new question go; the core keeps the turns before it.
+    const [, , conversation, , text] = chat.mock.calls.at(-1)!;
+    expect(conversation).toBe((await started(chat, 0)).conversation);
+    expect(text).toBe('Can I get it back from the Recycle Bin?');
     expect(within(entry).getByRole('button', { name: 'What would you do?' })).toBeInTheDocument();
   });
 
@@ -509,7 +623,7 @@ describe('the jobs', () => {
 
     await userEvent.click(within(downloads).getByRole('radio', { name: /Claude’s/ }));
     await waitFor(() => expect(within(downloads).getByRole('radio', { name: /Claude’s/ })).toHaveAttribute('aria-checked', 'true'));
-    expect(choose).toHaveBeenCalledWith('C:\\', 'tidy-downloads', 'claude');
+    expect(choose).toHaveBeenCalledWith('C:\\', expect.any(Number), 'tidy-downloads', 'claude');
     const row = within(tray()).getByText('Sort Downloads').closest('.tray-row') as HTMLElement;
     expect(row).toHaveTextContent('sorted into Claude’s folders.');
     expect(within(row).getByText('Suggested by Claude')).toBeInTheDocument();

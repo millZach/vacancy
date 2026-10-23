@@ -9,13 +9,13 @@ import type {
   ClaudeAnswer,
   ClaudeBasis,
   ClaudeChange,
+  ClaudeChatStarted,
   ClaudeDropped,
   ClaudeEvent,
   ClaudeFailure,
   ClaudeFolderNote,
   ClaudeHidden,
   ClaudeJob,
-  ClaudeMessage,
   ClaudeRefreshed,
   ClaudeResult,
   ClaudeStatus,
@@ -54,14 +54,32 @@ export interface MockClaudeOptions {
   claudeMs?: number;
 }
 
+/** One chat, as the core keeps it: what it's about, the privacy mode it began in, its turns, and whether it ended. */
+export interface MockChat {
+  about: ClaudeAbout;
+  privacy: boolean;
+  turns: { from: 'person' | 'claude'; text: string }[];
+  /** Privacy mode changed, or Claude was turned off, since it began. */
+  ended: boolean;
+}
+
 /** What the mock Claude reads and changes: a drive's scan, as the mock bridge keeps it. */
 export interface MockClaudeScan {
+  /** Which scan it is (`ScanOutcome`'s `scan`): Claude's commands name it, and are refused for another. */
+  scan: number;
   map: Overview;
   proposals: Proposal[];
   tidy: TidyProposal[];
   /** The layout of each sort not in use, once Claude has suggested one. */
   others: TidyProposal[];
+  /** The last `ClaudeRefreshed.revision` given out. */
+  revision: number;
+  /** The scan's chats, by id, as the core keeps them. */
+  chats: Map<string, MockChat>;
 }
+
+/** What the core says when a Claude command names a scan the drive no longer has. */
+export const SCAN_GONE = 'This drive’s map has changed since: scan it again, then ask Claude.';
 
 const GB = 1e9;
 
@@ -98,9 +116,6 @@ export const HIDDEN: ClaudeHidden[] = [
 ];
 
 const BASIS_ON = 'From names, sizes and dates only. Claude didn’t open any files.';
-/** The core's refusal of a privacy-on chat that carries turns made with privacy mode off. */
-export const PRIVACY_TURNS =
-  'This chat began with privacy mode off. With it on, Vacancy won’t send what was said then. Start a new chat.';
 
 /** One of Claude's own items, before the mock adds it: where its tile is carved from, and what it says. */
 interface Item {
@@ -321,11 +336,15 @@ function carve(map: Overview, item: Item): Overview {
   return out;
 }
 
-/** The mock's Claude: settings, state and canned answers, over the mock bridge's scans. */
+/**
+ * The mock's Claude: settings, state and canned answers, over the mock bridge's scans. `scanOf` gives the drive's
+ * scan `scan` if it is still the drive's; `endChats` ends every chat on every scan (privacy changed, or Claude off).
+ */
 export function createMockClaude(
   platform: Platform,
   options: MockClaudeOptions,
-  scanOf: (mountPoint: string) => MockClaudeScan | null,
+  scanOf: (mountPoint: string, scan: number) => MockClaudeScan | null,
+  endChats: () => void,
 ) {
   const state = options.claude ?? 'off';
   let enabled = state !== 'off' && state !== 'notfound';
@@ -333,6 +352,7 @@ export function createMockClaude(
   const canned = platform === 'windows' ? windows() : macos();
   const requests = new Map<string, { timers: number[]; finish: (failure: ClaudeFailure) => void }>();
   let next = 0;
+  let chats = 0;
 
   const status = (): ClaudeStatus => ({
     state:
@@ -364,6 +384,7 @@ export function createMockClaude(
         };
 
   const refreshed = (scan: MockClaudeScan): ClaudeRefreshed => ({
+    revision: ++scan.revision,
     overview: structuredClone(scan.map),
     proposals: structuredClone(scan.proposals),
     tidy: structuredClone(scan.tidy),
@@ -436,7 +457,7 @@ export function createMockClaude(
         return { job: 'pickPlan', basis: basis([]), result, dropped: structuredClone(canned.refused), refreshed: added.length ? refreshed(scan) : null };
       }
       case 'ask':
-        return ask(scan, job.about, job.messages);
+        return ask(scan, job.conversation, job.text);
       case 'explainFolders': {
         const tiles = scan.map.categories.flatMap((c) => c.items);
         const folders: ClaudeFolderNote[] = [];
@@ -474,11 +495,14 @@ export function createMockClaude(
     }
   };
 
-  const ask = (scan: MockClaudeScan, about: ClaudeAbout, messages: ClaudeMessage[]): ClaudeAnswer | ClaudeFailure => {
-    const last = messages.at(-1);
-    if (!last || last.from !== 'person' || !last.text.trim()) return { kind: 'error', message: 'Type a question for Claude first.' };
-    // As the core: with privacy mode on, nothing said with it off is sent again.
-    if (privacy && messages.some((m) => !m.privacy)) return { kind: 'error', message: PRIVACY_TURNS };
+  const ask = (scan: MockClaudeScan, conversation: string, text: string): ClaudeAnswer | ClaudeFailure => {
+    // As the core: only a chat begun in this privacy mode, and not ended since by a privacy change, is asked in.
+    const chat = scan.chats.get(conversation);
+    if (!chat || chat.ended || chat.privacy !== privacy) return { kind: 'chatEnded' };
+    if (!text.trim()) return { kind: 'error', message: 'Type a question for Claude first.' };
+    const about = chat.about;
+    const last = { from: 'person' as const, text: text.trim() };
+    const messages = [...chat.turns, last];
     let reply: string;
     let opened: string[] = [];
     if (about.kind === 'proposal') {
@@ -502,6 +526,7 @@ export function createMockClaude(
       reply = e ? (privacy ? e.explanation : e.deep) : `A ${name} folder I don’t recognise from its name alone. Nothing in it is in your plan.`;
       if (!privacy && e) opened = [`${about.path}${platform === 'windows' ? '\\' : '/'}…`];
     }
+    chat.turns.push(last, { from: 'claude', text: reply });
     return {
       job: 'ask',
       basis: basis(opened),
@@ -511,8 +536,8 @@ export function createMockClaude(
     };
   };
 
-  /** Starts a request: Working now, then Slow (`slow`), then Done or Failed. Gives its id at once. */
-  const start = (mountPoint: string, job: ClaudeJob, onEvent: (event: ClaudeEvent) => void): Promise<string> => {
+  /** Starts a request on the drive's scan `scan`: Working now, then Slow (`slow`), then Done or Failed. Gives its id at once. */
+  const start = (mountPoint: string, scanId: number, job: ClaudeJob, onEvent: (event: ClaudeEvent) => void): Promise<string> => {
     const requestId = `claude-${++next}`;
     const timers: number[] = [];
     let over = false;
@@ -536,8 +561,8 @@ export function createMockClaude(
       if (state === 'timeout') return finish({ kind: 'timedOut' });
       if (state === 'error')
         return finish({ kind: 'error', message: 'API Error: 429 rate_limit_error: This request would exceed your account’s rate limit. Please try again later.' });
-      const scan = scanOf(mountPoint);
-      if (!scan) return finish({ kind: 'error', message: 'Scan this drive first, then ask Claude.' });
+      const scan = scanOf(mountPoint, scanId);
+      if (!scan) return finish({ kind: 'error', message: SCAN_GONE });
       const result = answer(scan, job);
       if ('kind' in result) return finish(result);
       over = true;
@@ -551,25 +576,49 @@ export function createMockClaude(
     status: () => Promise.resolve(status()),
     setEnabled: (on: boolean) => {
       if (state !== 'notfound') enabled = on;
-      if (!on) for (const r of [...requests.values()]) r.finish({ kind: 'cancelled' });
+      if (!on) {
+        endChats();
+        for (const r of [...requests.values()]) r.finish({ kind: 'cancelled' });
+      }
       // Turning on checks that Claude Code answers, as the core does: about as long as an answer (at most 1.2 s).
       const ms = on ? Math.min(options.claudeMs ?? 900, 1200) : 0;
       return new Promise<ClaudeStatus>((resolve) => window.setTimeout(() => resolve(status()), ms));
     },
     setPrivacy: (on: boolean) => {
+      // As the core: the new mode and the end of every chat in one step.
       privacy = on;
+      endChats();
       return Promise.resolve(status());
     },
     start,
-    chat: (mountPoint: string, about: ClaudeAbout, messages: ClaudeMessage[], onEvent: (event: ClaudeEvent) => void) =>
-      start(mountPoint, { job: 'ask', about, messages }, onEvent),
+    chat: (
+      mountPoint: string,
+      scanId: number,
+      conversation: string | null,
+      about: ClaudeAbout,
+      text: string,
+      onEvent: (event: ClaudeEvent) => void,
+    ): Promise<ClaudeChatStarted> => {
+      let id = conversation;
+      if (id === null) {
+        const scan = scanOf(mountPoint, scanId);
+        if (!scan) return Promise.reject(new Error(SCAN_GONE));
+        id = `chat-${++chats}`;
+        scan.chats.set(id, { about, privacy, turns: [], ended: false });
+      }
+      const chat = id;
+      return start(mountPoint, scanId, { job: 'ask', conversation: chat, text }, onEvent).then((requestId) => ({
+        requestId,
+        conversation: chat,
+      }));
+    },
     cancel: (requestId: string) => {
       requests.get(requestId)?.finish({ kind: 'cancelled' });
       return Promise.resolve();
     },
-    chooseLayout: (mountPoint: string, tidyId: string, layout: TidyLayout): Promise<TidyProposal[]> => {
-      const scan = scanOf(mountPoint);
-      if (!scan) return Promise.reject(new Error('Scan this drive again first.'));
+    chooseLayout: (mountPoint: string, scanId: number, tidyId: string, layout: TidyLayout): Promise<ClaudeRefreshed> => {
+      const scan = scanOf(mountPoint, scanId);
+      if (!scan) return Promise.reject(new Error(SCAN_GONE));
       const current = scan.tidy.find((t) => t.id === tidyId);
       if (!current) return Promise.reject(new Error(`There is no Tidy up ${tidyId} in this scan.`));
       if (current.layout !== layout) {
@@ -578,11 +627,11 @@ export function createMockClaude(
         scan.tidy = scan.tidy.map((t) => (t.id === tidyId ? other : t));
         scan.others = [...scan.others.filter((o) => o.id !== tidyId), current];
       }
-      return Promise.resolve(structuredClone(scan.tidy));
+      return Promise.resolve(refreshed(scan));
     },
-    removeItems: (mountPoint: string, ids: string[]): Promise<ClaudeRefreshed> => {
-      const scan = scanOf(mountPoint);
-      if (!scan) return Promise.reject(new Error('Scan this drive again first.'));
+    removeItems: (mountPoint: string, scanId: number, ids: string[]): Promise<ClaudeRefreshed> => {
+      const scan = scanOf(mountPoint, scanId);
+      if (!scan) return Promise.reject(new Error(SCAN_GONE));
       for (const id of ids) {
         const p = scan.proposals.find((x) => x.id === id);
         if (!p) return Promise.reject(new Error(`There is no item ${id} in this scan.`));

@@ -3,4 +3,4 @@
 /**
  * Why a call gave no answer, as the panel says it.
  */
-export type ClaudeFailure = { "kind": "notFound" } | { "kind": "signedOut" } | { "kind": "timedOut" } | { "kind": "cancelled" } | { "kind": "error", message: string, };
+export type ClaudeFailure = { "kind": "notFound" } | { "kind": "signedOut" } | { "kind": "timedOut" } | { "kind": "cancelled" } | { "kind": "chatEnded" } | { "kind": "error", message: string, };

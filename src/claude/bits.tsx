@@ -106,6 +106,8 @@ export function PrivacyRow({ claude, privacy, fixture }: { claude: Claude; priva
         aria-label="Privacy mode"
         className={privacy ? 'cl-toggle is-on' : 'cl-toggle'}
         onClick={() => claude.setPrivacy(!privacy)}
+        disabled={claude.privacyChanging}
+        aria-busy={claude.privacyChanging}
       >
         <i />
       </button>

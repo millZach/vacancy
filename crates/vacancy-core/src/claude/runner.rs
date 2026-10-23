@@ -263,6 +263,10 @@ pub enum Failure {
     /// The user cancelled it.
     #[error("Cancelled")]
     Cancelled,
+    /// The chat it was asked in has ended: privacy mode changed, or Claude was turned off, since it began. Nothing
+    /// was sent; the question belongs in a new chat.
+    #[error("This chat ended when privacy mode changed. Ask again to start a new one.")]
+    ChatEnded,
     /// Anything else, with Claude's (or Vacancy's) words: a rate limit, an answer that didn't fit, a scan that
     /// changed meanwhile.
     #[error("{message}")]

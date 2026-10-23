@@ -70,7 +70,10 @@ export interface JobEntry {
 export interface ChatTurn {
   from: 'person' | 'claude';
   text: string;
-  /** Privacy mode when the turn was made. The core never sends a privacy-off turn with privacy mode on. */
+  /**
+   * Privacy mode when the turn was made, for the log. The core keeps the turns it sends, each with the mode it was
+   * made in, and never sends a privacy-off turn with privacy mode on.
+   */
   privacy: boolean;
   /** Claude's turns: what the answer was based on, and what to ask next. */
   basis?: ClaudeBasis;
@@ -84,6 +87,11 @@ export interface ChatEntry {
   about: ClaudeAbout;
   /** What it's about, as the person knows it. */
   name: string;
+  /**
+   * The core's id for this chat, once its first question has gone: the UI sends only this and the newest question.
+   * Null until then, and again if the core ended it (a privacy change), so the next question starts a new one.
+   */
+  conversation: string | null;
   turns: ChatTurn[];
   /** The last turn's request: null before the first, or `done` once answered. */
   phase: Phase | null;
@@ -138,6 +146,11 @@ export interface Claude {
   setFolded: (folded: boolean) => void;
   /** The confirm before privacy mode goes off is up. */
   privacyAsk: boolean;
+  /**
+   * Privacy mode is changing (the core is keeping the new mode): nothing new is asked until it has, so no request
+   * starts in the mode that is ending.
+   */
+  privacyChanging: boolean;
   /**
    * Privacy mode changed with conversations open, so they were ended: the mode now (true: on), for a short note in
    * the log until the next question. Nothing from them is sent again.
@@ -228,6 +241,8 @@ export function failureText(f: ClaudeFailure): string {
   switch (f.kind) {
     case 'cancelled':
       return 'Cancelled. Nothing changed.';
+    case 'chatEnded':
+      return 'This chat ended when privacy mode changed. Ask again to start a new one. Nothing changed.';
     case 'timedOut':
       return 'Claude Code took too long and was stopped. Nothing changed.';
     case 'notFound':

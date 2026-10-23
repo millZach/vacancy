@@ -6,7 +6,12 @@ import type { TidyProposal } from "./TidyProposal";
 /**
  * The map and proposals again, after a job added Claude's items (or a layout): what the UI shows from now on.
  */
-export type ClaudeRefreshed = { overview: Overview, proposals: Array<Proposal>, 
+export type ClaudeRefreshed = { 
+/**
+ * Goes up by one each time the scan's map is given out again: the UI shows only the newest, so a slow answer
+ * never puts back a map that a later change replaced.
+ */
+revision: number, overview: Overview, proposals: Array<Proposal>, 
 /**
  * The Tidy up sorts in use.
  */

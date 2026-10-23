@@ -73,10 +73,9 @@ import type { ClaudeHidden } from '../bindings/ClaudeHidden';
 import type { ClaudeHiddenGroup } from '../bindings/ClaudeHiddenGroup';
 import type { ClaudeJob } from '../bindings/ClaudeJob';
 import type { ClaudeJobKind } from '../bindings/ClaudeJobKind';
-import type { ClaudeMessage } from '../bindings/ClaudeMessage';
+import type { ClaudeChatStarted } from '../bindings/ClaudeChatStarted';
 import type { ClaudeRefreshed } from '../bindings/ClaudeRefreshed';
 import type { ClaudeResult } from '../bindings/ClaudeResult';
-import type { ClaudeSpeaker } from '../bindings/ClaudeSpeaker';
 import type { ClaudeState } from '../bindings/ClaudeState';
 import type { ClaudeStatus } from '../bindings/ClaudeStatus';
 import type { TidyLayout } from '../bindings/TidyLayout';
@@ -156,10 +155,9 @@ export type {
   ClaudeHiddenGroup,
   ClaudeJob,
   ClaudeJobKind,
-  ClaudeMessage,
+  ClaudeChatStarted,
   ClaudeRefreshed,
   ClaudeResult,
-  ClaudeSpeaker,
   ClaudeState,
   ClaudeStatus,
   TidyLayout,
@@ -267,30 +265,39 @@ export interface Bridge {
   claudeSetEnabled(on: boolean): Promise<ClaudeStatus>;
   /** Turns privacy mode on or off (confirm before turning it off). Remembered, also while Claude is off. */
   claudeSetPrivacy(on: boolean): Promise<ClaudeStatus>;
+  // Every command below that touches a drive's scan names it: `scan` is the id its map came with (`ScanOutcome`'s
+  // `scan`). Once the drive has a newer scan (or its plan ran, or it went away) the command is refused and changes
+  // nothing: an item id like `claude-d17` means another item in another scan.
+
   /**
-   * Starts a job on a drive's last scan and resolves with its request id at once. `onEvent` then hears `working`,
+   * Starts a job on the drive's scan `scan` and resolves with its request id at once. `onEvent` then hears `working`,
    * `slow` (still running after 20 s), and `done` with the checked answer or `failed` with why (`notFound`,
-   * `signedOut`, `timedOut` after 180 s, `cancelled`, or `error` with Claude's text, such as a rate limit). A `done`
-   * answer that changed the map carries `refreshed`: the overview, proposals and Tidy up sorts to show from now on.
+   * `signedOut`, `timedOut` after 180 s, `cancelled`, `chatEnded`, or `error` with Claude's text, such as a rate
+   * limit). A `done` answer that changed the map carries `refreshed`: the overview, proposals and Tidy up sorts to
+   * show from now on.
    */
-  claudeStart(mountPoint: string, job: ClaudeJob, onEvent: (event: ClaudeEvent) => void): Promise<string>;
+  claudeStart(mountPoint: string, scan: number, job: ClaudeJob, onEvent: (event: ClaudeEvent) => void): Promise<string>;
   /**
-   * Sends a chat message about one proposal or folder: `claudeStart` with the `ask` job. Nothing is kept between
-   * turns, so pass the whole conversation so far, the person's newest message last (it is capped).
+   * Asks the person's question `text` about one proposal or folder, in the chat `conversation`, or with `null` in a
+   * new chat (begun in the privacy mode now). The core keeps every chat and sends its turns so far itself; the UI
+   * sends only the new question. Resolves with the request id and the chat's id. A chat that a privacy change (or
+   * Claude turned off) ended answers `failed` with `chatEnded`, having sent nothing: ask again in a new chat.
    */
   claudeChat(
     mountPoint: string,
+    scan: number,
+    conversation: string | null,
     about: ClaudeAbout,
-    messages: ClaudeMessage[],
+    text: string,
     onEvent: (event: ClaudeEvent) => void,
-  ): Promise<string>;
+  ): Promise<ClaudeChatStarted>;
   /** Stops a running request (its Claude Code is killed); it ends `failed` with `cancelled`. */
   claudeCancel(requestId: string): Promise<void>;
   /**
    * Picks the layout a Tidy up sort (`tidy-downloads`...) uses from now on: `builtin`, or `claude` once Claude has
-   * suggested one (a `tidyLayout` answer). Resolves with the sorts in use. Windows only.
+   * suggested one (a `tidyLayout` answer). Resolves with the map, proposals and sorts again. Windows only.
    */
-  claudeChooseLayout(mountPoint: string, tidyId: string, layout: TidyLayout): Promise<TidyProposal[]>;
-  /** Takes Claude's items `ids` back out of the drive's proposals (Keep mine). Rejects for a rule's item. */
-  claudeRemoveItems(mountPoint: string, ids: string[]): Promise<ClaudeRefreshed>;
+  claudeChooseLayout(mountPoint: string, scan: number, tidyId: string, layout: TidyLayout): Promise<ClaudeRefreshed>;
+  /** Takes Claude's items `ids` back out of the drive's scan `scan` (Keep mine). Rejects for a rule's item. */
+  claudeRemoveItems(mountPoint: string, scan: number, ids: string[]): Promise<ClaudeRefreshed>;
 }

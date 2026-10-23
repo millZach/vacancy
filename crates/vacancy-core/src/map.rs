@@ -331,6 +331,10 @@ pub struct IndexRead {
 pub enum ScanOutcome {
     /// It finished.
     Done {
+        /// Which scan this is, unique in the app's run: every command that changes Claude's part of a scan names
+        /// it, and is refused once the drive has a newer scan.
+        #[ts(type = "number")]
+        scan: u64,
         /// The map.
         overview: Box<Overview>,
         /// The cleanups the rules propose, biggest first. Their tiles are on the map.
@@ -366,8 +370,8 @@ pub struct ScannedVolume {
     pub overview: Overview,
     /// How the drive was read.
     pub how: HowScanned,
-    /// What Claude gave about this scan with privacy mode off, which no call with privacy mode on sends back.
-    pub claude_off: crate::claude::PrivacyOff,
+    /// What Claude's jobs keep with this scan: its chats, and which of its items were made with privacy mode off.
+    pub claude: crate::claude::OnScan,
 }
 
 impl ScannedVolume {
@@ -714,7 +718,7 @@ pub(crate) fn finish_map(
         tidy,
         overview,
         how,
-        claude_off: Default::default(),
+        claude: Default::default(),
     })
 }
 

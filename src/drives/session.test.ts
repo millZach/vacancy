@@ -20,7 +20,7 @@ function mapOf(volume: VolumeInfo): Overview {
 }
 
 /** A finished scan of `volume`: its map and the fixture's proposals. */
-const done = (volume: VolumeInfo) => ({ status: 'done' as const, overview: mapOf(volume), proposals: fixtures.windows.proposals, tidy: [] });
+const done = (volume: VolumeInfo) => ({ status: 'done' as const, scan: 1, overview: mapOf(volume), proposals: fixtures.windows.proposals, tidy: [] });
 
 const run = (s: Session, ...actions: Action[]) => actions.reduce(reduce, s);
 const listed = (drives: VolumeInfo[] = [C, D, E]): Action => ({ type: 'listed', drives });
@@ -402,6 +402,7 @@ describe('Claude’s answers on a drive’s scan', () => {
   };
   const claudeItem = { ...fixtures.windows.proposals[0]!, id: 'claude-x', source: 'claude' as const, defaultOn: false };
   const refreshed = {
+    revision: 1,
     overview: mapOf(C),
     proposals: [...fixtures.windows.proposals.filter((p) => p.id !== 'w-temp'), claudeItem],
     tidy: [],
@@ -451,12 +452,25 @@ describe('Claude’s answers on a drive’s scan', () => {
     expect(run(edited, { type: 'setPlan', mountPoint: C.mountPoint, run: 1, ids: ['w-node'], from: 0 })).toBe(edited);
   });
 
+  it('never puts back an older map: a slow reply with a lower revision than the one shown is ignored', () => {
+    const s0 = run(start, ...scanned(C, 1));
+    const newer = { ...refreshed, revision: 3 };
+    const shown = run(s0, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed: newer });
+    const doneScan = scanOf(shown, C.mountPoint);
+    expect(doneScan.phase === 'done' && doneScan.claudeRevision).toBe(3);
+    // Keep mine's reply, made before the newer answer, arrives late without Claude's item: nothing changes.
+    const older = { ...refreshed, revision: 2, proposals: fixtures.windows.proposals };
+    expect(run(shown, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed: older })).toBe(shown);
+    expect(run(shown, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed: newer })).toBe(shown);
+    const latest = run(shown, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed: { ...older, revision: 4 } });
+    expect(latest).not.toBe(shown);
+  });
+
   it('ignores an answer about an earlier scan, or one that comes after the plan ran', () => {
     const later = run(start, ...scanned(C, 1), ...scanned(C, 2));
     expect(run(later, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed })).toBe(later);
     expect(run(later, { type: 'setPlan', mountPoint: C.mountPoint, run: 1, ids: [] })).toBe(later);
     const ran = run(later, { type: 'runStarted', mountPoint: C.mountPoint, plan: { ...samplePlan, mountPoint: C.mountPoint } });
     expect(run(ran, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 2, refreshed })).toBe(ran);
-    expect(run(ran, { type: 'tidyChosen', mountPoint: C.mountPoint, run: 2, tidy: [] })).toBe(ran);
   });
 });

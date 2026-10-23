@@ -240,7 +240,6 @@ function drivesValue(
     setGroupSkipped: (id, skipped) => dispatch({ type: 'skipGroup', mountPoint: session.current, id, skipped }),
     claudeApplied: (mountPoint, run, refreshed) => dispatch({ type: 'claudeApplied', mountPoint, run, refreshed }),
     setPlan: (mountPoint, run, ids, from) => dispatch({ type: 'setPlan', mountPoint, run, ids, ...(from === undefined ? {} : { from }) }),
-    setTidy: (mountPoint, run, tidy) => dispatch({ type: 'tidyChosen', mountPoint, run, tidy }),
     setRunning: (running) => dispatch({ type: 'lock', locked: running }),
     runPlan,
     cancelRun: () => {

@@ -13,7 +13,7 @@ use tauri::{AppHandle, Manager, State};
 use vacancy_core::advisor::{self, AdvisorStatus};
 use vacancy_core::claude::{self, ClaudeCode, Cli, Control, Failure, Progress};
 use vacancy_core::permissions::{self, FullDiskAccess};
-use vacancy_core::tidy::{TidyLayout, TidyProposal};
+use vacancy_core::tidy::TidyLayout;
 use vacancy_core::{
     CancelToken, DuplicateProgress, DuplicatesOutcome, Env, MapFolder, Moment, Plan, PlanSummary,
     RunEvent, RunHistory, RunListing, RunReport, ScanError, ScanOptions, ScanOutcome, ScanUpdate,
@@ -31,6 +31,9 @@ struct Session {
     claude: Mutex<HashMap<String, CancelToken>>,
     /// The last request id handed out.
     claude_next: AtomicU64,
+    /// Held while Claude's settings change (on or off, privacy mode) and every chat ends, and while a request reads
+    /// them and is prepared or a chat begins: so a request runs in one mode, and never in a chat the change ended.
+    claude_mode: Mutex<()>,
 }
 
 impl Session {
@@ -41,6 +44,7 @@ impl Session {
             run: Mutex::new(None),
             claude: Mutex::new(HashMap::new()),
             claude_next: AtomicU64::new(0),
+            claude_mode: Mutex::new(()),
         }
     }
 
@@ -63,6 +67,43 @@ struct Scanned {
     /// A duplicate search of this scan has attached what it found. A scan is searched once: the groups the user
     /// unticks are named by what that search found, and another search could name them otherwise.
     searched: bool,
+}
+
+/// A drive's last scan, as Claude's commands see it: which scan it is, and whether it ran a plan.
+trait Stamped {
+    /// The scan's generation: the `scan` its map was given out with.
+    fn generation(&self) -> u64;
+    fn spent(&self) -> bool;
+}
+
+impl Stamped for Scanned {
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+    fn spent(&self) -> bool {
+        self.spent
+    }
+}
+
+/// What a Claude command says when the scan it names is gone: the drive was scanned again, its plan ran, or it
+/// went away.
+const SCAN_GONE: &str = "This drive's map has changed since: scan it again, then ask Claude.";
+
+/// Runs `f` on `drive`'s last scan only if it is the scan `scan` (the one the UI's map came from) and hasn't run a
+/// plan. Every command that changes Claude's part of a scan goes through this: an id like `claude-d17` means
+/// another item in another scan, so a command meant for a replaced scan must never touch the new one.
+fn on_scan<T: Stamped, R>(
+    scans: &Scans<T>,
+    drive: &str,
+    scan: u64,
+    f: impl FnOnce(&mut T) -> Result<R, String>,
+) -> Result<R, String> {
+    scans.with_last_mut(drive, |last| {
+        let last = last
+            .filter(|s| s.generation() == scan && !s.spent())
+            .ok_or_else(|| SCAN_GONE.to_owned())?;
+        f(last)
+    })
 }
 
 /// A running duplicate search's stop button, pressed when it is dropped.
@@ -386,6 +427,16 @@ impl<T> Scans<T> {
         f(state.drives.get_mut(drive).and_then(|d| d.last.as_mut()))
     }
 
+    /// Runs `f` on every drive's last stored result.
+    fn for_each_last_mut(&self, mut f: impl FnMut(&mut T)) {
+        let mut state = lock(&self.state);
+        for drive in state.drives.values_mut() {
+            if let Some(last) = drive.last.as_mut() {
+                f(last);
+            }
+        }
+    }
+
     /// Whether a scan is running, on any drive.
     fn scanning(&self) -> bool {
         lock(&self.state).running.is_some()
@@ -456,11 +507,7 @@ async fn claude_status(app: AppHandle) -> Result<claude::Status, String> {
 #[tauri::command]
 async fn claude_set_enabled(on: bool, app: AppHandle) -> Result<claude::Status, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let home = claude_home(&app)?;
-        let mut settings = claude::settings::load(&home);
-        settings.enabled = on;
-        claude::settings::save(&home, settings)
-            .map_err(|e| format!("Vacancy couldn't keep the setting: {e}"))?;
+        claude_change_settings(&app, |settings| settings.enabled = on)?;
         if !on {
             for cancel in lock(&app.state::<Session>().claude).values() {
                 cancel.cancel();
@@ -472,31 +519,61 @@ async fn claude_set_enabled(on: bool, app: AppHandle) -> Result<claude::Status, 
     .map_err(|e| e.to_string())?
 }
 
-/// Turns privacy mode on or off (the UI confirms turning it off first). Remembered, also while Claude is off.
+/// Turns privacy mode on or off (the UI confirms turning it off first). Remembered, also while Claude is off. Every
+/// chat ends at once, in the same step as the new mode is kept: no request is prepared in between. Only then is
+/// Claude Code asked whether it is signed in, for the status.
 #[tauri::command]
 async fn claude_set_privacy(on: bool, app: AppHandle) -> Result<claude::Status, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let home = claude_home(&app)?;
-        let mut settings = claude::settings::load(&home);
-        settings.privacy = on;
-        claude::settings::save(&home, settings)
-            .map_err(|e| format!("Vacancy couldn't keep the setting: {e}"))?;
+        claude_change_settings(&app, |settings| settings.privacy = on)?;
         claude_status_now(&app)
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
+/// Changes Claude's settings with `change` and keeps them, and ends every chat on every drive's scan, all under
+/// [`Session::claude_mode`]: a request is prepared either wholly before (and its chat then ends) or wholly after.
+fn claude_change_settings(
+    app: &AppHandle,
+    change: impl FnOnce(&mut claude::Settings),
+) -> Result<(), String> {
+    let session = app.state::<Session>();
+    let _mode = lock(&session.claude_mode);
+    let home = claude_home(app)?;
+    let mut settings = claude::settings::load(&home);
+    change(&mut settings);
+    claude::settings::save(&home, settings)
+        .map_err(|e| format!("Vacancy couldn't keep the setting: {e}"))?;
+    session
+        .scans
+        .for_each_last_mut(|scanned| scanned.volume.claude.chats.end_all());
+    Ok(())
+}
+
 /// Starts a Claude job on a drive's last scan and gives its request id at once. `on_event` then hears Working,
 /// Slow (after 20 seconds), and Done with the checked answer or Failed with why. One request may run per job
-/// and drive at a time; [`claude_cancel`] stops one.
+/// and drive at a time; [`claude_cancel`] stops one. `scan` is the scan the UI's map came from: a job about a scan
+/// the drive no longer has fails, and changes nothing.
 #[tauri::command]
 async fn claude_start(
     mount_point: String,
+    scan: u64,
     job: claude::Job,
     on_event: Channel<claude::Event>,
     app: AppHandle,
 ) -> Result<String, String> {
+    Ok(claude_spawn(app, mount_point, scan, job, on_event))
+}
+
+/// Starts `job` on the drive's scan `scan` in the background and gives its request id.
+fn claude_spawn(
+    app: AppHandle,
+    mount_point: String,
+    scan: u64,
+    job: claude::Job,
+    on_event: Channel<claude::Event>,
+) -> String {
     let session = app.state::<Session>();
     let n = session.claude_next.fetch_add(1, Ordering::Relaxed) + 1;
     let request_id = format!("claude-{n}");
@@ -512,7 +589,7 @@ async fn claude_start(
         send(claude::Event::Working {
             request_id: id.clone(),
         });
-        let result = claude_job(&worker, &mount_point, &job, &cancel, &mut || {
+        let result = claude_job(&worker, &mount_point, scan, &job, &cancel, &mut || {
             send(claude::Event::Slow {
                 request_id: id.clone(),
             })
@@ -529,25 +606,42 @@ async fn claude_start(
             },
         });
     });
-    Ok(request_id)
+    request_id
 }
 
-/// Sends a chat message: [`claude_start`] with Ask, the whole conversation so far with the newest message last.
+/// Asks the person's question `text` about `about` in the chat `conversation` of the drive's scan `scan`, or with
+/// no `conversation` in a new chat, begun now in the privacy mode now. The core keeps the chat and sends its turns
+/// so far; the UI sends only the new question. Gives the request id and the chat's id. A question to a chat that a
+/// privacy change ended fails with `chatEnded`, sending nothing: the UI asks it again in a new chat.
 #[tauri::command]
 async fn claude_chat(
     mount_point: String,
+    scan: u64,
+    conversation: Option<String>,
     about: claude::About,
-    messages: Vec<claude::Message>,
+    text: String,
     on_event: Channel<claude::Event>,
     app: AppHandle,
-) -> Result<String, String> {
-    claude_start(
-        mount_point,
-        claude::Job::Ask { about, messages },
-        on_event,
-        app,
-    )
-    .await
+) -> Result<claude::ChatStarted, String> {
+    let conversation = match conversation {
+        Some(id) => id,
+        None => {
+            let session = app.state::<Session>();
+            let _mode = lock(&session.claude_mode);
+            let privacy = claude::settings::load(&claude_home(&app)?).privacy;
+            on_scan(&session.scans, &mount_point, scan, |scanned| {
+                Ok(scanned.volume.claude.chats.open(about, privacy))
+            })?
+        }
+    };
+    let job = claude::Job::Ask {
+        conversation: conversation.clone(),
+        text,
+    };
+    Ok(claude::ChatStarted {
+        request_id: claude_spawn(app, mount_point, scan, job, on_event),
+        conversation,
+    })
 }
 
 /// Stops a running request: its Claude Code process tree is killed, and it ends Failed with Cancelled.
@@ -558,47 +652,48 @@ fn claude_cancel(request_id: String, session: State<'_, Session>) {
     }
 }
 
-/// One job, start to end: prepared from the drive's scan, asked of Claude Code without holding the scan, and
-/// applied to the same scan only if it is still the drive's and hasn't run a plan.
+/// One job, start to end: prepared from the drive's scan `scan` (refused if the drive's scan is another one now),
+/// asked of Claude Code without holding the scan, and applied to the same scan only if it is still the drive's and
+/// hasn't run a plan. The settings are read and the job prepared under [`Session::claude_mode`], so the job runs in
+/// the mode it was prepared in, and a chat is asked in only if no privacy change has ended it.
 fn claude_job(
     app: &AppHandle,
     mount_point: &str,
+    scan: u64,
     job: &claude::Job,
     cancel: &CancelToken,
     slow: &mut dyn FnMut(),
 ) -> Result<claude::Answer, Failure> {
     let session = app.state::<Session>();
     let home = claude_home(app).map_err(Failure::error)?;
-    let settings = claude::settings::load(&home);
-    if !settings.enabled {
-        return Err(Failure::error("Claude is off. Turn it on first."));
-    }
     let program = claude::discovery::locate().ok_or(Failure::NotFound)?;
     let env = session.mode.env_for(mount_point).map_err(Failure::error)?;
-    let readable = if settings.privacy {
-        None
-    } else {
-        let drives = match &session.mode {
-            Mode::Real => vacancy_core::list_volumes()
-                .map(|v| v.into_iter().map(|v| v.mount_point).collect())
-                .unwrap_or_else(|_| vec![mount_point.to_owned()]),
-            _ => Vec::new(),
-        };
-        Some(claude::readable(&env, &drives))
+    let drives: Vec<String> = match &session.mode {
+        Mode::Real => vacancy_core::list_volumes()
+            .map(|v| v.into_iter().map(|v| v.mount_point).collect())
+            .unwrap_or_else(|_| vec![mount_point.to_owned()]),
+        _ => Vec::new(),
     };
-    let prepared = session.scans.with_last(mount_point, |last| {
-        let scanned = last
-            .filter(|s| !s.spent)
-            .ok_or_else(|| Failure::error("Scan this drive first, then ask Claude."))?;
-        if scanned.duplicates.is_some() && adds_items(job) {
-            return Err(Failure::error(
-                "Vacancy is still looking for duplicate files. Ask Claude when it has finished.",
-            ));
+    let (readable, prepared) = {
+        let _mode = lock(&session.claude_mode);
+        let settings = claude::settings::load(&home);
+        if !settings.enabled {
+            return Err(Failure::error("Claude is off. Turn it on first."));
         }
-        let prepared = claude::prepare(job, &scanned.volume, &env, readable.as_deref(), cancel)?;
-        Ok((scanned.generation, prepared))
-    });
-    let (generation, prepared) = prepared?;
+        let readable = (!settings.privacy).then(|| claude::readable(&env, &drives));
+        let prepared = session.scans.with_last(mount_point, |last| {
+            let scanned = last
+                .filter(|s| s.generation == scan && !s.spent)
+                .ok_or_else(|| Failure::error(SCAN_GONE))?;
+            if scanned.duplicates.is_some() && adds_items(job) {
+                return Err(Failure::error(
+                    "Vacancy is still looking for duplicate files. Ask Claude when it has finished.",
+                ));
+            }
+            claude::prepare(job, &scanned.volume, &env, readable.as_deref(), cancel)
+        });
+        (readable, prepared?)
+    };
     let cli = ClaudeCode {
         program,
         access: match readable {
@@ -616,7 +711,7 @@ fn claude_job(
     )?;
     session.scans.with_last_mut(mount_point, |last| {
         let scanned = last
-            .filter(|s| s.generation == generation && !s.spent)
+            .filter(|s| s.generation == scan && !s.spent)
             .ok_or_else(|| {
                 Failure::error("The scan changed while Claude was answering. Ask again.")
             })?;
@@ -637,35 +732,32 @@ fn adds_items(job: &claude::Job) -> bool {
     )
 }
 
-/// Picks the layout a Tidy up sort uses from now on: the built-in rules', or Claude's once it has suggested one.
-/// Gives the sorts in use again.
+/// Picks the layout a Tidy up sort uses from now on, on the drive's scan `scan` only: the built-in rules', or
+/// Claude's once it has suggested one. Gives the map, proposals and sorts again.
 #[tauri::command]
 async fn claude_choose_layout(
     mount_point: String,
+    scan: u64,
     tidy_id: String,
     layout: TidyLayout,
     session: State<'_, Session>,
-) -> Result<Vec<TidyProposal>, String> {
-    session.scans.with_last_mut(&mount_point, |last| {
-        let scanned = last
-            .filter(|s| !s.spent)
-            .ok_or("Scan this drive again first.")?;
+) -> Result<claude::Refreshed, String> {
+    on_scan(&session.scans, &mount_point, scan, |scanned| {
         scanned.volume.tidy.choose(&tidy_id, layout)?;
-        Ok(scanned.volume.tidy.proposals())
+        Ok(claude::Refreshed::of(&mut scanned.volume))
     })
 }
 
-/// Takes Claude's items `ids` out of the drive's proposals again (Keep mine). Only Claude's own items.
+/// Takes Claude's items `ids` out of the drive's scan `scan` again (Keep mine), and only that scan's: an id like
+/// `claude-d17` is another item in another scan. Only Claude's own items.
 #[tauri::command]
 async fn claude_remove_items(
     mount_point: String,
+    scan: u64,
     ids: Vec<String>,
     session: State<'_, Session>,
 ) -> Result<claude::Refreshed, String> {
-    session.scans.with_last_mut(&mount_point, |last| {
-        let scanned = last
-            .filter(|s| !s.spent)
-            .ok_or("Scan this drive again first.")?;
+    on_scan(&session.scans, &mount_point, scan, |scanned| {
         claude::remove_items(&mut scanned.volume, &ids)
     })
 }
@@ -805,6 +897,7 @@ async fn scan_volume(
             };
             if session.scans.finish(&mount_point, generation, scanned) {
                 Ok(ScanOutcome::Done {
+                    scan: generation,
                     overview,
                     proposals,
                     tidy,
@@ -1578,6 +1671,68 @@ mod tests {
             "a drive plugged back in scans afresh"
         );
         assert_eq!(last(&scans, C), Some(3));
+    }
+
+    /// A drive's scan as `on_scan` sees it, counting the changes made to it.
+    #[derive(Debug, PartialEq)]
+    struct Stub {
+        generation: u64,
+        spent: bool,
+        changes: u32,
+    }
+
+    impl Stamped for Stub {
+        fn generation(&self) -> u64 {
+            self.generation
+        }
+        fn spent(&self) -> bool {
+            self.spent
+        }
+    }
+
+    fn stub(generation: u64) -> Stub {
+        Stub {
+            generation,
+            spent: false,
+            changes: 0,
+        }
+    }
+
+    fn change(scans: &Scans<Stub>, drive: &str, scan: u64) -> Result<u32, String> {
+        on_scan(scans, drive, scan, |s| {
+            s.changes += 1;
+            Ok(s.changes)
+        })
+    }
+
+    /// Claude's commands (Keep mine taking items out, a layout picked, a chat begun, a job) name the scan their map
+    /// came from. Item ids like `claude-d17` come again in the next scan, so one meant for a replaced scan must
+    /// change nothing in the new one.
+    #[test]
+    fn claude_commands_change_only_the_scan_they_name() {
+        let scans = Scans::<Stub>::default();
+        let (first, _) = scans.begin(C);
+        assert!(scans.finish(C, first, stub(first)));
+        assert_eq!(change(&scans, C, first), Ok(1));
+
+        // The drive is scanned again: while it scans, and once it has finished, the old scan's commands are refused.
+        let (second, _) = scans.begin(C);
+        assert_eq!(change(&scans, C, first), Err(SCAN_GONE.to_owned()));
+        assert!(scans.finish(C, second, stub(second)));
+        assert_eq!(change(&scans, C, first), Err(SCAN_GONE.to_owned()));
+        assert_eq!(scans.with_last(C, |l| l.map(|s| s.changes)), Some(0));
+        assert_eq!(change(&scans, C, second), Ok(1));
+
+        // Another drive's scan, or one that ran its plan, is refused too.
+        let (d, _) = scans.begin(D);
+        assert!(scans.finish(D, d, stub(d)));
+        assert_eq!(change(&scans, C, d), Err(SCAN_GONE.to_owned()));
+        assert_eq!(change(&scans, D, second), Err(SCAN_GONE.to_owned()));
+        scans.with_last_mut(D, |l| l.unwrap().spent = true);
+        assert_eq!(change(&scans, D, d), Err(SCAN_GONE.to_owned()));
+        // A drive that went away has no scan to change.
+        scans.forget(C);
+        assert_eq!(change(&scans, C, second), Err(SCAN_GONE.to_owned()));
     }
 
     #[test]

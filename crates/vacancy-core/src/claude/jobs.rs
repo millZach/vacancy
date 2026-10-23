@@ -43,9 +43,6 @@ const MAX_LOOSE: usize = 300;
 /// The messages of a chat sent again each turn, and the characters of each.
 const MAX_MESSAGES: usize = 12;
 pub(crate) const MAX_MESSAGE_CHARS: usize = 2000;
-/// Why a chat with turns from privacy mode off isn't sent with privacy mode on.
-pub const PRIVACY_TURNS: &str = "This chat began with privacy mode off. With it on, Vacancy won't send what was \
-said then. Start a new chat.";
 /// A folder's biggest items a chat about it sends.
 const MAX_CHILDREN: usize = 40;
 
@@ -70,11 +67,24 @@ impl Prepared {
 
 #[derive(Debug)]
 enum Context {
-    Review { plan: Vec<String> },
-    Pick { plan: Vec<String>, unknown: Unknown },
-    Ask,
-    Explain { unknown: Unknown },
-    Tidy { ids: Vec<String> },
+    Review {
+        plan: Vec<String>,
+    },
+    Pick {
+        plan: Vec<String>,
+        unknown: Unknown,
+    },
+    /// The chat asked in, and the question, to keep with Claude's reply once it is checked.
+    Ask {
+        conversation: String,
+        question: String,
+    },
+    Explain {
+        unknown: Unknown,
+    },
+    Tidy {
+        ids: Vec<String>,
+    },
 }
 
 /// The biggest folders the rules don't recognize, as sent: request-local entry ids, and what each is in the scan.
@@ -96,7 +106,7 @@ pub fn prepare(
     let privacy = readable.is_none();
     let shown = |p: &Path| shown(p, env, privacy);
     // With privacy mode on, Claude's items made with it off go by their name in the scan only.
-    let redact = |p: &Proposal| privacy && scanned.claude_off.made(&p.id);
+    let redact = |p: &Proposal| privacy && scanned.claude.off.made(&p.id);
     let proposals = scanned.proposals.list();
     let (context, prompt, schema) = match job {
         Job::ReviewPlan { ids } => {
@@ -189,18 +199,21 @@ pub fn prepare(
                 ),
             )
         }
-        Job::Ask { about, messages } => {
-            // Nothing said with privacy mode off goes back to Claude with it on: neither a turn marked as made then,
-            // nor a reply Claude gave then, however the turn is marked.
-            if privacy
-                && messages
-                    .iter()
-                    .any(|m| !m.privacy || scanned.claude_off.said(&m.text))
-            {
-                return Err(Failure::error(PRIVACY_TURNS));
-            }
+        Job::Ask {
+            conversation: id,
+            text,
+        } => {
+            // The chat's turns come from the core, and only from a chat begun in this privacy mode that no privacy
+            // change has ended since: nothing said with privacy mode off goes back to Claude with it on.
+            let (about, turns) = scanned.claude.chats.asking(id, privacy)?;
+            let question = Message {
+                from: Speaker::Person,
+                text: text.trim().chars().take(MAX_MESSAGE_CHARS).collect(),
+                privacy,
+            };
+            let messages: Vec<Message> = turns.iter().cloned().chain([question.clone()]).collect();
             let (subject, dirs) = subject_json(about, scanned, &shown, privacy)?;
-            let conversation = conversation(messages)?;
+            let conversation = conversation(&messages)?;
             let reads = read_note(readable, &dirs, &shown);
             let prompt = format!(
                 "Job: answer the person's questions about one item of their disk.\n{reads}\n\
@@ -214,7 +227,10 @@ pub fn prepare(
                 serde_json::to_string_pretty(&conversation).unwrap_or_default()
             );
             (
-                Context::Ask,
+                Context::Ask {
+                    conversation: id.clone(),
+                    question: question.text,
+                },
                 prompt,
                 schema(
                     json!({
@@ -500,6 +516,8 @@ pub fn apply(
     let privacy = prepared.privacy;
     let mut dropped = Vec::new();
     let mut changed = false;
+    // A chat's question and reply, kept in its chat once the whole answer has passed.
+    let mut chat: Option<(String, String, String)> = None;
     let (result, opened) = match prepared.context {
         Context::Review { plan } => {
             let out: ReviewOut = parse(reply.structured)?;
@@ -645,13 +663,14 @@ pub fn apply(
                 out.opened,
             )
         }
-        Context::Ask => {
+        Context::Ask {
+            conversation,
+            question,
+        } => {
             let out: AskOut = parse(reply.structured)?;
             let reply = clean(&out.reply, 3000, true)
                 .ok_or_else(|| Failure::error("Claude's answer was empty. Ask again."))?;
-            if !privacy {
-                scanned.claude_off.reply(&reply);
-            }
+            chat = Some((conversation, question, reply.clone()));
             (
                 JobResult::Ask {
                     reply,
@@ -782,6 +801,13 @@ pub fn apply(
     };
     if cancel.is_cancelled() {
         return Err(Failure::Cancelled);
+    }
+    if let Some((conversation, question, reply)) = chat {
+        // A chat ended while Claude answered (privacy mode changed) keeps nothing, and its answer isn't shown.
+        scanned
+            .claude
+            .chats
+            .answered(&conversation, privacy, question, reply)?;
     }
     if changed {
         scanned.reshape();
@@ -970,7 +996,7 @@ fn admit_all(
         let id = proposal.id.clone();
         added.push(proposal.clone());
         scanned.proposals.insert_advice(proposal, target);
-        scanned.claude_off.item(&id, !privacy);
+        scanned.claude.off.item(&id, !privacy);
         // Delete wins over sort: a sort leaves out a loose file this item takes, while it is in the plan.
         scanned.tidy.cover(&scanned.snapshot, &id, &[target]);
     }
@@ -1351,7 +1377,7 @@ fn subject_json(
                 .ok_or_else(|| {
                     Failure::error("That item isn't in this scan any more. Scan again.")
                 })?;
-            let redact = privacy && scanned.claude_off.made(&p.id);
+            let redact = privacy && scanned.claude.off.made(&p.id);
             let mut v = proposal_json(p, None, shown, redact);
             if let Some(note) = p.claude_note.as_ref().filter(|_| !redact) {
                 v["claudeSaid"] = json!(note);

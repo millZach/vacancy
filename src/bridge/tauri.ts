@@ -2,10 +2,10 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import type {
   AdvisorStatus,
   Bridge,
+  ClaudeChatStarted,
   ClaudeEvent,
   ClaudeRefreshed,
   ClaudeStatus,
-  TidyProposal,
   DuplicateProgress,
   DuplicatesOutcome,
   FullDiskAccess,
@@ -59,20 +59,20 @@ export function createTauriBridge(): Bridge {
     claudeStatus: () => invoke<ClaudeStatus>('claude_status'),
     claudeSetEnabled: (on) => invoke<ClaudeStatus>('claude_set_enabled', { on }),
     claudeSetPrivacy: (on) => invoke<ClaudeStatus>('claude_set_privacy', { on }),
-    claudeStart: (mountPoint, job, onEvent) => {
+    claudeStart: (mountPoint, scan, job, onEvent) => {
       const onEventChannel = new Channel<ClaudeEvent>();
       onEventChannel.onmessage = onEvent;
-      return invoke<string>('claude_start', { mountPoint, job, onEvent: onEventChannel });
+      return invoke<string>('claude_start', { mountPoint, scan, job, onEvent: onEventChannel });
     },
-    claudeChat: (mountPoint, about, messages, onEvent) => {
+    claudeChat: (mountPoint, scan, conversation, about, text, onEvent) => {
       const onEventChannel = new Channel<ClaudeEvent>();
       onEventChannel.onmessage = onEvent;
-      return invoke<string>('claude_chat', { mountPoint, about, messages, onEvent: onEventChannel });
+      return invoke<ClaudeChatStarted>('claude_chat', { mountPoint, scan, conversation, about, text, onEvent: onEventChannel });
     },
     claudeCancel: (requestId) => invoke<undefined>('claude_cancel', { requestId }),
-    claudeChooseLayout: (mountPoint, tidyId, layout) =>
-      invoke<TidyProposal[]>('claude_choose_layout', { mountPoint, tidyId, layout }),
-    claudeRemoveItems: (mountPoint, ids) => invoke<ClaudeRefreshed>('claude_remove_items', { mountPoint, ids }),
+    claudeChooseLayout: (mountPoint, scan, tidyId, layout) =>
+      invoke<ClaudeRefreshed>('claude_choose_layout', { mountPoint, scan, tidyId, layout }),
+    claudeRemoveItems: (mountPoint, scan, ids) => invoke<ClaudeRefreshed>('claude_remove_items', { mountPoint, scan, ids }),
   };
 }
 
