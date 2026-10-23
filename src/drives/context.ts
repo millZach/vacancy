@@ -55,9 +55,10 @@ export interface ReadyDrives {
   claudeApplied: (mountPoint: string, run: number, refreshed: ClaudeRefreshed) => void;
   /**
    * Sets a drive's whole plan for its scan `run` (Let Claude pick, and Keep mine putting the plan back). With `from`,
-   * only while the plan is still at that version (`planVersion`): an edit made meanwhile is never overwritten.
+   * only while the plan is still at that version (`planVersion`): an edit made meanwhile is never overwritten. With
+   * `expect` too, only while the plan holds exactly those ids.
    */
-  setPlan: (mountPoint: string, run: number, ids: string[], from?: number) => void;
+  setPlan: (mountPoint: string, run: number, ids: string[], from?: number, expect?: string[]) => void;
   /** While a plan runs, switching drives is disabled. `runPlan` sets it; this is for anything else that must hold. */
   setRunning: (running: boolean) => void;
   /**

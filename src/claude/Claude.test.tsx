@@ -518,6 +518,43 @@ describe('the jobs', () => {
     expect(within(b).getByText(/You’re using my plan/)).toBeInTheDocument();
   });
 
+  it('a Keep mine coming back in the same batch as a newer pick’s answer never puts its plan back', async () => {
+    const bridge = windows({ claude: 'on' });
+    // Pick A's Keep mine: the core takes the items out at once; its reply waits for `release`.
+    const realRemove = bridge.claudeRemoveItems.bind(bridge);
+    let release: () => Promise<void> = () => Promise.resolve();
+    vi.spyOn(bridge, 'claudeRemoveItems').mockImplementationOnce((m, s, ids) => {
+      const removed = realRemove(m, s, ids);
+      return new Promise((resolve, reject) => {
+        release = () => removed.then(resolve, reject);
+      });
+    });
+    await toMap(bridge);
+    await openPlan();
+    const a = await job('Let Claude pick', 'pickPlan');
+    expect(checked('Old installers in Downloads')).toBe(false);
+    await userEvent.click(within(a).getByRole('button', { name: 'Keep mine' }));
+    // Pick B runs (the same ticks, so the plan's version stays), and its Done is held back.
+    const realStart = bridge.claudeStart.bind(bridge);
+    const held: ClaudeEvent[] = [];
+    let deliver: (e: ClaudeEvent) => void = () => {};
+    vi.spyOn(bridge, 'claudeStart').mockImplementationOnce((m, s, j, onEvent) => {
+      deliver = onEvent;
+      return realStart(m, s, j, (e) => (e.kind === 'done' ? held.push(e) : onEvent(e)));
+    });
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Let Claude pick' }));
+    await waitFor(() => expect(held).toHaveLength(1));
+    // B's Done and A's Keep mine reply land in one batch: no render, so no effect, comes between them.
+    await act(async () => {
+      deliver(held[0]!);
+      await release();
+    });
+    expect(await within(a).findByText('Claude picked again meanwhile, so Vacancy left your plan as it is.')).toBeInTheDocument();
+    expect(checked('Old installers in Downloads')).toBe(false);
+    const b = [...panel().querySelectorAll<HTMLElement>('.cp-entry[data-job="pickPlan"]')].at(-1)!;
+    expect(within(b).getByRole('button', { name: 'Keep mine' })).toBeInTheDocument();
+  });
+
   it('never takes Claude’s items out of a scan that replaced the one it picked on', async () => {
     const bridge = windows({ claude: 'on' });
     const listeners: ((e: ClaudeEvent) => void)[] = [];
@@ -608,6 +645,47 @@ describe('the jobs', () => {
     act(() => listeners[1]!({ kind: 'done', requestId: 'claude-r2', answer: answer('The retry’s answer.') }));
     expect(await within(panel()).findByText(/The retry’s answer/)).toBeInTheDocument();
     expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('a chat answered before the core says which chat it is keeps that chat for its next question', async () => {
+    const bridge = windows({ claude: 'on' });
+    const listeners: ((e: ClaudeEvent) => void)[] = [];
+    let begun: (started: ClaudeChatStarted) => void = () => {};
+    const chat = vi.spyOn(bridge, 'claudeChat').mockImplementation((_m, _s, _c, _a, _t, onEvent) => {
+      listeners.push(onEvent);
+      return new Promise((resolve) => {
+        begun = resolve;
+      });
+    });
+    await toMap(bridge);
+    await openPlan();
+    const row = within(tray()).getByText('Rust build output in 12 projects').closest('.tray-row') as HTMLElement;
+    await userEvent.click(within(row).getByRole('button', { name: 'Ask Claude' }));
+    await waitFor(() => expect(listeners).toHaveLength(1));
+    // Done comes first, then the core's ChatStarted with the chat's id.
+    act(() =>
+      listeners[0]!({
+        kind: 'done',
+        requestId: 'claude-r1',
+        answer: {
+          job: 'ask',
+          basis: { privacy: true, text: 'From names, sizes and dates only.', opened: [], refused: [] },
+          result: { kind: 'ask', reply: 'Build output; it comes back.', followUps: [] },
+          dropped: [],
+          refreshed: null,
+        },
+      }),
+    );
+    expect(await within(panel()).findByText(/Build output; it comes back/)).toBeInTheDocument();
+    await act(async () => {
+      begun({ requestId: 'claude-r1', conversation: 'chat-in-core-1' });
+      await Promise.resolve();
+    });
+    // The follow-up goes in that same chat, not a new one.
+    await userEvent.type(within(panel()).getByRole('textbox', { name: 'Ask about Rust build output in 12 projects' }), 'Is it safe?{Enter}');
+    await waitFor(() => expect(chat).toHaveBeenCalledTimes(2));
+    expect(chat.mock.calls[0]![2]).toBeNull();
+    expect(chat.mock.calls[1]![2]).toBe('chat-in-core-1');
   });
 
   it('Ask Claude: a row’s chat gets a first answer, suggested follow-ups and the composer', async () => {

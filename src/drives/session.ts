@@ -152,9 +152,10 @@ export type Action =
   | { type: 'claudeApplied'; mountPoint: string; run: number; refreshed: ClaudeRefreshed }
   /**
    * The plan of the scan `run` as a whole (Let Claude pick, or Keep mine putting the plan back). With `from`, only
-   * while the plan is still at that version: an edit made meanwhile is never overwritten.
+   * while the plan is still at that version: an edit made meanwhile is never overwritten. With `expect` too, only
+   * while the plan holds exactly those ids (Keep mine: as its pick's answer left it).
    */
-  | { type: 'setPlan'; mountPoint: string; run: number; ids: string[]; from?: number }
+  | { type: 'setPlan'; mountPoint: string; run: number; ids: string[]; from?: number; expect?: string[] }
   /** The user confirmed the plan and it started: drive switching and scanning wait until it ends. */
   | { type: 'runStarted'; mountPoint: string; plan: PlanSummary }
   /** What the run did since the last batch, in order. */
@@ -245,10 +246,15 @@ function goTo(s: Session, mountPoint: string, screen: Screen): Session {
 
 type DoneScan = Extract<DriveScan, { phase: 'done' }>;
 
+/** Whether two plans hold the same ids. */
+function sameIds(a: readonly string[], b: readonly string[]): boolean {
+  const set = new Set(b);
+  return new Set(a).size === set.size && a.every((id) => set.has(id));
+}
+
 /** `scan` with the plan `plan`: its version goes up by one when what is in it changes, and stays when it doesn't. */
 function withPlan(scan: DoneScan, plan: string[]): DoneScan {
-  const same = plan.length === scan.plan.length && plan.every((id) => scan.plan.includes(id));
-  return same ? scan : { ...scan, plan, planVersion: scan.planVersion + 1 };
+  return sameIds(plan, scan.plan) ? scan : { ...scan, plan, planVersion: scan.planVersion + 1 };
 }
 
 /** Applies `change` to the plan run of a drive whose scan is done. `change` returns the run as it was to do nothing. */
@@ -411,6 +417,7 @@ export function reduce(s: Session, a: Action): Session {
     case 'setPlan':
       return onScan(s, a.mountPoint, a.run, (scan) => {
         if (a.from !== undefined && a.from !== scan.planVersion) return scan;
+        if (a.expect !== undefined && !sameIds(a.expect, scan.plan)) return scan;
         const known = (id: string) => scan.proposals.some((p) => p.id === id) || scan.tidy.some((t) => t.id === id);
         return withPlan(scan, [...new Set(a.ids)].filter(known));
       });

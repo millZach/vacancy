@@ -89,11 +89,9 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   const [ended, setEnded] = useState<boolean | null>(null);
   const [convos, setConvos] = useState<Record<string, Conversation>>({});
   const drivesRef = useRef(drives);
-  const convosRef = useRef(convos);
   const statusRef = useRef(status);
   useEffect(() => {
     drivesRef.current = drives;
-    convosRef.current = convos;
     statusRef.current = status;
   });
   /** Privacy mode is changing, at once (state comes a render later): no request starts until the core has the new mode. */
@@ -103,6 +101,17 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
    * that isn't the one in it, is no longer wanted and is ignored.
    */
   const requests = useRef(new Map<string, Attempt>());
+  /**
+   * Each chat's newest attempt, by `drive#run/entry`, apart from `requests`: an attempt that is answered before the
+   * core says which chat it went in still gets the chat's id, so the next question goes in the same chat. Cancel, a
+   * newer attempt (a retry, a new chat after one ended) or the end of every conversation drops it.
+   */
+  const chatAttempts = useRef(new Map<string, number>());
+  /**
+   * Each drive scan's newest answered Let Claude pick, by `drive#run`, kept the moment an answer is handled (the
+   * conversations in state come a render later, and their mirror an effect after that). Only it may put a plan back.
+   */
+  const newestPick = useRef(new Map<string, string>());
   const turnOnToken = useRef(0);
 
   const ready = (s: ClaudeStatus) => {
@@ -184,6 +193,8 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   const endAll = () => {
     for (const r of requests.current.values()) if (r.id) void bridge.claudeCancel(r.id);
     requests.current.clear();
+    chatAttempts.current.clear();
+    newestPick.current.clear();
     const had = Object.values(convos).some((c) => c.entries.length > 0);
     setConvos({});
     return had;
@@ -254,6 +265,9 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
    */
   const picked = (scope: Scope, id: string, sent: number, answer: Extract<ClaudeEvent, { kind: 'done' }>['answer']) => {
     if (answer.result.kind !== 'pick') return;
+    // This answer's card is the newest pick from now on, at once: a Keep mine about an older one, coming back in
+    // the same batch, sees it.
+    newestPick.current.set(keyOf(scope), id);
     const r = answer.result;
     const d = drivesRef.current;
     const added = r.changes.filter((c) => c.change === 'add').map((c) => c.id);
@@ -302,6 +316,7 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     const token = ++seq;
     const scan = scanOf(scope);
     if (!scan) return;
+    chatAttempts.current.set(rkey, token);
     const onEvent = (event: ClaudeEvent) => {
       if (event.kind === 'working' || !wanted(rkey, token, event)) return;
       if (event.kind === 'slow')
@@ -333,7 +348,8 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       token,
       () =>
         bridge.claudeChat(scope.mountPoint, scan.scan, chat.conversation, chat.about, text, onEvent).then((started) => {
-          if (current(rkey, token))
+          // Still this chat's newest attempt, running or answered already (its Done can come first): the chat's id.
+          if (chatAttempts.current.get(rkey) === token)
             editEntry<ChatEntry>(scope, chat.id, (e) => ({ ...e, conversation: started.conversation }));
           return started.requestId;
         }),
@@ -378,6 +394,7 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   const cancel = (w: Where, entryId: string) => {
     const rkey = `${keyOf(w)}/${entryId}`;
     const r = requests.current.get(rkey);
+    chatAttempts.current.delete(rkey);
     if (r?.id) {
       requests.current.delete(rkey);
       void bridge.claudeCancel(r.id);
@@ -397,8 +414,9 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
 
   /**
    * Keep mine: takes the pick's own items back out of the scan it was made on, then puts the plan back. The plan goes
-   * back only if, when that is done, this card would still offer Keep mine: the newest pick, with the plan as its
-   * answer left it. A newer pick accepted meanwhile, or an edit, stays as it is.
+   * back only if, when that is done, this card is still the newest pick (`newestPick`, kept as each answer is
+   * handled) and the plan is still as its answer left it: at its version with its ticks, which the drive's reducer
+   * checks as it puts the plan back. A newer pick meanwhile, or an edit, stays as it is.
    */
   const keepMine = (scope: Scope, entryId: string) => {
     const pick = openPick(scope, entryId)?.pick;
@@ -408,20 +426,20 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       editEntry<JobEntry>(scope, entryId, (e) => (e.pick ? { ...e, pick: { ...e.pick, ...p } } : e));
     setPick({ busy: true, error: null });
     const back = () => {
+      const newest = newestPick.current.get(keyOf(scope)) === entryId;
+      // Only the newest pick puts the plan back, and the reducer does so only at the pick's version with its ticks.
+      if (newest) drivesRef.current?.setPlan(scope.mountPoint, scope.run, pick.before, pick.version, pick.after);
+      // What the card says; the plan is decided above. The plan as last drawn tells an edit made meanwhile.
       const now = scanOf(scope);
-      const c = convosRef.current[keyOf(scope)] ?? EMPTY;
-      const entry = c.entries.find((e): e is JobEntry => e.id === entryId && e.kind === 'job');
-      const offer = entry && now ? pickOffer(c, entry, now.plan, now.planVersion) : null;
-      if (offer === 'open') drivesRef.current?.setPlan(scope.mountPoint, scope.run, pick.before, pick.version);
+      const unchanged = now !== null && now.planVersion === pick.version && sameSet(now.plan, pick.after);
       setPick({
         busy: false,
         choice: 'kept',
-        error:
-          offer === 'open'
+        error: !newest
+          ? 'Claude picked again meanwhile, so Vacancy left your plan as it is.'
+          : unchanged
             ? null
-            : offer === 'replaced'
-              ? 'Claude picked again meanwhile, so Vacancy left your plan as it is.'
-              : 'Your plan changed meanwhile, so Vacancy left your ticks as they are.',
+            : 'Your plan changed meanwhile, so Vacancy left your ticks as they are.',
       });
     };
     if (pick.added.length === 0) return back();
