@@ -9,10 +9,13 @@
 //!   one, so a summary lists such a folder at most by its name and size and never what is inside.
 //!
 //! Most places are names: patterns match a path's components case-insensitively, anywhere in the path, so the
-//! same folder names mean the same thing in any home, the fixture's included. Matching more than is strictly needed
-//! only hides more. Claude Code's and Codex's own folders can also be moved (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`);
-//! each call inherits the app's environment, so wherever the app's environment puts them is hidden too, by path
-//! ([`config_dirs`]). Vacancy never reads what is inside them.
+//! same folder names mean the same thing in any home, the fixture's included. A browser's profile can have any name
+//! and a Firefox profile can be anywhere, so browser data is hidden by its stores' own names, never by a profile's
+//! name or place; the few store names that are also ordinary names (`Sessions`, `Shortcuts`) count anywhere below
+//! where browsers keep their profiles ([`PROFILES`]). Matching more than is strictly needed only hides more. Claude
+//! Code's and Codex's own folders can also be moved (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`); each call inherits the
+//! app's environment, so wherever the app's environment puts them is hidden too, by path ([`config_dirs`]). Vacancy
+//! never reads what is inside them.
 
 use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
@@ -43,19 +46,43 @@ pub enum Group {
     Vaults,
 }
 
-/// One always-hidden place: consecutive path components, matched anywhere in a path. Each component may hold `*`
-/// (any run of characters) and `|` between alternatives (`Cookies|Cookies-*`).
+/// One always-hidden place: consecutive path components, matched anywhere in a path, or only below one of the
+/// folders in `under`. Each component may hold `*` (any run of characters) and `|` between alternatives
+/// (`Cookies|Cookies-*`); a component that is just `**` stands for any number of folders, none included.
 #[derive(Clone, Copy, Debug)]
 struct Place {
     group: Group,
     kind: Kind,
+    under: &'static [&'static [&'static str]],
     parts: &'static [&'static str],
 }
+
+/// No folder above: a place matched anywhere.
+const ANYWHERE: &[&[&str]] = &[&[]];
+
+/// Where Chromium browsers keep their profiles. A profile is a folder of any name (`Default`, `Profile 1`, `Guest
+/// Profile`, or `Work` from `--profile-directory=Work`), so a name that means browser data only in a profile, and
+/// would mean something else in a person's own folders (`Sessions`, `Shortcuts`), is hidden at any depth below
+/// these, whatever the profile is called:
+const PROFILES: &[&[&str]] = &[
+    // Windows: `<vendor>\<browser>\User Data\<profile>`, for every Chromium browser (Edge, Chrome, Brave,
+    // Vivaldi, Chromium, Yandex, Arc).
+    &["User Data", "**"],
+    // Opera and Opera GX on Windows: the profile is `Opera Software\Opera Stable` itself, or a folder in it.
+    &["Opera Software", "**"],
+    // macOS: `~/Library/Application Support/<vendor>/<browser>/<profile>` (Google/Chrome, Microsoft Edge,
+    // BraveSoftware/Brave-Browser, Vivaldi, Chromium, Arc), or the browser's own folder (com.operasoftware.Opera),
+    // and the same inside an app's container. Other apps' folders of these names there are hidden too.
+    &["Application Support", "**"],
+    // A user data folder anywhere else (`--user-data-dir`), by the profile names Chromium gives.
+    &["Default|Profile *|* Profile"],
+];
 
 const fn folder(group: Group, parts: &'static [&'static str]) -> Place {
     Place {
         group,
         kind: Kind::Folder,
+        under: ANYWHERE,
         parts,
     }
 }
@@ -64,15 +91,41 @@ const fn file(group: Group, parts: &'static [&'static str]) -> Place {
     Place {
         group,
         kind: Kind::File,
+        under: ANYWHERE,
         parts,
     }
 }
 
-use Group::{Browser, Keys, Vaults};
+/// A folder in a browser profile, whatever the profile is called ([`PROFILES`]).
+const fn profile_folder(parts: &'static [&'static str]) -> Place {
+    Place {
+        group: Group::Browser,
+        kind: Kind::Folder,
+        under: PROFILES,
+        parts,
+    }
+}
 
-/// A Chromium browser's profile folder (Edge, Chrome, Brave, Vivaldi): `Default`, `Profile 1`, `Guest Profile`. The
-/// names that mean browser data only inside one are matched there.
-const PROFILE: &str = "Default|Profile *|* Profile";
+/// A file in a browser profile, whatever the profile is called ([`PROFILES`]).
+const fn profile_file(parts: &'static [&'static str]) -> Place {
+    Place {
+        group: Group::Browser,
+        kind: Kind::File,
+        under: PROFILES,
+        parts,
+    }
+}
+
+impl Place {
+    /// Each whole pattern the place stands for: its parts below each folder in `under`.
+    fn forms(&self) -> impl Iterator<Item = Vec<&'static str>> + '_ {
+        self.under
+            .iter()
+            .map(|above| above.iter().chain(self.parts).copied().collect())
+    }
+}
+
+use Group::{Browser, Keys, Vaults};
 
 /// Both platforms' places, in one list: a Windows name never matches on a Mac by accident in a way that matters,
 /// and a fixture of either kind is covered on both. A browser database's `-journal`, `-wal` and `-shm` siblings,
@@ -95,10 +148,13 @@ const PLACES: &[Place] = &[
     folder(Keys, &["Microsoft", "Credentials"]),
     folder(Keys, &["Microsoft", "Protect"]),
     folder(Keys, &["Library", "Keychains"]),
-    // Chromium browsers (Edge, Chrome, Brave, Vivaldi), in each profile, and Electron apps built on them: saved
-    // passwords, cookies (Network\Cookies included), history, autofill, sessions and site sign-ins. `Local State`
-    // holds the key that unlocks the saved passwords and cookies. Their caches (Cache, Code Cache, GPUCache) stay
-    // readable.
+    // Chromium browsers (Edge, Chrome, Brave, Vivaldi, Opera and the rest), in every profile whatever its name, and
+    // Electron apps built on them: saved passwords, cookies (Network\Cookies included), history, autofill,
+    // bookmarks, sessions, site sign-ins (local, session and IndexedDB storage) and extensions' own storage (where
+    // wallet extensions keep their vaults). `Local State` holds the key that unlocks the saved passwords and cookies.
+    // A name no one gives their own files is hidden anywhere, so a profile anywhere is covered; a name that is also
+    // an ordinary folder or file name only in a profile ([`PROFILES`]). Their caches (Cache, Code Cache, GPUCache)
+    // stay readable.
     file(Browser, &["Login Data*"]),
     file(Browser, &["Web Data|Web Data-*"]),
     file(Browser, &["Account Web Data|Account Web Data-*"]),
@@ -120,21 +176,27 @@ const PLACES: &[Place] = &[
         Browser,
         &["Current Session|Current Tabs|Last Session|Last Tabs"],
     ),
+    file(Browser, &["Bookmarks|Bookmarks.bak"]),
+    file(Browser, &["Top Sites|Top Sites-*"]),
     folder(Browser, &["Local Storage"]),
     folder(Browser, &["Session Storage"]),
-    file(Browser, &[PROFILE, "Top Sites|Top Sites-*"]),
-    file(Browser, &[PROFILE, "Shortcuts|Shortcuts-*"]),
-    file(Browser, &[PROFILE, "Favicons|Favicons-*"]),
-    file(Browser, &[PROFILE, "Bookmarks|Bookmarks.bak"]),
-    file(Browser, &[PROFILE, "DIPS|DIPS-*"]),
-    folder(Browser, &[PROFILE, "Sessions"]),
-    folder(Browser, &[PROFILE, "IndexedDB"]),
-    // Firefox, in each profile: saved passwords and the keys that unlock them (and the old stores they replaced),
-    // cookies, history and bookmarks, autofill and form history, site storage, the account it's signed in to, and
-    // the session it restores, with their backups.
-    file(Browser, &["logins*.json"]),
-    file(Browser, &["key3.db|key4.db*"]),
-    file(Browser, &["cert8.db|cert9.db*"]),
+    folder(Browser, &["IndexedDB"]),
+    folder(
+        Browser,
+        &["Local Extension Settings|Sync Extension Settings"],
+    ),
+    profile_file(&["Shortcuts|Shortcuts-*"]),
+    profile_file(&["Favicons|Favicons-*"]),
+    profile_file(&["DIPS|DIPS-*"]),
+    profile_folder(&["Sessions"]),
+    // Firefox, in every profile wherever it is kept (a profile can live in any folder), by its stores' own names:
+    // saved passwords and the keys that unlock them (and the old stores they replaced), cookies, history and
+    // bookmarks, autofill and form history, the account it's signed in to, the session it restores and extensions'
+    // synced storage, each with its siblings and backups; and its site storage by its layout (`storage/default`,
+    // `storage/permanent`, `storage/temporary`, `storage/private`), with the index of the sites in it.
+    file(Browser, &["logins*.json*"]),
+    file(Browser, &["key3.db*|key4.db*"]),
+    file(Browser, &["cert8.db*|cert9.db*"]),
     file(Browser, &["signons*"]),
     file(Browser, &["cookies.sqlite*"]),
     file(Browser, &["places.sqlite*"]),
@@ -142,11 +204,21 @@ const PLACES: &[Place] = &[
     file(Browser, &["formhistory.sqlite*"]),
     file(Browser, &["webappsstore.sqlite*"]),
     file(Browser, &["credentialstate.sqlite*"]),
+    file(Browser, &["storage.sqlite|storage.sqlite-*"]),
+    file(Browser, &["storage-sync*.sqlite*"]),
     file(Browser, &["autofill-profiles.json*"]),
     file(Browser, &["signedInUser.json*"]),
     file(Browser, &["sessionstore*"]),
     folder(Browser, &["sessionstore-backups"]),
     folder(Browser, &["bookmarkbackups"]),
+    folder(
+        Browser,
+        &[
+            "storage",
+            "default|permanent|temporary|private|to-be-removed",
+        ],
+    ),
+    file(Browser, &["storage", "ls-archive.sqlite*"]),
     folder(Browser, &["Profiles", "*", "storage"]),
     // Safari: its whole Library folder (history, form values, sessions, bookmarks), its cookies and its site data,
     // in the Library or in Safari's container. Its caches (Library/Caches) stay readable.
@@ -352,23 +424,28 @@ pub fn hides_in(path: &Path, config: &[PathBuf]) -> Option<Group> {
     }
     let names = names(path);
     PLACES.iter().find_map(|place| {
-        let k = place.parts.len();
-        if names.len() < k {
-            return None;
-        }
-        let at = |start: usize| {
-            place
-                .parts
-                .iter()
-                .zip(&names[start..start + k])
-                .all(|(p, n)| glob(p, n))
-        };
-        let found = match place.kind {
-            Kind::File => at(names.len() - k),
-            Kind::Folder => (0..=names.len() - k).any(at),
-        };
+        let whole = place.kind == Kind::File;
+        let found = place
+            .forms()
+            .any(|form| (0..names.len()).any(|start| match_from(&form, &names[start..], whole)));
         found.then_some(place.group)
     })
+}
+
+/// Whether the pattern `parts` matches the names `names` from their first: all of them when `whole` (a file, which
+/// a path must end with), or a leading run of them (a folder, which hides what is in it too). A part that is just
+/// `**` stands for any number of names, none included.
+fn match_from(parts: &[&str], names: &[String], whole: bool) -> bool {
+    match parts.split_first() {
+        None => !whole || names.is_empty(),
+        Some((&"**", rest)) => {
+            (0..=names.len()).any(|skip| match_from(rest, &names[skip..], whole))
+        }
+        Some((part, rest)) => {
+            names.first().is_some_and(|name| glob(part, name))
+                && match_from(rest, &names[1..], whole)
+        }
+    }
 }
 
 /// The group of the always-hidden place `path` is, or is in: [`hides_in`] with the app's [`config_dirs`].
@@ -418,7 +495,7 @@ pub fn deny_rules_in(config: &[PathBuf]) -> Vec<String> {
         }
     };
     for place in PLACES {
-        for joined in spellings(place.parts) {
+        for joined in place.forms().flat_map(|form| spellings(&form)) {
             for from in ["//**/", "//*/**/"] {
                 push(format!("Read({from}{joined})"));
                 if place.kind == Kind::Folder {
@@ -537,8 +614,9 @@ mod tests {
         assert!(!hides_name("invoice.pdf"));
     }
 
-    /// Every Chromium browser's profile, on Windows and macOS: saved passwords, cookies, history, autofill, sessions
-    /// and site sign-ins, each with its `-journal` and `-wal` siblings, and the key in `Local State`.
+    /// Every Chromium browser's profile, on Windows and macOS, whatever the profile is called (`Work` from
+    /// `--profile-directory=Work`): saved passwords, cookies, history, autofill, bookmarks, sessions, site sign-ins
+    /// and extensions' storage, each with its `-journal` and `-wal` siblings, and the key in `Local State`.
     #[test]
     fn hides_chromium_browser_data_with_its_journal_and_wal_siblings() {
         let profiles = [
@@ -549,6 +627,22 @@ mod tests {
             "Users/alex/Library/Application Support/Google/Chrome/Default",
             "Users/alex/Library/Application Support/Microsoft Edge/Profile 1",
             "Users/alex/Library/Application Support/BraveSoftware/Brave-Browser/Default",
+            // Profiles with names of their own.
+            "Users/alex/AppData/Local/Google/Chrome/User Data/Work",
+            "Users/alex/AppData/Local/Microsoft/Edge/User Data/Banking stuff",
+            "Users/alex/AppData/Local/Chromium/User Data/x",
+            "Users/alex/AppData/Local/Yandex/YandexBrowser/User Data/Personal",
+            "Users/alex/AppData/Roaming/Opera Software/Opera Stable",
+            "Users/alex/AppData/Roaming/Opera Software/Opera GX Stable/Work",
+            "Users/alex/Library/Application Support/Google/Chrome/Work",
+            "Users/alex/Library/Application Support/Microsoft Edge/Banking stuff",
+            "Users/alex/Library/Application Support/Vivaldi/Travel",
+            "Users/alex/Library/Application Support/Chromium/x",
+            "Users/alex/Library/Application Support/com.operasoftware.Opera",
+            "Users/alex/Library/Application Support/Arc/User Data/Work",
+            // A user data folder of its own (`--user-data-dir`), by Chromium's profile names.
+            "D:/ChromeData/Default",
+            "D:/ChromeData/Profile 2",
         ];
         let files = [
             "Login Data",
@@ -588,6 +682,8 @@ mod tests {
             "IndexedDB/https_mail.example.com_0.indexeddb.leveldb/000003.log",
             "Affiliation Database",
             "DIPS-wal",
+            "Local Extension Settings/nkbihfbeogaeaoehlefnkodbefgpgknn/000003.log",
+            "Sync Extension Settings/abc/MANIFEST-000001",
         ];
         for profile in profiles {
             for f in files {
@@ -606,6 +702,22 @@ mod tests {
             "Users/alex/AppData/Roaming/discord/Local Storage/leveldb/000005.ldb"
         ));
         assert!(hidden("Users/alex/AppData/Roaming/Slack/Cookies"));
+        // A user data folder of its own with a profile of its own name: the names no one gives their own files.
+        for f in [
+            "Login Data",
+            "Web Data",
+            "Cookies",
+            "History",
+            "Bookmarks",
+            "Bookmarks.bak",
+            "Top Sites",
+            "IndexedDB/x/000003.log",
+            "Local Storage/leveldb/x",
+            "Local Extension Settings/x/000003.log",
+        ] {
+            let path = format!("D:/ChromeData/Work/{f}");
+            assert!(hidden(&path), "{path} must stay hidden");
+        }
     }
 
     /// Firefox, on Windows and macOS: logins and their backup, the keys, form history and autofill, cookies, history,
@@ -615,6 +727,10 @@ mod tests {
         let profiles = [
             "Users/alex/AppData/Roaming/Mozilla/Firefox/Profiles/x1y2z3.default-release",
             "Users/alex/Library/Application Support/Firefox/Profiles/abc.default",
+            // Profiles kept wherever the person put them.
+            "D:/FirefoxProfiles/abc.custom",
+            "Users/alex/Documents/My Firefox",
+            "Volumes/Data/Firefox profiles/work",
         ];
         for profile in profiles {
             for f in [
@@ -623,7 +739,11 @@ mod tests {
                 "key3.db",
                 "key4.db",
                 "key4.db-journal",
+                "key3.db-journal",
+                "cert8.db",
                 "cert9.db",
+                "cert9.db-wal",
+                "logins.json.corrupt",
                 "signons.sqlite",
                 "signons3.txt",
                 "cookies.sqlite",
@@ -643,6 +763,15 @@ mod tests {
                 "sessionstore-backups/previous.jsonlz4",
                 "bookmarkbackups/bookmarks-2026-10-22.jsonlz4",
                 "storage/default/https+++mail.example.com/ls/data.sqlite",
+                "storage/default/moz-extension+++abc/idb/x.sqlite",
+                "storage/permanent/chrome/idb/x.sqlite",
+                "storage/temporary/https+++example.com/cache/x",
+                "storage/private/x",
+                "storage/to-be-removed/x",
+                "storage/ls-archive.sqlite",
+                "storage.sqlite",
+                "storage-sync-v2.sqlite",
+                "storage-sync-v2.sqlite-wal",
             ] {
                 let path = format!("{profile}/{f}");
                 assert!(hidden(&path), "{path} must stay hidden");
@@ -677,7 +806,29 @@ mod tests {
             "Users/alex/AppData/Local/Mozilla/Firefox/Profiles/x.default-release/cache2/entries/ABC",
             "Users/alex/Library/Caches/com.apple.Safari/Cache.db",
             "Users/alex/Library/Caches/Google/Chrome/Default/Cache/Cache_Data/f_0001",
+            // Caches in profiles with names of their own, and browsers' shared caches.
+            "Users/alex/AppData/Local/Google/Chrome/User Data/Work/Cache/Cache_Data/f_0001",
+            "Users/alex/AppData/Local/Google/Chrome/User Data/Work/Code Cache/js/x",
+            "Users/alex/AppData/Local/Google/Chrome/User Data/Work/GPUCache/data_0",
+            "Users/alex/AppData/Local/Google/Chrome/User Data/ShaderCache/x",
+            "Users/alex/AppData/Local/Google/Chrome/User Data/GrShaderCache/x",
+            "Users/alex/AppData/Local/Google/Chrome/User Data/GraphiteDawnCache/x",
+            "Users/alex/AppData/Local/Microsoft/Edge/User Data/Banking stuff/Cache/Cache_Data/f",
+            "Users/alex/AppData/Roaming/Opera Software/Opera Stable/Cache/Cache_Data/f",
+            "Users/alex/Library/Application Support/Google/Chrome/Work/GPUCache/data_0",
+            "Users/alex/Library/Application Support/Google/Chrome/Work/Code Cache/js/x",
+            "Users/alex/Library/Caches/Google/Chrome/Work/Cache/Cache_Data/f_0001",
+            "Users/alex/Library/Caches/Firefox/Profiles/abc.default/cache2/entries/ABC",
+            "D:/FirefoxProfiles/abc.custom/cache2/entries/ABC",
+            "Users/alex/AppData/Roaming/discord/Cache/Cache_Data/x",
+            "Users/alex/Library/Application Support/discord/DawnCache/x",
+            "Users/alex/Library/Caches/com.apple.Safari/WebKitCache/x",
             "Users/alex/Documents/History of Rome.pdf",
+            "Users/alex/Documents/Bookmarks.html",
+            "Users/alex/Documents/Favicons/icon.png",
+            "Users/alex/Documents/DIPS/notes.txt",
+            "Users/alex/Documents/storage/old/boxes.xlsx",
+            "Users/alex/code/site/public/favicons/icon.png",
             "Users/alex/Documents/Sessions/notes.txt",
             "Users/alex/Documents/Shortcuts/notes.txt",
             "Users/alex/Documents/storage/boxes.xlsx",
@@ -819,7 +970,7 @@ mod tests {
             "Read(//**/Cookies-*)",
             "Read(//**/Microsoft/Protect/**)",
             "Read(//**/*.kdbx)",
-            "Read(//**/logins*.json)",
+            "Read(//**/logins*.json*)",
             "Read(//**/formhistory.sqlite*)",
             "Read(//**/autofill-profiles.json*)",
             "Read(//**/key4.db*)",
@@ -827,6 +978,17 @@ mod tests {
             "Read(//**/Default/Sessions/**)",
             "Read(//**/Profile */Sessions/**)",
             "Read(//**/* Profile/Shortcuts-*)",
+            "Read(//**/User Data/**/Sessions/**)",
+            "Read(//*/**/User Data/**/Sessions/**)",
+            "Read(//**/Application Support/**/Favicons-*)",
+            "Read(//**/Opera Software/**/DIPS)",
+            "Read(//**/Bookmarks)",
+            "Read(//**/Top Sites-*)",
+            "Read(//**/IndexedDB/**)",
+            "Read(//**/Local Extension Settings/**)",
+            "Read(//**/storage/default/**)",
+            "Read(//**/storage/permanent/**)",
+            "Read(//**/storage.sqlite)",
             "Read(//**/Profiles/*/storage/**)",
             "Read(//**/Library/Safari/**)",
         ] {
@@ -844,7 +1006,7 @@ mod tests {
         let expected: usize = PLACES
             .iter()
             .map(|p| {
-                let n = spellings(p.parts).len();
+                let n: usize = p.forms().map(|f| spellings(&f).len()).sum();
                 2 * if p.kind == Kind::Folder { 2 * n } else { n }
             })
             .sum();
@@ -857,7 +1019,7 @@ mod tests {
     fn the_prompt_filter_and_the_deny_rules_come_from_one_list() {
         let rules = deny_rules_in(&[]);
         for place in PLACES {
-            for joined in spellings(place.parts) {
+            for joined in place.forms().flat_map(|f| spellings(&f)) {
                 let real = joined.replace('*', "x");
                 assert!(
                     hidden(&format!("Users/alex/{real}")),
@@ -878,5 +1040,28 @@ mod tests {
         assert!(glob("History|History-*", "History-journal"));
         assert!(!glob("History|History-*", "History of Rome.pdf"));
         assert_eq!(spellings(&["a|b", "c"]), ["a/c", "b/c"]);
+        let names = |s: &str| s.split('/').map(str::to_owned).collect::<Vec<_>>();
+        // `**` stands for any number of names, none included.
+        for path in ["User Data/S", "User Data/a/S", "User Data/a/b/c/S"] {
+            assert!(
+                match_from(&["User Data", "**", "S"], &names(path), true),
+                "{path}"
+            );
+        }
+        assert!(!match_from(
+            &["User Data", "**", "S"],
+            &names("User Data/S/x"),
+            true
+        ));
+        assert!(match_from(
+            &["User Data", "**", "S"],
+            &names("User Data/a/S/x"),
+            false
+        ));
+        assert!(!match_from(
+            &["User Data", "**", "S"],
+            &names("Data/a/S"),
+            false
+        ));
     }
 }

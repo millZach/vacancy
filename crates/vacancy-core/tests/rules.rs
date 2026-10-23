@@ -624,6 +624,113 @@ fn local_history_is_never_swept_up_with_caches() {
     }
 }
 
+/// Browsers' caches stay visible to Claude (ADR 0008): every cache the rules propose, in Chromium profiles with names
+/// of their own (`Work`), in a Firefox profile and in Safari's caches, is in no always-hidden place, so Claude may
+/// see, explain and propose them, while the browser data beside them (bookmarks, sessions, site storage) is hidden
+/// and never proposed.
+#[test]
+fn browser_caches_the_rules_propose_stay_visible_to_claude() {
+    use vacancy_core::claude::hidden::hides_in;
+    let fx = Fixture::new();
+    let local = "Users/alex/AppData/Local";
+    let support = "Users/alex/Library/Application Support";
+    let caches = "Users/alex/Library/Caches";
+    let mut stores = Vec::new();
+    for profile in [
+        format!("{local}/Google/Chrome/User Data/Work"),
+        format!("{local}/Microsoft/Edge/User Data/Banking"),
+        format!("{support}/Google/Chrome/Work"),
+    ] {
+        fx.file(&format!("{profile}/Cache/Cache_Data/f_1"), MIB);
+        fx.file(&format!("{profile}/Code Cache/js/x"), 256 * KIB);
+        fx.file(&format!("{profile}/GPUCache/data_0"), 256 * KIB);
+        fx.file(&format!("{profile}/Preferences"), 4 * KIB);
+        for store in [
+            "Bookmarks",
+            "Sessions/Session_1",
+            "IndexedDB/https_x_0.indexeddb.leveldb/000003.log",
+            "Local Storage/leveldb/000005.ldb",
+            "Shortcuts",
+        ] {
+            let at = format!("{profile}/{store}");
+            fx.file(&at, 256 * KIB);
+            stores.push(at);
+        }
+    }
+    fx.file(
+        &format!("{local}/Google/Chrome/User Data/ShaderCache/x"),
+        256 * KIB,
+    );
+    fx.file(
+        &format!("{local}/Mozilla/Firefox/Profiles/abc.work/cache2/entries/e"),
+        256 * KIB,
+    );
+    fx.file(
+        &format!("{caches}/Google/Chrome/Work/Cache/Cache_Data/f_2"),
+        MIB,
+    );
+    fx.file(
+        &format!("{caches}/Firefox/Profiles/abc.work/cache2/entries/e"),
+        MIB,
+    );
+    fx.file(&format!("{caches}/com.apple.Safari/WebKitCache/x"), MIB);
+    for env in [
+        Env::windows(fx.root(), "alex"),
+        Env::macos(fx.root(), "alex"),
+    ] {
+        let (snap, proposals) = run(&fx, &env, &moment(&[]));
+        let mut seen = Vec::new();
+        for p in proposals.list() {
+            if p.category != CategoryId::Caches {
+                continue;
+            }
+            for t in targets(&fx, &snap, &proposals, &p.id) {
+                let at = fx.path(t.trim_end_matches("/*"));
+                assert!(
+                    hides_in(&at, &[]).is_none(),
+                    "{t}, which {} proposes, stays visible to Claude",
+                    p.id
+                );
+                seen.push(t);
+            }
+        }
+        let proposed = |prefix: &str| seen.iter().any(|t| t.starts_with(prefix));
+        let expected: Vec<String> = if env.platform == vacancy_core::Platform::MacOs {
+            vec![
+                format!("{support}/Google/Chrome/Work/GPUCache"),
+                format!("{support}/Google/Chrome/Work/Code Cache"),
+                format!("{caches}/com.apple.Safari"),
+            ]
+        } else {
+            vec![
+                format!("{local}/Google/Chrome/User Data/Work/Cache"),
+                format!("{local}/Google/Chrome/User Data/Work/Code Cache"),
+                format!("{local}/Google/Chrome/User Data/Work/GPUCache"),
+                format!("{local}/Microsoft/Edge/User Data/Banking/Cache"),
+                format!("{local}/Google/Chrome/User Data/ShaderCache"),
+                format!("{local}/Mozilla/Firefox/Profiles/abc.work/cache2"),
+            ]
+        };
+        for prefix in expected {
+            assert!(proposed(&prefix), "{prefix} is proposed: {seen:?}");
+        }
+        // The browser data beside them is hidden, and no proposal takes it.
+        let all = all_targets(&fx, &snap, &proposals);
+        for store in &stores {
+            assert!(
+                hides_in(&fx.path(store), &[]).is_some(),
+                "{store} is hidden"
+            );
+            assert!(
+                !all.iter().any(
+                    |t| store.starts_with(&format!("{}/", t.trim_end_matches("/*"))) || store == t
+                ),
+                "{store} is never proposed: {all:?}"
+            );
+        }
+    }
+}
+
 /// A cache folder is left alone while its app runs, told by bundle id, by vendor (a JetBrains IDE in
 /// `Caches/JetBrains`, Chrome in `Caches/Google`) or by name; and one no known app owns is treated as in use.
 #[test]

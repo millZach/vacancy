@@ -882,14 +882,24 @@ fn fixture_mode_lets_claude_read_only_the_fixture() {
 /// A dummy secret, made up for these tests, in each file.
 const DUMMY: &str = "DUMMY-SECRET-made-up-for-this-test";
 
-/// Copies of browser profiles in the folder Claude is asked about, each store holding [`DUMMY`]: Firefox's logins
-/// and their backup, keys, form history, autofill, cookies, history, account and session backups, and Chromium's
-/// passwords, autofill, cookies and history with their `-journal` and `-wal` siblings, and `Local State`. The scan
-/// is made again with them.
-fn with_browser_copies(case: &mut Case) -> (PathBuf, PathBuf, Vec<PathBuf>) {
+/// Copies of browser profiles in the folder Claude is asked about, each store holding [`DUMMY`]. Firefox's logins
+/// and their backup, keys, form history, autofill, cookies, history, account, session backups and site storage, in
+/// Firefox's own folder and in profiles kept elsewhere (Windows-style `FirefoxProfiles\abc.custom`, and a Mac's
+/// `Firefox profiles/work.custom`); Chromium's passwords, autofill, cookies and history with their `-journal` and
+/// `-wal` siblings, and `Local State`, in the `Default` profile; and in profiles named `Work` (`--profile-directory`),
+/// Windows-style and Mac-style, their bookmarks, top sites, shortcuts, favicons, sessions, IndexedDB and extensions'
+/// storage too. The scan is made again with them.
+struct BrowserCopies {
+    /// The profiles, each asked about.
+    profiles: Vec<PathBuf>,
+    /// Every store file.
+    stores: Vec<PathBuf>,
+    /// The store folders, which Claude also must not suggest whole.
+    folders: Vec<PathBuf>,
+}
+
+fn with_browser_copies(case: &mut Case) -> BrowserCopies {
     let base = renders(case).join("profile-copies");
-    let firefox = base.join("Mozilla/Firefox/Profiles/x1.default-release");
-    let chrome = base.join("Google/Chrome/User Data/Default");
     let firefox_files = [
         "logins.json",
         "logins-backup.json",
@@ -901,6 +911,19 @@ fn with_browser_copies(case: &mut Case) -> (PathBuf, PathBuf, Vec<PathBuf>) {
         "signedInUser.json",
         "sessionstore-backups/recovery.jsonlz4",
     ];
+    let firefox_elsewhere = [
+        "logins.json",
+        "key4.db",
+        "cert9.db",
+        "places.sqlite-wal",
+        "cookies.sqlite",
+        "formhistory.sqlite",
+        "storage.sqlite",
+        "storage-sync-v2.sqlite",
+        "storage/default/https+++mail.example.com/ls/data.sqlite",
+        "storage/permanent/chrome/idb/3870112724rsegmnoittet-es.sqlite",
+        "storage/ls-archive.sqlite",
+    ];
     let chrome_files = [
         "Login Data",
         "Login Data-journal",
@@ -908,14 +931,65 @@ fn with_browser_copies(case: &mut Case) -> (PathBuf, PathBuf, Vec<PathBuf>) {
         "Network/Cookies-journal",
         "History-journal",
     ];
-    let mut stores = Vec::new();
-    for (dir, files) in [(&firefox, &firefox_files[..]), (&chrome, &chrome_files[..])] {
-        for f in files {
-            stores.push(f.split('/').fold(dir.clone(), |p, s| p.join(s)));
+    let chrome_work = [
+        "Login Data",
+        "Web Data",
+        "Network/Cookies",
+        "History",
+        "Bookmarks",
+        "Bookmarks.bak",
+        "Top Sites",
+        "Shortcuts",
+        "Favicons-journal",
+        "DIPS",
+        "Sessions/Session_13360000000000000",
+        "Sessions/Tabs_13360000000000000",
+        "IndexedDB/https_mail.example.com_0.indexeddb.leveldb/000003.log",
+        "Local Storage/leveldb/000005.ldb",
+        "Local Extension Settings/nkbihfbeogaeaoehlefnkodbefgpgknn/000007.log",
+    ];
+    let firefox = base.join("Mozilla/Firefox/Profiles/x1.default-release");
+    let chrome = base.join("Google/Chrome/User Data/Default");
+    let groups: [(PathBuf, &[&str]); 6] = [
+        (firefox.clone(), &firefox_files),
+        (base.join("FirefoxProfiles/abc.custom"), &firefox_elsewhere),
+        (
+            base.join("Users/alex/Firefox profiles/work.custom"),
+            &firefox_elsewhere,
+        ),
+        (chrome.clone(), &chrome_files),
+        (base.join("Google/Chrome/User Data/Work"), &chrome_work),
+        (
+            base.join("Library/Application Support/Google/Chrome/Work"),
+            &chrome_work,
+        ),
+    ];
+    let mut copies = BrowserCopies {
+        profiles: Vec::new(),
+        stores: Vec::new(),
+        folders: vec![firefox.join("sessionstore-backups")],
+    };
+    for (dir, files) in &groups {
+        copies.profiles.push(dir.clone());
+        for f in *files {
+            copies
+                .stores
+                .push(f.split('/').fold(dir.clone(), |p, s| p.join(s)));
         }
     }
-    stores.push(chrome.parent().unwrap().join("Local State"));
-    for path in &stores {
+    for dir in &copies.profiles[1..3] {
+        copies.folders.push(dir.join("storage").join("default"));
+        copies.folders.push(dir.join("storage").join("permanent"));
+    }
+    for dir in &copies.profiles[4..] {
+        for folder in ["Sessions", "IndexedDB", "Local Extension Settings"] {
+            copies.folders.push(dir.join(folder));
+        }
+    }
+    copies
+        .stores
+        .push(chrome.parent().unwrap().join("Local State"));
+    for path in &copies.stores {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         // Over the scan's size for keeping a file, so the scan lists each one by name.
         let line = format!(
@@ -926,32 +1000,99 @@ fn with_browser_copies(case: &mut Case) -> (PathBuf, PathBuf, Vec<PathBuf>) {
         std::fs::write(path, line.repeat(MIB as usize / line.len() + 1)).unwrap();
         old(path);
     }
-    // A file beside them that stays readable.
-    let ordinary = chrome.join("Preferences.txt");
-    std::fs::write(
-        &ordinary,
-        "ordinary
+    // A file beside them in each profile that stays readable.
+    for dir in &copies.profiles {
+        let ordinary = dir.join("Preferences.txt");
+        std::fs::write(
+            &ordinary,
+            "ordinary
 "
-        .repeat(MIB as usize / 9 + 1),
-    )
-    .unwrap();
-    old(&ordinary);
+            .repeat(MIB as usize / 9 + 1),
+        )
+        .unwrap();
+        old(&ordinary);
+    }
     std::thread::sleep(Duration::from_millis(3200));
     case.scanned = scan(&case.root, &case.env);
-    (firefox, chrome, stores)
+    copies
+}
+
+/// Whether a deny rule from `rules` names `path`, read the way Claude Code's matcher reads a rule from the root:
+/// the pattern's names match a run of the path's, where `*` is any run of characters in a name and `**` any number
+/// of names; a pattern without `/**` at its end must reach the path's end. (`tests/rule_matcher.rs` runs the real
+/// matcher on these places.)
+fn denied(rules: &[String], path: &Path) -> bool {
+    fn name_matches(pattern: &str, name: &str) -> bool {
+        let (p, n) = (pattern.to_lowercase(), name.to_lowercase());
+        let parts: Vec<&str> = p.split('*').collect();
+        let mut at = 0;
+        for (i, part) in parts.iter().enumerate() {
+            if i == 0 {
+                if !n.starts_with(part) {
+                    return false;
+                }
+                at = part.len();
+            } else if i == parts.len() - 1 {
+                return n.len() >= at + part.len() && n.ends_with(part);
+            } else {
+                match n[at..].find(part) {
+                    Some(found) => at += found + part.len(),
+                    None => return false,
+                }
+            }
+        }
+        n.len() == at
+    }
+    fn from(pattern: &[&str], names: &[String], whole: bool) -> bool {
+        match pattern.split_first() {
+            None => !whole || names.is_empty(),
+            Some((&"**", rest)) => (0..=names.len()).any(|i| from(rest, &names[i..], whole)),
+            Some((p, rest)) => {
+                names.first().is_some_and(|n| name_matches(p, n)) && from(rest, &names[1..], whole)
+            }
+        }
+    }
+    let names: Vec<String> = path
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(n) => Some(n.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    rules.iter().any(|rule| {
+        let Some(pattern) = rule
+            .strip_prefix("Read(//**/")
+            .and_then(|r| r.strip_suffix(')'))
+        else {
+            return false;
+        };
+        let (pattern, whole) = match pattern.strip_suffix("/**") {
+            Some(folder) => (folder, false),
+            None => (pattern, true),
+        };
+        let pattern: Vec<&str> = pattern.split('/').collect();
+        (0..names.len()).any(|start| from(&pattern, &names[start..], whole))
+    })
 }
 
 #[test]
 fn browser_stores_and_their_backups_never_reach_a_prompt_or_a_suggestion() {
     let mut case = case();
-    let (firefox, chrome, stores) = with_browser_copies(&mut case);
-    let names: Vec<String> = stores
+    let copies = with_browser_copies(&mut case);
+    // Firefox's `storage/default` and `storage/permanent` are left out of the names: words that common may be in a
+    // prompt for other reasons. What is in them is in the stores.
+    let names: Vec<String> = copies
+        .stores
         .iter()
+        .chain(&copies.folders)
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+        .filter(|n| n != "default" && n != "permanent")
         .collect();
     let fake =
         FakeClaude::always(json!({ "reply": "Browser data.", "followUps": [], "opened": [] }));
-    for (dir, readable) in [(&firefox, None), (&chrome, Some(vec![case.root.clone()]))] {
+    for (i, dir) in copies.profiles.iter().enumerate() {
+        // Every other one with privacy mode off.
+        let readable = (i % 2 == 1).then(|| vec![case.root.clone()]);
         let about = About::Folder {
             path: dir.display().to_string(),
         };
@@ -963,17 +1104,16 @@ fn browser_stores_and_their_backups_never_reach_a_prompt_or_a_suggestion() {
         for n in &names {
             assert!(
                 !prompt.contains(&format!("\"{n}\"")),
-                "{n} isn't listed: {prompt}"
+                "{n} isn't listed for {}: {prompt}",
+                dir.display()
             );
         }
+        assert!(
+            prompt.contains("Preferences.txt"),
+            "the ordinary file beside them is listed for {}",
+            dir.display()
+        );
     }
-    assert!(
-        fake.calls()
-            .last()
-            .unwrap()
-            .prompt
-            .contains("Preferences.txt")
-    );
     // The big-folder summary leaves them out too.
     let explain = claude::prepare(
         &Job::ExplainFolders,
@@ -989,53 +1129,53 @@ fn browser_stores_and_their_backups_never_reach_a_prompt_or_a_suggestion() {
             "{n} isn't in the summary"
         );
     }
-    // Claude can't suggest them, by path or as a folder holding them, with privacy mode off.
+    // Claude can't suggest them, by path or as a folder holding them, with privacy mode off: at most 20 at a time,
+    // as many as Vacancy takes in one answer.
     let readable = vec![case.root.clone()];
-    let mut targets = stores.clone();
-    targets.push(firefox.join("sessionstore-backups"));
-    let fake = FakeClaude::new({
-        let targets = targets.clone();
-        move |call: &Call| {
-            let data = &blocks(&call.prompt)[0];
-            reply(json!({
-                "folders": [{
-                    "id": root_id(data, "Old Renders"),
-                    "short": "Renders", "explanation": "Renders and browser copies.",
-                    "remove": targets.iter().enumerate().map(|(i, t)| json!({
-                        "target": t.display().to_string(), "title": format!("Store {i}"), "why": "Old."
-                    })).collect::<Vec<_>>(),
-                }],
-                "opened": []
-            }))
+    let mut targets = copies.stores.clone();
+    targets.extend(copies.folders.iter().cloned());
+    for batch in targets.chunks(20) {
+        let fake = FakeClaude::new({
+            let batch = batch.to_vec();
+            move |call: &Call| {
+                let data = &blocks(&call.prompt)[0];
+                reply(json!({
+                    "folders": [{
+                        "id": root_id(data, "Old Renders"),
+                        "short": "Renders", "explanation": "Renders and browser copies.",
+                        "remove": batch.iter().enumerate().map(|(i, t)| json!({
+                            "target": t.display().to_string(), "title": format!("Store {i}"), "why": "Old."
+                        })).collect::<Vec<_>>(),
+                    }],
+                    "opened": []
+                }))
+            }
+        });
+        let answer = ask(&fake, &Job::ExplainFolders, &mut case, Some(&readable)).unwrap();
+        for (i, target) in batch.iter().enumerate() {
+            let d = answer
+                .dropped
+                .iter()
+                .find(|d| d.name == format!("Store {i}"))
+                .unwrap_or_else(|| {
+                    panic!("{} is dropped: {:#?}", target.display(), answer.dropped)
+                });
+            assert!(
+                d.reason.contains("hidden"),
+                "{}: {}",
+                target.display(),
+                d.reason
+            );
         }
-    });
-    let answer = ask(&fake, &Job::ExplainFolders, &mut case, Some(&readable)).unwrap();
-    for (i, target) in targets.iter().enumerate() {
-        let d = answer
-            .dropped
-            .iter()
-            .find(|d| d.name == format!("Store {i}"))
-            .unwrap_or_else(|| panic!("{} is dropped: {:#?}", target.display(), answer.dropped));
-        assert!(
-            d.reason.contains("hidden"),
-            "{}: {}",
-            target.display(),
-            d.reason
-        );
     }
     // And Claude Code is told to refuse them: every one is named by a deny rule, in both modes.
     let rules = claude::hidden::deny_rules_in(&[]);
-    for name in &names {
-        assert!(
-            rules.iter().any(|r| {
-                let pattern = r.trim_start_matches("Read(//**/").trim_end_matches(')');
-                let last = pattern.rsplit('/').next().unwrap();
-                last == name
-                    || (last.ends_with('*') && name.starts_with(last.trim_end_matches('*')))
-                    || (last.starts_with('*') && name.ends_with(last.trim_start_matches('*')))
-            }),
-            "{name} has a deny rule"
-        );
+    for path in copies.stores.iter().chain(&copies.folders) {
+        assert!(denied(&rules, path), "{} has a deny rule", path.display());
+    }
+    for dir in &copies.profiles {
+        let ordinary = dir.join("Preferences.txt");
+        assert!(!denied(&rules, &ordinary), "{}", ordinary.display());
     }
 }
 
@@ -1436,6 +1576,41 @@ fn recorded_real_answers_replay_through_the_parser() {
         assert_eq!(answer.job, job.kind());
         assert!(answer.dropped.iter().all(|d| !d.reason.is_empty()));
     }
+}
+
+/// Every job's command fits on a Windows command line (32,767 UTF-16 units, the program included), with the deny
+/// rules for every always-hidden place, Claude Code's moved folders and privacy mode off's allow rules: the rules
+/// can't grow past what Claude Code can be started with. Each argument is counted quoted, with every `"` and `\`
+/// escaped, which is more than Windows needs.
+#[test]
+fn every_jobs_command_fits_on_a_windows_command_line() {
+    let mut case = case();
+    let program = PathBuf::from(r"C:\Users\alexandra-long-name\.local\bin\claude.exe");
+    let config = [
+        PathBuf::from(r"D:\Some Long Folder Name\Claude Code configuration"),
+        PathBuf::from(r"E:\Another Long Folder Name\Codex home folder"),
+    ];
+    let roots: Vec<PathBuf> = ["C:\\", "D:\\", "E:\\", "F:\\", "G:\\", "H:\\"]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    let units = |s: &str| s.encode_utf16().count() + 3 + s.matches(['"', '\\']).count();
+    let mut longest = 0;
+    for (name, job) in recorded_jobs(&mut case) {
+        let prepared =
+            claude::prepare(&job, &case.scanned, &case.env, None, &CancelToken::new()).unwrap();
+        for access in [Access::Private, Access::Read(roots.clone())] {
+            let inv = claude::runner::invocation_in(&program, prepared.call(), &access, &config);
+            let total = units(&inv.program.display().to_string())
+                + inv.args.iter().map(|a| units(a)).sum::<usize>();
+            longest = longest.max(total);
+            assert!(
+                total < 30_000,
+                "{name} ({access:?}): {total} units on the command line"
+            );
+        }
+    }
+    println!("the longest command line: {longest} UTF-16 units");
 }
 
 #[test]

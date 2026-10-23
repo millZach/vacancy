@@ -6,6 +6,8 @@
 //!
 //! - each deny rule matches its target, everything in it, and its target spelled in other case;
 //! - the always-hidden places stay denied under folders with any of those names;
+//! - browser data stays denied in a Chromium profile of any name (`--profile-directory=Work`) and in a Firefox
+//!   profile kept anywhere, while browsers' caches and ordinary files of the same names stay readable;
 //! - an allow rule exists only for a root it spells exactly, and then matches inside the root and nothing beside it
 //!   (a sibling one character off, a longer name, the folder above, a folder named like the root elsewhere), except
 //!   a sibling spelled like the root in other case (the known limit in ADR 0008);
@@ -324,6 +326,33 @@ fn named_place_checks(style: Style, checks: &mut Checks) {
                 vec![name, "Profiles", name, "storage", "x"],
                 "Firefox site storage under an odd profile",
             ),
+            (
+                vec![
+                    "Google",
+                    "Chrome",
+                    "User Data",
+                    name,
+                    "Sessions",
+                    "Session_1",
+                ],
+                "a Chromium session in a profile with an odd name",
+            ),
+            (
+                vec!["Library", "Application Support", name, name, "Shortcuts"],
+                "a Mac Chromium profile with an odd name",
+            ),
+            (
+                vec![
+                    name,
+                    "abc.custom",
+                    "storage",
+                    "default",
+                    "x",
+                    "ls",
+                    "data.sqlite",
+                ],
+                "a Firefox profile kept in an odd folder",
+            ),
         ] {
             checks.add(style, "deny", &rules, path(style, home, &at), true, why);
         }
@@ -360,6 +389,259 @@ fn named_place_checks(style: Style, checks: &mut Checks) {
         false,
         "an ordinary file",
     );
+}
+
+/// Browser data in profiles with names of their own (`--profile-directory=Work`) and in Firefox profiles kept
+/// anywhere is denied, and browsers' caches, which the cache rules propose, and ordinary files of the same names
+/// are not.
+fn browser_profile_checks(style: Style, checks: &mut Checks) {
+    let rules = hidden::deny_rules_in(&[]);
+    let (home, elsewhere) = match style {
+        Style::Windows => (r"C:\Users\alex", r"D:\FirefoxProfiles\abc.custom"),
+        Style::Unix => ("/Users/alex", "/Users/alex/Firefox profiles/work.custom"),
+    };
+    let chromium: Vec<String> = match style {
+        Style::Windows => vec![
+            path(
+                style,
+                home,
+                &["AppData", "Local", "Google", "Chrome", "User Data", "Work"],
+            ),
+            path(
+                style,
+                home,
+                &[
+                    "AppData",
+                    "Local",
+                    "Microsoft",
+                    "Edge",
+                    "User Data",
+                    "Banking",
+                ],
+            ),
+            path(
+                style,
+                home,
+                &["AppData", "Roaming", "Opera Software", "Opera Stable"],
+            ),
+            r"E:\ChromeData\Default".to_owned(),
+        ],
+        Style::Unix => vec![
+            path(
+                style,
+                home,
+                &["Library", "Application Support", "Google", "Chrome", "Work"],
+            ),
+            path(
+                style,
+                home,
+                &[
+                    "Library",
+                    "Application Support",
+                    "Microsoft Edge",
+                    "Banking",
+                ],
+            ),
+            path(
+                style,
+                home,
+                &["Library", "Application Support", "com.operasoftware.Opera"],
+            ),
+            "/Volumes/Data/ChromeData/Profile 2".to_owned(),
+        ],
+    };
+    for profile in &chromium {
+        for store in [
+            &["Login Data"][..],
+            &["Web Data-journal"],
+            &["Network", "Cookies"],
+            &["History"],
+            &["Bookmarks"],
+            &["Bookmarks.bak"],
+            &["Top Sites"],
+            &["Shortcuts"],
+            &["Favicons-journal"],
+            &["DIPS"],
+            &["Sessions", "Session_13360000000000000"],
+            &[
+                "IndexedDB",
+                "https_mail.example.com_0.indexeddb.leveldb",
+                "000003.log",
+            ],
+            &["Local Storage", "leveldb", "000005.ldb"],
+            &[
+                "Local Extension Settings",
+                "nkbihfbeogaeaoehlefnkodbefgpgknn",
+                "000007.log",
+            ],
+        ] {
+            checks.add(
+                style,
+                "deny",
+                &rules,
+                path(style, profile, store),
+                true,
+                "a Chromium store in any profile",
+            );
+        }
+        for cache in [
+            &["Cache", "Cache_Data", "f_0001"][..],
+            &["Code Cache", "js", "x"],
+            &["GPUCache", "data_0"],
+            &["Preferences"],
+        ] {
+            checks.add(
+                style,
+                "deny",
+                &rules,
+                path(style, profile, cache),
+                false,
+                "a Chromium cache stays readable",
+            );
+        }
+    }
+    let firefox = [
+        elsewhere.to_owned(),
+        match style {
+            Style::Windows => path(
+                style,
+                home,
+                &[
+                    "AppData", "Roaming", "Mozilla", "Firefox", "Profiles", "x.work",
+                ],
+            ),
+            Style::Unix => path(
+                style,
+                home,
+                &[
+                    "Library",
+                    "Application Support",
+                    "Firefox",
+                    "Profiles",
+                    "x.work",
+                ],
+            ),
+        },
+    ];
+    for profile in &firefox {
+        for store in [
+            &["logins.json"][..],
+            &["logins-backup.json"],
+            &["key4.db"],
+            &["cert9.db"],
+            &["places.sqlite-wal"],
+            &["cookies.sqlite"],
+            &["formhistory.sqlite"],
+            &["autofill-profiles.json"],
+            &["signedInUser.json"],
+            &["sessionstore.jsonlz4"],
+            &["sessionstore-backups", "recovery.jsonlz4"],
+            &["storage.sqlite"],
+            &["storage-sync-v2.sqlite"],
+            &["storage", "ls-archive.sqlite"],
+            &[
+                "storage",
+                "default",
+                "https+++mail.example.com",
+                "ls",
+                "data.sqlite",
+            ],
+            &["storage", "permanent", "chrome", "idb", "x.sqlite"],
+            &["storage", "temporary", "x"],
+        ] {
+            checks.add(
+                style,
+                "deny",
+                &rules,
+                path(style, profile, store),
+                true,
+                "a Firefox store in a profile kept anywhere",
+            );
+        }
+        checks.add(
+            style,
+            "deny",
+            &rules,
+            path(style, profile, &["cache2", "entries", "ABC"]),
+            false,
+            "Firefox's cache stays readable",
+        );
+    }
+    let mut readable = vec![
+        path(style, home, &["Documents", "Sessions", "notes.txt"]),
+        path(style, home, &["Documents", "Shortcuts", "notes.txt"]),
+        path(style, home, &["Documents", "Favicons", "icon.png"]),
+        path(style, home, &["Documents", "storage", "boxes.xlsx"]),
+        path(style, home, &["Documents", "Bookmarks.html"]),
+    ];
+    readable.extend(match style {
+        Style::Windows => vec![
+            path(
+                style,
+                home,
+                &[
+                    "AppData",
+                    "Local",
+                    "Google",
+                    "Chrome",
+                    "User Data",
+                    "ShaderCache",
+                    "x",
+                ],
+            ),
+            path(
+                style,
+                home,
+                &[
+                    "AppData", "Local", "Mozilla", "Firefox", "Profiles", "x.work", "cache2",
+                    "entries", "A",
+                ],
+            ),
+            path(
+                style,
+                home,
+                &["AppData", "Roaming", "discord", "Cache", "Cache_Data", "x"],
+            ),
+        ],
+        Style::Unix => vec![
+            path(
+                style,
+                home,
+                &[
+                    "Library",
+                    "Caches",
+                    "Google",
+                    "Chrome",
+                    "Work",
+                    "Cache",
+                    "Cache_Data",
+                    "f",
+                ],
+            ),
+            path(
+                style,
+                home,
+                &[
+                    "Library", "Caches", "Firefox", "Profiles", "x.work", "cache2", "entries", "A",
+                ],
+            ),
+            path(
+                style,
+                home,
+                &["Library", "Caches", "com.apple.Safari", "WebKitCache", "x"],
+            ),
+        ],
+    });
+    for at in readable {
+        checks.add(
+            style,
+            "deny",
+            &rules,
+            at,
+            false,
+            "a cache or an ordinary file stays readable",
+        );
+    }
 }
 
 /// Allow rules exist only for roots they spell exactly, and match inside them only.
@@ -496,6 +778,7 @@ fn claude_codes_matcher_gives_each_rule_exactly_its_meaning() {
     for style in [Style::Windows, Style::Unix] {
         moved_folder_checks(style, &mut checks);
         named_place_checks(style, &mut checks);
+        browser_profile_checks(style, &mut checks);
         spelled += allow_checks(style, &mut checks);
     }
     host_checks(&mut checks);
