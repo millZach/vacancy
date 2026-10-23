@@ -990,18 +990,16 @@ fn browser_stores_and_their_backups_never_reach_a_prompt_or_a_suggestion() {
         }
     });
     let answer = ask(&fake, &Job::ExplainFolders, &mut case, Some(&readable)).unwrap();
-    for i in 0..targets.len() {
+    for (i, target) in targets.iter().enumerate() {
         let d = answer
             .dropped
             .iter()
             .find(|d| d.name == format!("Store {i}"))
-            .unwrap_or_else(|| {
-                panic!("{} is dropped: {:#?}", targets[i].display(), answer.dropped)
-            });
+            .unwrap_or_else(|| panic!("{} is dropped: {:#?}", target.display(), answer.dropped));
         assert!(
             d.reason.contains("hidden"),
             "{}: {}",
-            targets[i].display(),
+            target.display(),
             d.reason
         );
     }
