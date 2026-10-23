@@ -269,6 +269,8 @@ pub fn summarize<'a>(
     let guarded = Guarded::new(snapshot, categories, Guard::new(env, &env.root), &stop)
         .ok_or(AdvisorError::Cancelled)?;
     let mut claims = existing_claims(snapshot, proposals);
+    // What always stays hidden from Claude, with the browser profiles this scan found (ADR 0008).
+    let hider = crate::claude::hidden::Hider::of(snapshot, env);
     // A partial listing cannot establish a folder's complete safety or size, even when the scanner entered it.
     let mut incomplete: Vec<bool> = snapshot
         .dirs()
@@ -338,7 +340,7 @@ pub fn summarize<'a>(
                 ItemRef::File(f) => snapshot.file_path(f),
                 _ => unreachable!(),
             };
-            if crate::claude::hidden::hides(&path).is_some() {
+            if hider.hides(&path).is_some() {
                 continue;
             }
             let (name, bytes, files, used, kind) = match at {

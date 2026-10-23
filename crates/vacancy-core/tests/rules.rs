@@ -625,17 +625,19 @@ fn local_history_is_never_swept_up_with_caches() {
 }
 
 /// Browsers' caches stay visible to Claude (ADR 0008): every cache the rules propose, in Chromium profiles with names
-/// of their own (`Work`), in a Firefox profile and in Safari's caches, is in no always-hidden place, so Claude may
-/// see, explain and propose them, while the browser data beside them (bookmarks, sessions, site storage) is hidden
-/// and never proposed.
+/// of their own (`Work`), in a Firefox profile and in Safari's caches, is in no always-hidden place, by name or in
+/// a browser profile the scan found (hidden whole except its caches), so Claude may see, explain and propose them,
+/// while the browser data beside them (bookmarks, sessions, site storage, and the rest of the profile and its root)
+/// is hidden and never proposed.
 #[test]
 fn browser_caches_the_rules_propose_stay_visible_to_claude() {
-    use vacancy_core::claude::hidden::hides_in;
+    use vacancy_core::claude::hidden::{Hider, hides_in};
     let fx = Fixture::new();
     let local = "Users/alex/AppData/Local";
     let support = "Users/alex/Library/Application Support";
     let caches = "Users/alex/Library/Caches";
     let mut stores = Vec::new();
+    let mut walled = Vec::new();
     for profile in [
         format!("{local}/Google/Chrome/User Data/Work"),
         format!("{local}/Microsoft/Edge/User Data/Banking"),
@@ -645,6 +647,20 @@ fn browser_caches_the_rules_propose_stay_visible_to_claude() {
         fx.file(&format!("{profile}/Code Cache/js/x"), 256 * KIB);
         fx.file(&format!("{profile}/GPUCache/data_0"), 256 * KIB);
         fx.file(&format!("{profile}/Preferences"), 4 * KIB);
+        // Hidden in the profile though no by-name rule names them (the review of #29's).
+        for store in [
+            "File System/000/t/00/00000000",
+            "WebStorage/1/x",
+            "databases/Databases.db",
+            "Sync Data/LevelDB/000003.log",
+            "Storage/ext/abc/def/x",
+            "Service Worker/CacheStorage/abc/index",
+            "Preferences",
+        ] {
+            let at = format!("{profile}/{store}");
+            fx.file(&at, 256 * KIB);
+            walled.push(at);
+        }
         for store in [
             "Bookmarks",
             "Sessions/Session_1",
@@ -661,6 +677,17 @@ fn browser_caches_the_rules_propose_stay_visible_to_claude() {
         &format!("{local}/Google/Chrome/User Data/ShaderCache/x"),
         256 * KIB,
     );
+    for root in [
+        format!("{local}/Google/Chrome/User Data"),
+        format!("{local}/Microsoft/Edge/User Data"),
+        format!("{support}/Google/Chrome"),
+    ] {
+        for file in ["Local State", "First Run"] {
+            let at = format!("{root}/{file}");
+            fx.file(&at, 4 * KIB);
+            walled.push(at);
+        }
+    }
     fx.file(
         &format!("{local}/Mozilla/Firefox/Profiles/abc.work/cache2/entries/e"),
         256 * KIB,
@@ -679,6 +706,7 @@ fn browser_caches_the_rules_propose_stay_visible_to_claude() {
         Env::macos(fx.root(), "alex"),
     ] {
         let (snap, proposals) = run(&fx, &env, &moment(&[]));
+        let hider = Hider::of(&snap, &env);
         let mut seen = Vec::new();
         for p in proposals.list() {
             if p.category != CategoryId::Caches {
@@ -687,7 +715,7 @@ fn browser_caches_the_rules_propose_stay_visible_to_claude() {
             for t in targets(&fx, &snap, &proposals, &p.id) {
                 let at = fx.path(t.trim_end_matches("/*"));
                 assert!(
-                    hides_in(&at, &[]).is_none(),
+                    hides_in(&at, &[]).is_none() && hider.hides(&at).is_none(),
                     "{t}, which {} proposes, stays visible to Claude",
                     p.id
                 );
@@ -716,9 +744,22 @@ fn browser_caches_the_rules_propose_stay_visible_to_claude() {
         }
         // The browser data beside them is hidden, and no proposal takes it.
         let all = all_targets(&fx, &snap, &proposals);
+        for store in &walled {
+            // Each profile here is found by its markers on both systems' rules alike, its root by `Local State`.
+            assert!(
+                hider.hides(&fx.path(store)).is_some(),
+                "{store} is hidden in its profile or root"
+            );
+            assert!(
+                !all.iter().any(
+                    |t| store.starts_with(&format!("{}/", t.trim_end_matches("/*"))) || store == t
+                ),
+                "{store} is never proposed: {all:?}"
+            );
+        }
         for store in &stores {
             assert!(
-                hides_in(&fx.path(store), &[]).is_some(),
+                hides_in(&fx.path(store), &[]).is_some() && hider.hides(&fx.path(store)).is_some(),
                 "{store} is hidden"
             );
             assert!(

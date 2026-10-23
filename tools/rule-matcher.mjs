@@ -86,9 +86,21 @@ for (const [want, pkg] of Object.entries(PACKAGES)) {
     continue;
   }
   versions.push(want);
+  // One matcher per pattern, as an array and as text, made once: a browser profile's rules are hundreds of
+  // patterns, each checked against many paths. A matcher's answer for a path doesn't depend on what it answered
+  // before.
+  const made = { windows: new Map(), unix: new Map() };
+  const matcherOf = (style, pattern) => {
+    let m = made[style].get(pattern);
+    if (!m) {
+      const ignore = matchers[style].factory;
+      m = { inArray: ignore().add([pattern]), asText: ignore().add(pattern) };
+      made[style].set(pattern, m);
+    }
+    return m;
+  };
   for (const check of checks) {
     const windows = check.style === 'windows';
-    const ignore = matchers[check.style].factory;
     const allow = check.kind === 'allow';
     let matched = false;
     for (const rule of check.rules) {
@@ -102,8 +114,9 @@ for (const [want, pkg] of Object.entries(PACKAGES)) {
       let inArray;
       let asText;
       try {
-        inArray = ignore().add([prepared.pattern]).ignores(path);
-        asText = ignore().add(prepared.pattern).ignores(path);
+        const m = matcherOf(check.style, prepared.pattern);
+        inArray = m.inArray.ignores(path);
+        asText = m.asText.ignores(path);
       } catch (e) {
         failures.push({ version: want, rule, path: check.path, error: String(e) });
         continue;

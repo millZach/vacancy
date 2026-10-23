@@ -8,6 +8,11 @@
 //! - the always-hidden places stay denied under folders with any of those names;
 //! - browser data stays denied in a Chromium profile of any name (`--profile-directory=Work`) and in a Firefox
 //!   profile kept anywhere, while browsers' caches and ordinary files of the same names stay readable;
+//! - a browser profile's own rules (`claude::browsers`) hide every child of it but its caches, whatever the
+//!   profile's or the child's name (a name made after the scan, one character off a cache's, a look-alike), a
+//!   root's leave the way down to its profiles readable too, and a default root the scan didn't see is hidden
+//!   whole; and the rules the app builds from a real scan of dummy profiles hide them, with the always-hidden
+//!   places' rules, while their caches and a game's `Preferences` folder stay readable;
 //! - an allow rule exists only for a root it spells exactly, and then matches inside the root and nothing beside it
 //!   (a sibling one character off, a longer name, the folder above, a folder named like the root elsewhere), except
 //!   a sibling spelled like the root in other case (the known limit in ADR 0008);
@@ -19,14 +24,16 @@
 //!
 //! Needs Node and `npm ci` (CI runs it before the Rust tests).
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{Value, json};
-use vacancy_core::claude::hidden;
 use vacancy_core::claude::runner::{
     self, Style, allow_rule_in, exact_char, read_settings_in, reads_unavailable_in,
 };
+use vacancy_core::claude::{browsers, hidden};
 
 /// Names meant to break a rule. Each goes into paths as a folder's name; on Windows only those Windows allows.
 const NAMES: &[&str] = &[
@@ -644,6 +651,300 @@ fn browser_profile_checks(style: Style, checks: &mut Checks) {
     }
 }
 
+/// What a browser profile keeps beside its markers (the review of #29's paths among them), and names a person or a
+/// later version of the browser could add: every one hidden by a profile's rules.
+const PROFILE_HIDDEN: &[&[&str]] = &[
+    &["Sessions", "Session_123"],
+    &["Shortcuts"],
+    &["Favicons"],
+    &["DIPS"],
+    &["File System", "000", "t", "00", "00000000"],
+    &["WebStorage", "1", "IndexedDB", "x"],
+    &["databases", "Databases.db"],
+    &["Sync Data", "LevelDB", "000003.log"],
+    &[
+        "Storage",
+        "ext",
+        "nkbihfbeogaeaoehlefnkodbefgpgknn",
+        "def",
+        "x",
+    ],
+    &["Service Worker", "CacheStorage", "abc", "index"],
+    &["Preferences"],
+    &["Secure Preferences"],
+    &["Network Persistent State"],
+    &["TransportSecurity"],
+    &["Made After The Scan", "x"],
+    // One character off a cache's name, or a cache's name and more.
+    &["Cach"],
+    &["Caches"],
+    &["Cache2"],
+    &["Cached"],
+    &["CachedDat"],
+    &["XCache"],
+    &["Code"],
+    &["Code Cach"],
+    &["Code  Cache"],
+    &["GPUCache "],
+    &["GPUCacheX", "y"],
+    &["ShaderCach"],
+    &["\u{ff23}ache"],
+    &["\u{212a}ache"],
+];
+
+/// The caches every Chromium profile and root keeps readable, in any case, with what is in them.
+const PROFILE_READABLE: &[&[&str]] = &[
+    &["Cache", "Cache_Data", "f_000001"],
+    &["cache", "x"],
+    &["Code Cache", "js", "index"],
+    &["CODE CACHE", "wasm", "x"],
+    &["GPUCache", "data_0"],
+    &["DawnCache", "data_0"],
+    &["DawnGraphiteCache", "data_0"],
+    &["DawnWebGPUCache", "data_0"],
+    &["GrShaderCache", "data_0"],
+    &["GraphiteDawnCache", "data_0"],
+    &["ShaderCache", "data_0"],
+    &["CachedData", "x"],
+    // A cache's own folders stay readable: a class never takes in a `/`.
+    &["Cache", "Data"],
+    &["Cache", "d", "x"],
+];
+
+/// A browser profile's rules hide every child but its caches, for a profile at every adversarial name, in both
+/// path styles; a root's leave the way down to its profiles readable too; a Firefox profile's leave its caches; and
+/// a default root the scan didn't see is hidden whole.
+fn browser_wall_checks(style: Style, checks: &mut Checks) {
+    let b = base(style);
+    let chromium = browsers::CHROMIUM_CACHES;
+    let mut dirs: Vec<String> = names(style)
+        .iter()
+        .map(|n| path(style, b, &[n, "Work"]))
+        .collect();
+    dirs.push(path(style, b, &["BrowserData", "Work"]));
+    for dir in &dirs {
+        let rules = browsers::profile_rules_in(dir, chromium, style)
+            .unwrap_or_else(|| panic!("{dir:?} has rules"));
+        for child in PROFILE_HIDDEN {
+            checks.add(
+                style,
+                "deny",
+                &rules,
+                path(style, dir, child),
+                true,
+                "a profile's child that isn't a cache",
+            );
+        }
+        for child in PROFILE_READABLE {
+            checks.add(
+                style,
+                "deny",
+                &rules,
+                path(style, dir, child),
+                false,
+                "a profile's cache",
+            );
+        }
+        checks.add(
+            style,
+            "deny",
+            &rules,
+            dir.clone(),
+            false,
+            "the profile itself",
+        );
+        let (parent, last) = dir.rsplit_once(['/', '\\']).unwrap();
+        let exact = last.chars().all(exact_char)
+            && parent
+                .chars()
+                .all(|c| exact_char(c) || (style == Style::Windows && c == '\\'));
+        if exact {
+            for beside in [
+                path(style, parent, &[&format!("{last}x"), "History"]),
+                path(style, parent, &["History"]),
+            ] {
+                checks.add(style, "deny", &rules, beside, false, "beside the profile");
+            }
+        }
+    }
+    // A plain profile's children at every adversarial name are hidden: names made after the scan too.
+    let work = path(style, b, &["BrowserData", "Work"]);
+    let rules = browsers::profile_rules_in(&work, chromium, style).unwrap();
+    for name in names(style) {
+        for child in [vec![name], vec![name, "x"], vec!["Storage", name]] {
+            checks.add(
+                style,
+                "deny",
+                &rules,
+                path(style, &work, &child),
+                true,
+                "a child of any name",
+            );
+        }
+    }
+    // A root: its caches, and the way down to the profiles in it, stay readable; the rest of it is hidden.
+    let root = path(style, b, &["BrowserData"]);
+    let mut allow: Vec<&str> = chromium.to_vec();
+    allow.extend(["Default", "Profile 1", "Work", "Zz_9-a.b"]);
+    let rules = browsers::profile_rules_in(&root, &allow, style).unwrap();
+    for (child, expect) in [
+        (&["Local State"][..], true),
+        (&["First Run"], true),
+        (&["Crashpad", "reports", "x.dmp"], true),
+        (&["Profile 2", "History"], true),
+        (&["Profile", "x"], true),
+        (&["Zz_9-a.bc"], true),
+        (&["Defaul"], true),
+        (&["Default", "History"], false),
+        (&["PROFILE 1", "x"], false),
+        (&["Work", "Cache", "x"], false),
+        (&["zz_9-A.B", "x"], false),
+        (&["ShaderCache", "x"], false),
+        (&["GrShaderCache", "x"], false),
+    ] {
+        checks.add(
+            style,
+            "deny",
+            &rules,
+            path(style, &root, child),
+            expect,
+            "a browser's root",
+        );
+    }
+    // Firefox: a profile's caches, and a root's way down to its profiles.
+    let profile = path(style, b, &["FirefoxData", "abc.custom"]);
+    let rules = browsers::profile_rules_in(&profile, browsers::FIREFOX_CACHES, style).unwrap();
+    for (child, expect) in [
+        (&["prefs.js"][..], true),
+        (&["extensions.json"], true),
+        (&["storage", "default", "x"], true),
+        (&["cache2x"], true),
+        (&["cache", "x"], true),
+        (&["cache2", "entries", "ABC"], false),
+        (&["startupCache", "x"], false),
+        (&["thumbnails", "x.png"], false),
+        (&["shader-cache", "x"], false),
+        (&["jumpListCache", "x"], false),
+    ] {
+        checks.add(
+            style,
+            "deny",
+            &rules,
+            path(style, &profile, child),
+            expect,
+            "a Firefox profile",
+        );
+    }
+    let firefox = path(style, b, &["Mozilla", "Firefox"]);
+    let rules = browsers::profile_rules_in(&firefox, &["Profiles"], style).unwrap();
+    for (child, expect) in [
+        (&["profiles.ini"][..], true),
+        (&["Crash Reports", "x"], true),
+        (&["Profiles", "x.default", "prefs.js"], false),
+    ] {
+        checks.add(
+            style,
+            "deny",
+            &rules,
+            path(style, &firefox, child),
+            expect,
+            "Firefox's root",
+        );
+    }
+    let rules = browsers::profile_rules_in(&firefox, &[], style).unwrap();
+    checks.add(
+        style,
+        "deny",
+        &rules,
+        path(style, &firefox, &["Profiles", "x"]),
+        true,
+        "a root with no profile found is hidden but for itself",
+    );
+    // A default root the scan didn't see: whole.
+    for name in names(style) {
+        let dir = path(style, b, &[name, "User Data"]);
+        let rules = browsers::whole_rules_in(&dir, style).unwrap();
+        for at in [dir.clone(), path(style, &dir, &["Default", "Cache", "x"])] {
+            checks.add(
+                style,
+                "deny",
+                &rules,
+                at,
+                true,
+                "a default root the scan didn't see",
+            );
+        }
+    }
+    let dir = path(style, b, &["Chrome", "User Data"]);
+    let rules = browsers::whole_rules_in(&dir, style).unwrap();
+    checks.add(
+        style,
+        "deny",
+        &rules,
+        path(style, b, &["Chrome", "User Data2", "x"]),
+        false,
+        "beside a whole root",
+    );
+}
+
+/// The rules the app builds from a real scan, on this system: dummy profiles (a `--user-data-dir` of its own with
+/// a profile named `Work`, `Default` in the browser's own root, Opera's root, a Firefox profile kept anywhere) are
+/// hidden by them and the always-hidden places' rules together, while every cache in them, and a game's settings
+/// folder with a `Preferences` file, stay readable.
+fn scanned_profile_checks(checks: &mut Checks) -> usize {
+    let style = Style::HOST;
+    let dir = tempfile::tempdir().unwrap();
+    let root = support::real_path(dir.path()).join("fx");
+    let env = if cfg!(windows) {
+        vacancy_core::Env::windows(&root, "alex")
+    } else {
+        vacancy_core::Env::macos(&root, "alex")
+    };
+    let dummy = support::dummy_browsers(&env.home.join("Elsewhere"), &env, support::KIB);
+    let snap = support::scan_with(&root, support::MIB);
+    let hider = hidden::Hider::of(&snap, &env);
+    let mut rules = hidden::deny_rules_in(&[]);
+    let walls = hider.deny_rules();
+    assert!(!walls.is_empty());
+    rules.extend(walls);
+    let text = |p: &PathBuf| p.to_str().unwrap().to_owned();
+    for p in &dummy.hidden {
+        assert!(
+            hider.hides(p).is_some(),
+            "{} is hidden from prompts",
+            p.display()
+        );
+        checks.add(style, "deny", &rules, text(p), true, "in a scanned profile");
+    }
+    for p in dummy.caches.iter().chain(&dummy.ordinary) {
+        assert!(hider.hides(p).is_none(), "{} stays in prompts", p.display());
+        checks.add(
+            style,
+            "deny",
+            &rules,
+            text(p),
+            false,
+            "a scanned profile's cache, or no profile",
+        );
+    }
+    for p in &dummy.profiles {
+        assert!(
+            hider.hides(p).is_none() && hider.holds_browser_data(p),
+            "{}",
+            p.display()
+        );
+        checks.add(
+            style,
+            "deny",
+            &rules,
+            text(p),
+            false,
+            "a scanned profile itself",
+        );
+    }
+    dummy.hidden.len()
+}
+
 /// Allow rules exist only for roots they spell exactly, and match inside them only.
 fn allow_checks(style: Style, checks: &mut Checks) -> usize {
     let b = base(style);
@@ -779,9 +1080,12 @@ fn claude_codes_matcher_gives_each_rule_exactly_its_meaning() {
         moved_folder_checks(style, &mut checks);
         named_place_checks(style, &mut checks);
         browser_profile_checks(style, &mut checks);
+        browser_wall_checks(style, &mut checks);
         spelled += allow_checks(style, &mut checks);
     }
     host_checks(&mut checks);
+    let scanned = scanned_profile_checks(&mut checks);
+    assert!(scanned > 40, "the dummy profiles hide {scanned} places");
     assert!(spelled > 100, "most roots are spelled: {spelled}");
 
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

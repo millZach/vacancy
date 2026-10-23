@@ -5,15 +5,19 @@
 //! ```text
 //! claude -p --setting-sources "" --strict-mcp-config --disable-slash-commands --no-session-persistence
 //!        --permission-prompts none --output-format json --json-schema <schema> --system-prompt <Vacancy's>
-//!        --tools "" --settings <deny rules>                                           (privacy mode on)
-//!        --tools Read,Glob,Grep --settings <deny and allow rules> --add-dir <roots...>   (privacy mode off)
+//!        --tools "" --settings <file: deny rules>                                         (privacy mode on)
+//!        --tools Read,Glob,Grep --settings <file: deny and allow rules> --add-dir <roots...> (privacy mode off)
 //! ```
 //!
 //! The prompt goes over standard input: `--add-dir` and `--tools` take any number of values and would swallow a
-//! prompt given after them, and a command line has a length limit a prompt mustn't meet. No `--model`: the
-//! account's default applies. The always-hidden places are `permissions.deny` rules Claude Code enforces (see
-//! [`super::hidden`]) in both modes: with privacy mode on Claude has no tool to read with, so they are defence in
-//! depth there. With privacy mode off, reads are allowed on every drive, or in fixture mode only in the fixture
+//! prompt given after them, and a command line has a length limit a prompt mustn't meet. The settings go in a file
+//! Vacancy writes for the call (`--settings` takes a file's path or JSON), beside the call's empty folder and
+//! removed with it, for the same reason: the rules grow with long config paths and with each browser profile a
+//! scan finds. The file denies itself, because privacy mode off's roots are whole drives. A command still longer
+//! than [`MAX_COMMAND_UNITS`] isn't started. No `--model`: the account's default applies. The always-hidden places
+//! are `permissions.deny` rules Claude Code enforces (see [`super::hidden`]) in both modes, with the scan's browser
+//! profiles ([`Call::deny`]): with privacy mode on Claude has no tool to read with, so they are defence in depth
+//! there. With privacy mode off, reads are allowed on every drive, or in fixture mode only in the fixture
 //! folder: anything else would need a permission prompt, which `--permission-prompts none` refuses. In both modes
 //! Claude Code expands no `@` file mention and attaches nothing (`CLAUDE_CODE_DISABLE_ATTACHMENTS`,
 //! `CLAUDE_CODE_DISABLE_FILE_MENTIONS`), so a path the person types in a chat stays text.
@@ -62,15 +66,18 @@ pub enum Access {
     Read(Vec<PathBuf>),
 }
 
-/// One request: Vacancy's system prompt, the prompt, and the JSON schema the answer must match.
+/// One request: Vacancy's system prompt, the prompt, the JSON schema the answer must match, and the deny rules its
+/// scan adds to the always-hidden ones (the browser profiles it found: [`hidden::Hider::deny_rules`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Call {
     pub system: String,
     pub prompt: String,
     pub schema: Value,
+    pub deny: Vec<String>,
 }
 
-/// Exactly what is started for a call: the program, its arguments, its environment changes and its input.
+/// Exactly what is started for a call: the program, its arguments, its environment changes, its input, and the
+/// settings file written for it (its path, as `--settings` names it, and its JSON).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Invocation {
     pub program: PathBuf,
@@ -78,6 +85,19 @@ pub struct Invocation {
     pub env_set: Vec<(String, String)>,
     pub env_remove: Vec<String>,
     pub stdin: String,
+    pub settings: Option<(PathBuf, String)>,
+}
+
+/// The longest command Vacancy starts, in UTF-16 units counted as [`command_units`] counts them: below Windows'
+/// limit of 32,767 for a whole command line.
+pub const MAX_COMMAND_UNITS: usize = 30_000;
+
+/// How long `invocation`'s command line is, in UTF-16 units: the program and each argument quoted, with every `"`
+/// and `\` escaped, which is more than Windows needs.
+pub fn command_units(invocation: &Invocation) -> usize {
+    let units = |s: &str| s.encode_utf16().count() + 3 + s.matches(['"', '\\']).count();
+    units(&invocation.program.to_string_lossy())
+        + invocation.args.iter().map(|a| units(a)).sum::<usize>()
 }
 
 /// The arguments both modes share, in order.
@@ -326,9 +346,31 @@ pub fn private_settings_in(config: &[PathBuf]) -> Value {
     })
 }
 
-/// The command for `call`, with Claude Code at `program`.
-pub fn invocation(program: &Path, call: &Call, access: &Access) -> Invocation {
-    invocation_in(program, call, access, hidden::config_dirs())
+/// The command for `call`, with Claude Code at `program` and its settings in the file `settings`.
+pub fn invocation(program: &Path, call: &Call, access: &Access, settings: &Path) -> Invocation {
+    invocation_in(program, call, access, hidden::config_dirs(), settings)
+}
+
+/// The settings `call` runs with, in the file `file`: privacy mode's ([`private_settings_in`] or
+/// [`read_settings_in`]), with the call's own deny rules ([`Call::deny`]) and one for the file itself added.
+pub fn call_settings_in(call: &Call, access: &Access, config: &[PathBuf], file: &Path) -> Value {
+    let mut settings = match access {
+        Access::Private => private_settings_in(config),
+        Access::Read(roots) => read_settings_in(roots, config),
+    };
+    let own = cover_path_in(&file.to_string_lossy(), Style::HOST).map(|at| format!("Read(/{at})"));
+    if let Some(deny) = settings["permissions"]["deny"].as_array_mut() {
+        let mut have: std::collections::HashSet<String> = deny
+            .iter()
+            .filter_map(|r| r.as_str().map(str::to_owned))
+            .collect();
+        for rule in call.deny.iter().cloned().chain(own) {
+            if have.insert(rule.clone()) {
+                deny.push(Value::String(rule));
+            }
+        }
+    }
+    settings
 }
 
 /// [`invocation`], with Claude Code's and Codex's own folders where `config` puts them.
@@ -337,21 +379,23 @@ pub fn invocation_in(
     call: &Call,
     access: &Access,
     config: &[PathBuf],
+    settings: &Path,
 ) -> Invocation {
     let mut args = locked(call);
+    let file = settings.display().to_string();
     match access {
         Access::Private => args.extend([
             "--tools".to_owned(),
             String::new(),
             "--settings".to_owned(),
-            private_settings_in(config).to_string(),
+            file,
         ]),
         Access::Read(roots) => {
             args.extend([
                 "--tools".to_owned(),
                 "Read,Glob,Grep".to_owned(),
                 "--settings".to_owned(),
-                read_settings_in(roots, config).to_string(),
+                file,
                 "--add-dir".to_owned(),
             ]);
             args.extend(roots.iter().map(|r| r.display().to_string()));
@@ -363,6 +407,10 @@ pub fn invocation_in(
         env_set: env_set(),
         env_remove: ENV_REMOVE.iter().map(|k| (*k).to_owned()).collect(),
         stdin: call.prompt.clone(),
+        settings: Some((
+            settings.to_path_buf(),
+            call_settings_in(call, access, config, settings).to_string(),
+        )),
     }
 }
 
@@ -492,8 +540,12 @@ impl ClaudeCode {
         control: &Control,
         progress: &mut dyn FnMut(Progress),
     ) -> (Result<Reply, Failure>, String) {
-        let invocation = invocation_in(&self.program, call, &self.access, config);
-        let output = match run_in_empty_folder(&self.work, &invocation, control, progress) {
+        let folder = match CallFolder::new(&self.work) {
+            Ok(folder) => folder,
+            Err(failure) => return (Err(failure), String::new()),
+        };
+        let invocation = invocation_in(&self.program, call, &self.access, config, &folder.settings);
+        let output = match run_in(&folder, &invocation, control, progress) {
             Ok(output) => output,
             Err(failure) => return (Err(failure), String::new()),
         };
@@ -510,30 +562,75 @@ impl ClaudeCode {
     }
 }
 
-/// Makes a new empty folder for one call under `work`, runs `invocation` there and removes the folder after.
-fn run_in_empty_folder(
-    work: &Path,
+/// One call's places under the working folder: a new empty folder Claude Code runs from, and beside it (never in
+/// it, and named for it) the call's settings file. Both are removed when the call is done.
+struct CallFolder {
+    dir: PathBuf,
+    settings: PathBuf,
+}
+
+impl CallFolder {
+    fn new(work: &Path) -> Result<Self, Failure> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let failed = |e: std::io::Error| {
+            Failure::error(format!("Vacancy couldn't make its working folder: {e}"))
+        };
+        std::fs::create_dir_all(work).map_err(failed)?;
+        let name = format!(
+            "call-{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        );
+        let dir = work.join(&name);
+        std::fs::create_dir(&dir).map_err(failed)?;
+        Ok(Self {
+            settings: work.join(format!("{name}.settings.json")),
+            dir,
+        })
+    }
+}
+
+impl Drop for CallFolder {
+    fn drop(&mut self) {
+        // Vacancy's own folder and file, made for the call: the folder should still be empty (Claude can't write).
+        let _ = std::fs::remove_dir_all(&self.dir);
+        let _ = std::fs::remove_file(&self.settings);
+    }
+}
+
+/// Runs `invocation` from `folder`, with its settings file written first. A command longer than
+/// [`MAX_COMMAND_UNITS`] isn't started.
+fn run_in(
+    folder: &CallFolder,
     invocation: &Invocation,
     control: &Control,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<crate::tools::Output, Failure> {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    std::fs::create_dir_all(work)
-        .map_err(|e| Failure::error(format!("Vacancy couldn't make its working folder: {e}")))?;
-    let folder = work.join(format!(
-        "call-{}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos()),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir(&folder)
-        .map_err(|e| Failure::error(format!("Vacancy couldn't make its working folder: {e}")))?;
+    let units = command_units(invocation);
+    if units > MAX_COMMAND_UNITS {
+        return Err(Failure::error(format!(
+            "Vacancy didn't start Claude Code: its command would be {units} characters long, more than Windows \
+             allows ({MAX_COMMAND_UNITS})."
+        )));
+    }
+    if let Some((path, json)) = &invocation.settings {
+        let failed = |e: std::io::Error| {
+            Failure::error(format!("Vacancy couldn't write Claude's settings: {e}"))
+        };
+        let mut file = std::fs::File::options()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(failed)?;
+        std::io::Write::write_all(&mut file, json.as_bytes()).map_err(failed)?;
+    }
     let mut command = Command::new(&invocation.program);
     command
         .args(&invocation.args)
-        .current_dir(&folder)
+        .current_dir(&folder.dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     for key in &invocation.env_remove {
@@ -543,7 +640,7 @@ fn run_in_empty_folder(
         command.env(key, value);
     }
     let mut slow = false;
-    let output = run_contained(
+    Ok(run_contained(
         command,
         Limits {
             timeout: control.timeout,
@@ -557,10 +654,7 @@ fn run_in_empty_folder(
                 progress(Progress::Slow);
             }
         },
-    );
-    // Vacancy's own folder, made above: it should still be empty (Claude can't write).
-    let _ = std::fs::remove_dir_all(&folder);
-    Ok(output)
+    ))
 }
 
 /// The longest `claude auth status` may take.
@@ -576,13 +670,15 @@ pub fn signed_in(program: &Path, work: &Path) -> Result<bool, Failure> {
         env_set: env_set(),
         env_remove: ENV_REMOVE.iter().map(|k| (*k).to_owned()).collect(),
         stdin: String::new(),
+        settings: None,
     };
     let control = Control {
         cancel: CancelToken::new(),
         timeout: AUTH_TIMEOUT,
         slow_after: Duration::MAX,
     };
-    let output = run_in_empty_folder(work, &invocation, &control, &mut |_| {})?;
+    let folder = CallFolder::new(work)?;
+    let output = run_in(&folder, &invocation, &control, &mut |_| {})?;
     match output.status {
         Status::Success => Ok(true),
         Status::Failed(_) => Ok(false),
@@ -702,6 +798,7 @@ mod tests {
             system: "SYSTEM".into(),
             prompt: "PROMPT".into(),
             schema: serde_json::json!({"type": "object"}),
+            deny: vec!["Read(//d/BrowserData/Work/?*)".into()],
         }
     }
 
@@ -769,30 +866,64 @@ mod tests {
         }
     }
 
+    /// Where a test's settings file goes: an app-owned folder, beside the call's own.
+    fn settings_file() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\Users\alex\AppData\Roaming\Vacancy\claude-work\call-1.settings.json")
+        } else {
+            PathBuf::from(
+                "/Users/alex/Library/Application Support/Vacancy/claude-work/call-1.settings.json",
+            )
+        }
+    }
+
+    /// The rule that keeps a call's settings file from Claude.
+    fn own_rule() -> String {
+        if cfg!(windows) {
+            "Read(//c/Users/alex/AppData/Roaming/Vacancy/claude-work/call-1.settings.json)"
+                .to_owned()
+        } else {
+            "Read(//Users/alex/Library/Application Support/Vacancy/claude-work/call-1.settings.json)".to_owned()
+        }
+    }
+
+    /// The settings file's JSON, from the invocation.
+    fn settings_of(inv: &Invocation) -> Value {
+        let (path, json) = inv.settings.as_ref().expect("a call has a settings file");
+        assert_eq!(path, &settings_file());
+        serde_json::from_str(json).unwrap()
+    }
+
     #[test]
     fn privacy_on_pins_the_exact_argv_and_env_with_no_tools_and_the_deny_rules() {
         let program = PathBuf::from("claude");
-        let inv = invocation_in(&program, &call(), &Access::Private, &[]);
+        let inv = invocation_in(&program, &call(), &Access::Private, &[], &settings_file());
         let mut expected: Vec<String> = LOCKED.iter().map(|s| (*s).to_owned()).collect();
         expected.push(String::new());
         expected.push("--settings".into());
-        expected.push(
-            serde_json::json!({"permissions": {"deny": hidden::deny_rules_in(&[])}}).to_string(),
+        expected.push(settings_file().display().to_string());
+        assert_eq!(
+            inv.args, expected,
+            "the settings come from a file, by its path"
         );
-        assert_eq!(inv.args, expected);
         assert_eq!(inv.program, program);
         env_pinned(&inv);
-        // No tools, so nothing to allow; the always-hidden places are denied all the same.
+        // The file: no tools, so nothing to allow; the always-hidden places, the call's own rules (its scan's browser
+        // profiles) and the file itself are denied all the same.
+        let mut deny = hidden::deny_rules_in(&[]);
+        deny.extend(call().deny);
+        deny.push(own_rule());
+        assert_eq!(
+            settings_of(&inv),
+            serde_json::json!({"permissions": {"deny": deny}})
+        );
         let settings = private_settings_in(&[]);
         assert!(settings["permissions"].get("allow").is_none());
-        assert!(
-            settings["permissions"]["deny"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|d| d == "Read(//**/.ssh/**)")
-        );
         assert!(!inv.args.iter().any(|a| a == "--add-dir"));
+        assert!(
+            !inv.args.iter().any(|a| a.contains(".ssh")),
+            "no rule on the command line"
+        );
     }
 
     #[test]
@@ -808,16 +939,20 @@ mod tests {
             Access::Private,
             Access::Read(vec![moved.parent().unwrap().to_path_buf()]),
         ] {
-            let inv = invocation_in(Path::new("claude"), &call(), &access, config);
-            let settings = &inv.args[inv.args.iter().position(|a| a == "--settings").unwrap() + 1];
-            let settings: Value = serde_json::from_str(settings).unwrap();
+            let inv = invocation_in(
+                Path::new("claude"),
+                &call(),
+                &access,
+                config,
+                &settings_file(),
+            );
+            let settings = settings_of(&inv);
+            let deny = settings["permissions"]["deny"].as_array().unwrap();
+            assert!(deny.iter().any(|d| d == &rule), "{access:?}: {settings}");
+            assert!(deny.iter().any(|d| d == &own_rule()), "{access:?}");
             assert!(
-                settings["permissions"]["deny"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|d| d == &rule),
-                "{access:?}: {settings}"
+                deny.iter().any(|d| d == "Read(//d/BrowserData/Work/?*)"),
+                "{access:?}"
             );
         }
     }
@@ -830,16 +965,26 @@ mod tests {
         } else {
             vec![PathBuf::from("/")]
         };
-        let inv = invocation(&program, &call(), &Access::Read(roots.clone()));
+        let inv = invocation(
+            &program,
+            &call(),
+            &Access::Read(roots.clone()),
+            &settings_file(),
+        );
         let mut expected: Vec<String> = LOCKED.iter().map(|s| (*s).to_owned()).collect();
         expected.push("Read,Glob,Grep".into());
         expected.push("--settings".into());
-        expected.push(read_settings(&roots).to_string());
+        expected.push(settings_file().display().to_string());
         expected.push("--add-dir".into());
         expected.extend(roots.iter().map(|r| r.display().to_string()));
         assert_eq!(inv.args, expected);
         env_pinned(&inv);
-        let settings = read_settings(&roots);
+        let settings = settings_of(&inv);
+        let mut want = read_settings(&roots);
+        let deny = want["permissions"]["deny"].as_array_mut().unwrap();
+        deny.push(json("Read(//d/BrowserData/Work/?*)"));
+        deny.push(json(&own_rule()));
+        assert_eq!(settings, want);
         let allow: Vec<&str> = settings["permissions"]["allow"]
             .as_array()
             .unwrap()
@@ -852,11 +997,70 @@ mod tests {
             assert_eq!(allow, ["Read(//**)"]);
         }
         let deny = settings["permissions"]["deny"].as_array().unwrap();
-        assert_eq!(deny.len(), hidden::deny_rules().len());
+        assert_eq!(deny.len(), hidden::deny_rules().len() + 2);
         assert!(deny.iter().any(|d| d == "Read(//**/.ssh/**)"));
         // Only Read, Glob and Grep: never a tool that writes, runs commands or goes online.
         let tools = &inv.args[inv.args.iter().position(|a| a == "--tools").unwrap() + 1];
         assert_eq!(tools, "Read,Glob,Grep");
+    }
+
+    /// The rules never go on the command line, so it stays short however long the config folders' paths are and
+    /// however many browser profiles a scan finds; a command over the cap isn't started at all.
+    #[test]
+    fn the_command_stays_short_with_long_config_paths_and_many_rules() {
+        let long = |i: usize| {
+            let name = format!("{}{i}", "a-very-long-folder-name-".repeat(8));
+            if cfg!(windows) {
+                PathBuf::from(format!(r"D:\{name}\{name}\{name}\claude-config"))
+            } else {
+                PathBuf::from(format!("/Volumes/{name}/{name}/{name}/claude-config"))
+            }
+        };
+        let config: Vec<PathBuf> = (0..200).map(long).collect();
+        let mut big = call();
+        big.deny = (0..5_000)
+            .map(|i| format!("Read(//d/BrowserData/Profile {i}/?*)"))
+            .collect();
+        for access in [Access::Private, Access::Read(vec![long(0)])] {
+            let inv = invocation_in(
+                Path::new("claude"),
+                &big,
+                &access,
+                &config,
+                &settings_file(),
+            );
+            assert!(
+                command_units(&inv) < 2_000,
+                "{access:?}: {}",
+                command_units(&inv)
+            );
+            let (_, json) = inv.settings.as_ref().unwrap();
+            assert!(json.len() > 100_000, "the rules are in the file");
+            for dir in &config {
+                assert!(json.contains(&rule_path(dir).unwrap()), "{dir:?}");
+            }
+        }
+        // Over the cap: refused before anything is written or started.
+        let work = tempfile::tempdir().unwrap();
+        let folder = CallFolder::new(work.path()).unwrap();
+        let mut huge = call();
+        huge.system = "x".repeat(MAX_COMMAND_UNITS);
+        let inv = invocation_in(
+            Path::new("claude"),
+            &huge,
+            &Access::Private,
+            &[],
+            &folder.settings,
+        );
+        let control = Control::new(CancelToken::new());
+        let refused = run_in(&folder, &inv, &control, &mut |_| {}).unwrap_err();
+        assert!(
+            refused.to_string().contains("more than Windows allows"),
+            "{refused}"
+        );
+        assert!(!folder.settings.exists());
+        drop(folder);
+        assert!(std::fs::read_dir(work.path()).unwrap().next().is_none());
     }
 
     #[test]
@@ -878,6 +1082,7 @@ mod tests {
             Path::new("claude"),
             &call(),
             &Access::Read(vec![root.clone()]),
+            &settings_file(),
         );
         assert_eq!(inv.args.last().unwrap(), &root.display().to_string());
     }
@@ -1025,6 +1230,7 @@ mod tests {
             &call(),
             &Access::Read(vec![root.clone()]),
             &[],
+            &settings_file(),
         );
         assert_eq!(
             inv.args.last().unwrap(),
@@ -1104,7 +1310,10 @@ mod tests {
         let left: Vec<_> = std::fs::read_dir(work.path().join("work"))
             .unwrap()
             .collect();
-        assert!(left.is_empty(), "each call's folder is removed after it");
+        assert!(
+            left.is_empty(),
+            "each call's folder and settings file are removed after it: {left:?}"
+        );
         assert_eq!(
             signed_in(&work.path().join("no-such-claude.exe"), work.path()),
             Err(Failure::NotFound)

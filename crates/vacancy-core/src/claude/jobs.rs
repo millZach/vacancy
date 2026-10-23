@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::hidden;
+use super::hidden::{self, Hider};
 use super::runner::{Call, Cli, Control, Failure, Progress, Reply};
 use super::{
     About, Answer, Basis, Change, ChangeKind, Dropped, Fine, Flag, FolderNote, Job, JobKind,
@@ -105,6 +105,8 @@ pub fn prepare(
 ) -> Result<Prepared, Failure> {
     let privacy = readable.is_none();
     let shown = |p: &Path| shown(p, env, privacy);
+    // What always stays hidden here, with the browser profiles this scan found.
+    let hider = Hider::of(&scanned.snapshot, env);
     // With privacy mode on, Claude's items made with it off go by their name in the scan only.
     let redact = |p: &Proposal| privacy && scanned.claude.off.made(&p.id);
     let proposals = scanned.proposals.list();
@@ -124,9 +126,9 @@ pub fn prepare(
                 .iter()
                 .filter(|p| plan.contains(&p.id))
                 .take(MAX_PROPOSALS)
-                .map(|p| proposal_json(p, None, &shown, redact(p)))
+                .map(|p| proposal_json(p, None, &shown, redact(p), &hider))
                 .collect();
-            let reads = read_note(readable, &sample_dirs(proposals, &plan), &shown);
+            let reads = read_note(readable, &sample_dirs(proposals, &plan), &shown, &hider);
             let prompt = format!(
                 "Job: review the person's cleanup plan and give a second opinion.\n{reads}\n\
                  Flag only the items that are risky to delete, each with a short reason a non-expert understands \
@@ -161,14 +163,14 @@ pub fn prepare(
             let items: Vec<Value> = proposals
                 .iter()
                 .take(MAX_PROPOSALS)
-                .map(|p| proposal_json(p, Some(plan.contains(&p.id)), &shown, redact(p)))
+                .map(|p| proposal_json(p, Some(plan.contains(&p.id)), &shown, redact(p), &hider))
                 .collect();
             let mut dirs = sample_dirs(
                 proposals,
                 &proposals.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
             );
             dirs.extend(unknown_roots(&unknown, &scanned.snapshot));
-            let reads = read_note(readable, &dirs, &shown);
+            let reads = read_note(readable, &dirs, &shown, &hider);
             let prompt = format!(
                 "Job: pick the person's cleanup plan for them. They gave no goal: free a good amount of space \
                  without risking anything they'd miss.\n{reads}\n\
@@ -212,9 +214,9 @@ pub fn prepare(
                 privacy,
             };
             let messages: Vec<Message> = turns.iter().cloned().chain([question.clone()]).collect();
-            let (subject, dirs) = subject_json(about, scanned, &shown, privacy)?;
+            let (subject, dirs) = subject_json(about, scanned, &shown, privacy, &hider)?;
             let conversation = conversation(&messages)?;
-            let reads = read_note(readable, &dirs, &shown);
+            let reads = read_note(readable, &dirs, &shown, &hider);
             let prompt = format!(
                 "Job: answer the person's questions about one item of their disk.\n{reads}\n\
                  In your first answer cover what it is, what they'd lose by deleting it, and whether it comes back \
@@ -249,7 +251,7 @@ pub fn prepare(
                 ));
             }
             let dirs = unknown_roots(&unknown, &scanned.snapshot);
-            let reads = read_note(readable, &dirs, &shown);
+            let reads = read_note(readable, &dirs, &shown, &hider);
             let prompt = format!(
                 "Job: explain the biggest folders on this disk that Vacancy's rules don't recognize.\n{reads}\n\
                  For each root folder below (by its id) say in `short` what it is in a few words and in \
@@ -315,7 +317,7 @@ pub fn prepare(
                 })
                 .collect();
             let dirs: Vec<PathBuf> = chosen.iter().map(|t| PathBuf::from(&t.path)).collect();
-            let reads = read_note(readable, &dirs, &shown);
+            let reads = read_note(readable, &dirs, &shown, &hider);
             let prompt = format!(
                 "Job: suggest a tidier layout for the loose files at the top of these folders.\n{reads}\n\
                  Group the files by what they're for (for example Money & paperwork, Travel, Work, Photos, \
@@ -355,6 +357,7 @@ pub fn prepare(
             system: SYSTEM.to_owned(),
             prompt: format!("{}\n", prompt.trim_end()),
             schema,
+            deny: hider.deny_rules(),
         },
         privacy,
         context,
@@ -939,6 +942,7 @@ fn admit_all(
         let guarded = Guarded::new(snap, &scanned.categories, Guard::new(env, &env.root), &stop)
             .ok_or(Failure::Cancelled)?;
         let guard = Guard::new(env, &env.root);
+        let hider = Hider::of(snap, env);
         let mut claims = Claims::new(snap.dir_count());
         for i in 0..scanned.proposals.list().len() {
             for &t in scanned.proposals.targets(i) {
@@ -973,7 +977,8 @@ fn admit_all(
                 continue;
             }
             match admit(
-                snap, scanned, env, unknown, roots, &guarded, &guard, &claims, &personal, &item,
+                snap, scanned, env, unknown, roots, &guarded, &guard, &claims, &personal, &hider,
+                &item,
             ) {
                 Ok((proposal, target)) => {
                     if pending.iter().any(|(p, _)| p.id == proposal.id) {
@@ -1015,6 +1020,7 @@ fn admit(
     guard: &Guard,
     claims: &Claims,
     personal: &[&Path],
+    hider: &Hider,
     item: &ItemOut,
 ) -> Result<(Proposal, ItemRef), (String, String)> {
     let said = item.target.trim();
@@ -1049,8 +1055,11 @@ fn admit(
     if !inside {
         return fail("It isn't inside the folder Claude was asked about.");
     }
-    if hidden::hides(&path).is_some() {
+    if hider.hides(&path).is_some() {
         return fail("It is one of the places that always stay hidden from Claude.");
+    }
+    if hider.holds_browser_data(&path) {
+        return fail("It holds a browser's profile, which always stays hidden from Claude.");
     }
     let flags = snap.flags(dir);
     let link = match target {
@@ -1209,6 +1218,7 @@ fn read_note(
     readable: Option<&[PathBuf]>,
     dirs: &[PathBuf],
     shown: &dyn Fn(&Path) -> String,
+    hider: &Hider,
 ) -> String {
     match readable {
         None => "Privacy mode is on: you have no tools. You see only the names, sizes, counts and dates below; \
@@ -1217,7 +1227,7 @@ fn read_note(
         Some(_) => {
             let mut places: Vec<String> = dirs
                 .iter()
-                .filter(|d| hidden::hides(d).is_none())
+                .filter(|d| hider.hides(d).is_none())
                 .map(|d| shown(d))
                 .collect();
             places.sort();
@@ -1245,12 +1255,13 @@ fn proposal_json(
     ticked: Option<bool>,
     shown: &dyn Fn(&Path) -> String,
     redact: bool,
+    hider: &Hider,
 ) -> Value {
     let samples: Vec<String> = p
         .sample_paths
         .iter()
         .map(PathBuf::from)
-        .filter(|s| hidden::hides(s).is_none())
+        .filter(|s| hider.hides(s).is_none())
         .take(3)
         .map(|s| shown(&s))
         .collect();
@@ -1365,6 +1376,7 @@ fn subject_json(
     scanned: &ScannedVolume,
     shown: &dyn Fn(&Path) -> String,
     privacy: bool,
+    hider: &Hider,
 ) -> Result<(Value, Vec<PathBuf>), Failure> {
     let snap = &scanned.snapshot;
     match about {
@@ -1378,7 +1390,7 @@ fn subject_json(
                     Failure::error("That item isn't in this scan any more. Scan again.")
                 })?;
             let redact = privacy && scanned.claude.off.made(&p.id);
-            let mut v = proposal_json(p, None, shown, redact);
+            let mut v = proposal_json(p, None, shown, redact, hider);
             if let Some(note) = p.claude_note.as_ref().filter(|_| !redact) {
                 v["claudeSaid"] = json!(note);
             }
@@ -1389,7 +1401,7 @@ fn subject_json(
         }
         About::Folder { path } => {
             let path = PathBuf::from(path);
-            if hidden::hides(&path).is_some() {
+            if hider.hides(&path).is_some() {
                 return Err(Failure::error(
                     "That folder always stays hidden from Claude, so Vacancy won't ask about it.",
                 ));
@@ -1400,7 +1412,7 @@ fn subject_json(
             let totals = snap.tree(dir);
             let mut children: Vec<(String, &str, u64, u64, i64)> = snap
                 .children(dir)
-                .filter(|&c| hidden::hides(&snap.path(c)).is_none())
+                .filter(|&c| hider.hides(&snap.path(c)).is_none())
                 .map(|c| {
                     let t = snap.tree(c);
                     (
@@ -1413,7 +1425,7 @@ fn subject_json(
                 })
                 .chain(
                     snap.files(dir)
-                        .filter(|&f| hidden::hides(&snap.file_path(f)).is_none())
+                        .filter(|&f| hider.hides(&snap.file_path(f)).is_none())
                         .map(|f| {
                             let i = snap.file(f);
                             (

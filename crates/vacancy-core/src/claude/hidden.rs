@@ -12,7 +12,9 @@
 //! same folder names mean the same thing in any home, the fixture's included. A browser's profile can have any name
 //! and a Firefox profile can be anywhere, so browser data is hidden by its stores' own names, never by a profile's
 //! name or place; the few store names that are also ordinary names (`Sessions`, `Shortcuts`) count anywhere below
-//! where browsers keep their profiles ([`PROFILES`]). Matching more than is strictly needed only hides more. Claude
+//! where browsers keep their profiles ([`PROFILES`]). These names are the second wall: the browser profiles a scan
+//! finds are hidden whole except their caches ([`super::browsers`], through [`Hider`], which every job uses for
+//! its scan). Matching more than is strictly needed only hides more. Claude
 //! Code's and Codex's own folders can also be moved (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`); each call inherits the
 //! app's environment, so wherever the app's environment puts them is hidden too, by path ([`config_dirs`]). Vacancy
 //! never reads what is inside them.
@@ -24,7 +26,10 @@ use std::sync::OnceLock;
 use serde::Serialize;
 use ts_rs::TS;
 
+use super::browsers::Browsers;
 use super::runner::{Style, cover_path_in, rule_cover};
+use crate::categorize::Env;
+use crate::snapshot::Snapshot;
 
 /// What a pattern stands for: a folder (hidden with everything in it), or a file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -349,7 +354,7 @@ fn names(path: &Path) -> Vec<String> {
 
 /// A path's components for comparing two absolute paths, lower-cased: its drive (`c:`), then its names. The root
 /// and `.` are left out; `..` is kept, so a path that climbs never matches by accident.
-fn keyed(path: &Path) -> Vec<String> {
+pub(super) fn keyed(path: &Path) -> Vec<String> {
     path.components()
         .filter_map(|c| match c {
             Component::Prefix(p) => Some(match p.kind() {
@@ -367,7 +372,7 @@ fn keyed(path: &Path) -> Vec<String> {
 
 /// Whether `name` matches the pattern `pattern`, case-insensitively: one of its `|` alternatives, where `*` stands
 /// for any run of characters.
-fn glob(pattern: &str, name: &str) -> bool {
+pub(super) fn glob(pattern: &str, name: &str) -> bool {
     pattern.split('|').any(|alt| glob_one(alt, name))
 }
 
@@ -456,6 +461,42 @@ pub fn hides(path: &Path) -> Option<Group> {
 /// Whether a single name (a loose file's, say) is an always-hidden file or folder on its own.
 pub fn hides_name(name: &str) -> bool {
     hides(Path::new(name)).is_some()
+}
+
+/// What always stays hidden for one scan: the named places and moved folders ([`hides`]), and the browser
+/// profiles and roots the scan found, whole except their caches ([`Browsers`]).
+#[derive(Clone, Debug)]
+pub struct Hider {
+    browsers: Browsers,
+}
+
+impl Hider {
+    /// The hider for `snap`, scanned under `env`.
+    pub fn of(snap: &Snapshot, env: &Env) -> Self {
+        Self {
+            browsers: Browsers::of(snap, env),
+        }
+    }
+
+    /// The group of the always-hidden place `path` is, or is in.
+    pub fn hides(&self, path: &Path) -> Option<Group> {
+        hides(path).or_else(|| self.browsers.hides(path).then_some(Browser))
+    }
+
+    /// Whether `path` is, or holds, a browser profile or root the scan found: a suggestion to delete it would take
+    /// what is hidden in it.
+    pub fn holds_browser_data(&self, path: &Path) -> bool {
+        self.browsers.holds(path)
+    }
+
+    /// The deny rules this scan adds to the always-hidden ones: its browser profiles and roots.
+    pub fn deny_rules(&self) -> Vec<String> {
+        self.browsers.deny_rules()
+    }
+
+    pub fn browsers(&self) -> &Browsers {
+        &self.browsers
+    }
 }
 
 /// Every spelling of a place's parts: one per choice of alternative in each part (`a|b`, `c` gives `a/c` and

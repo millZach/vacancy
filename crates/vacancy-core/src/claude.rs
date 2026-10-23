@@ -34,6 +34,7 @@ use crate::map::{Overview, ScannedVolume};
 use crate::rules::{Proposal, ProposalSource, Risk};
 use crate::tidy::TidyProposal;
 
+pub mod browsers;
 pub mod discovery;
 mod fake;
 pub mod hidden;

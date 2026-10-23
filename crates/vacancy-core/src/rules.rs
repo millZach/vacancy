@@ -33,6 +33,7 @@ use crate::text::group_digits;
 mod catalog;
 mod running;
 
+pub(crate) use catalog::APP_CACHES;
 use catalog::{Find, Proof, Rule};
 
 /// How careful to be with a proposal.

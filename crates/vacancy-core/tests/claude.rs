@@ -1179,6 +1179,236 @@ fn browser_stores_and_their_backups_never_reach_a_prompt_or_a_suggestion() {
     }
 }
 
+/// Browser profiles found by their marker files are hidden whole except their caches (ADR 0008): a Chromium user
+/// data folder of its own with a profile named `Work`, `Default` in the browser's own root, Opera's root that is its
+/// own profile, and a Firefox profile kept anywhere, with the stores the by-name rules don't all name (sessions,
+/// shortcuts, favicons, `DIPS`, `File System`, `WebStorage`, `databases`, `Sync Data`, `Storage`, `Service
+/// Worker`). Nothing in them but their caches reaches a prompt or is taken as a suggestion, and every call's own
+/// deny rules name them; a game's settings folder with a `Preferences` file is no profile.
+#[test]
+fn browser_profiles_are_hidden_whole_except_their_caches() {
+    let mut case = case();
+    let base = renders(&case).join("browsers");
+    // Over the scan's size for keeping a file, so the scan lists each one by name.
+    let dummy = support::dummy_browsers(&base, &case.env, MIB + 1);
+    for p in dummy
+        .hidden
+        .iter()
+        .chain(&dummy.caches)
+        .chain(&dummy.ordinary)
+    {
+        if p.is_file() {
+            old(p);
+        }
+    }
+    std::thread::sleep(Duration::from_millis(3200));
+    case.scanned = scan(&case.root, &case.env);
+    let hider = claude::hidden::Hider::of(&case.scanned.snapshot, &case.env);
+    for p in &dummy.hidden {
+        assert!(hider.hides(p).is_some(), "{} is hidden", p.display());
+    }
+    for p in dummy.caches.iter().chain(&dummy.ordinary) {
+        assert!(hider.hides(p).is_none(), "{} stays visible", p.display());
+    }
+    for p in &dummy.profiles {
+        assert!(
+            hider.hides(p).is_none(),
+            "{}'s name says nothing",
+            p.display()
+        );
+        assert!(
+            hider.holds_browser_data(p),
+            "{} holds a profile",
+            p.display()
+        );
+    }
+    assert!(!hider.holds_browser_data(&base.join("Game Settings")));
+    let file_name = |p: &PathBuf| p.file_name().unwrap().to_string_lossy().into_owned();
+    // Names only the hidden places have: a prompt must never hold one.
+    let shared: Vec<String> = dummy
+        .caches
+        .iter()
+        .chain(&dummy.ordinary)
+        .chain(&dummy.profiles)
+        .map(file_name)
+        .collect();
+    let secret: Vec<String> = dummy
+        .hidden
+        .iter()
+        .map(file_name)
+        .filter(|n| !shared.contains(n))
+        .collect();
+    assert!(secret.len() > 15, "{secret:?}");
+
+    // A chat about each profile and root, in both modes: what is in it but its caches is left out.
+    let fake =
+        FakeClaude::always(json!({ "reply": "Browser data.", "followUps": [], "opened": [] }));
+    for (i, dir) in dummy.profiles.iter().enumerate() {
+        let readable = (i % 2 == 1).then(|| vec![case.root.clone()]);
+        let about = About::Folder {
+            path: dir.display().to_string(),
+        };
+        let c = chat(&mut case, about, readable.is_none());
+        ask(
+            &fake,
+            &question(&c, "What's in here?"),
+            &mut case,
+            readable.as_deref(),
+        )
+        .unwrap();
+        let call = fake.calls().last().unwrap().clone();
+        let inside: Vec<String> = blocks(&call.prompt)[0]["biggestInside"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap().to_owned())
+            .collect();
+        for p in dummy.hidden.iter().filter(|p| p.parent() == Some(dir)) {
+            assert!(
+                !inside.contains(&file_name(p)),
+                "{} isn't listed: {inside:?}",
+                p.display()
+            );
+        }
+        for p in dummy.caches.iter().filter(|p| p.parent() == Some(dir)) {
+            assert!(
+                inside.contains(&file_name(p)),
+                "{} is listed: {inside:?}",
+                p.display()
+            );
+        }
+        for n in &secret {
+            assert!(!call.prompt.contains(&format!("\"{n}\"")), "{n} isn't sent");
+        }
+        assert!(!call.deny.is_empty(), "each call names the profiles");
+    }
+    // A chat about a hidden folder in a profile is refused, and sends nothing.
+    let sent = fake.calls().len();
+    for p in dummy.hidden.iter().filter(|p| p.is_dir()) {
+        let about = About::Folder {
+            path: p.display().to_string(),
+        };
+        let c = chat(&mut case, about, true);
+        let refused = ask(&fake, &question(&c, "What's in here?"), &mut case, None).unwrap_err();
+        assert!(
+            refused.to_string().contains("hidden"),
+            "{}: {refused}",
+            p.display()
+        );
+    }
+    assert_eq!(fake.calls().len(), sent);
+    // The game's settings folder is listed whole.
+    let game = base.join("Game Settings");
+    let c = chat(
+        &mut case,
+        About::Folder {
+            path: game.display().to_string(),
+        },
+        true,
+    );
+    ask(&fake, &question(&c, "What's in here?"), &mut case, None).unwrap();
+    let prompt = fake.calls().last().unwrap().prompt.clone();
+    assert!(prompt.contains("\"savegame.dat\"") && prompt.contains("\"Preferences\""));
+
+    // The big-folder summary leaves them out too.
+    let explain = claude::prepare(
+        &Job::ExplainFolders,
+        &case.scanned,
+        &case.env,
+        None,
+        &CancelToken::new(),
+    )
+    .unwrap();
+    for n in &secret {
+        assert!(
+            !explain.call().prompt.contains(&format!("\"{n}\"")),
+            "{n} isn't in the summary"
+        );
+    }
+    // Claude can't suggest them, a profile or a root whole, with privacy mode off; it can suggest their caches.
+    let readable = vec![case.root.clone()];
+    let mut refused: Vec<PathBuf> = dummy.hidden_under(&base);
+    refused.extend(
+        dummy
+            .profiles
+            .iter()
+            .filter(|p| p.starts_with(&base))
+            .cloned(),
+    );
+    let caches: Vec<PathBuf> = dummy
+        .caches
+        .iter()
+        .filter(|p| p.starts_with(&base))
+        .cloned()
+        .collect();
+    for batch in refused.chunks(20).chain(caches.chunks(20)) {
+        let fake = FakeClaude::new({
+            let batch = batch.to_vec();
+            move |call: &Call| {
+                let data = &blocks(&call.prompt)[0];
+                reply(json!({
+                    "folders": [{
+                        "id": root_id(data, "Old Renders"),
+                        "short": "Renders", "explanation": "Renders and browser data.",
+                        "remove": batch.iter().enumerate().map(|(i, t)| json!({
+                            "target": t.display().to_string(), "title": format!("Item {i}"), "why": "Old."
+                        })).collect::<Vec<_>>(),
+                    }],
+                    "opened": []
+                }))
+            }
+        });
+        let answer = ask(&fake, &Job::ExplainFolders, &mut case, Some(&readable)).unwrap();
+        for (i, target) in batch.iter().enumerate() {
+            let dropped = answer
+                .dropped
+                .iter()
+                .find(|d| d.name == format!("Item {i}"));
+            if refused.contains(target) {
+                let d = dropped.unwrap_or_else(|| panic!("{} is dropped", target.display()));
+                assert!(
+                    d.reason.contains("hidden"),
+                    "{}: {}",
+                    target.display(),
+                    d.reason
+                );
+            } else if let Some(d) = dropped {
+                assert!(
+                    !d.reason.contains("hidden"),
+                    "{} is a cache: {}",
+                    target.display(),
+                    d.reason
+                );
+            }
+        }
+        // Take Claude's items out again, so the next batch's are new.
+        let ids: Vec<String> = case
+            .scanned
+            .proposals
+            .list()
+            .iter()
+            .filter(|p| p.source == ProposalSource::Claude)
+            .map(|p| p.id.clone())
+            .collect();
+        claude::remove_items(&mut case.scanned, &ids).unwrap();
+    }
+    // No built-in proposal's sample is hidden: the rules propose caches only (`tests/rules.rs` checks each one).
+    let samples: Vec<PathBuf> = case
+        .scanned
+        .proposals
+        .list()
+        .iter()
+        .flat_map(|p| p.sample_paths.iter().map(PathBuf::from))
+        .collect();
+    for s in &samples {
+        assert!(
+            hider.hides(s).is_none(),
+            "{} is proposed and visible",
+            s.display()
+        );
+    }
+}
+
 /// Explains Old Renders with privacy mode off (`readable`) or on, Claude suggesting `render-01.png` with these words.
 fn suggest_render(case: &mut Case, readable: Option<&[PathBuf]>, title: &str, why: &str) -> String {
     let (title, why) = (title.to_owned(), why.to_owned());
@@ -1443,7 +1673,12 @@ fn typed_chat_text_stays_data_in_the_prompt_and_mentions_expand_nothing() {
     assert_eq!(sent[0]["text"].as_str().unwrap(), typed.trim());
     // It goes over stdin with attachments and file mentions off, in both modes; never on the command line.
     for access in [Access::Private, Access::Read(vec![case.root.clone()])] {
-        let inv = claude::runner::invocation(Path::new("claude"), &call, &access);
+        let inv = claude::runner::invocation(
+            Path::new("claude"),
+            &call,
+            &access,
+            Path::new("call.settings.json"),
+        );
         assert_eq!(inv.stdin, call.prompt);
         let typed_first = typed.lines().next().unwrap();
         assert!(
@@ -1460,10 +1695,10 @@ fn typed_chat_text_stays_data_in_the_prompt_and_mentions_expand_nothing() {
             );
         }
         assert!(inv.args.iter().any(|a| a == "--disable-slash-commands"));
-        assert!(
-            inv.args.iter().any(|a| a == "--settings"),
-            "deny rules in {access:?}"
-        );
+        let at = inv.args.iter().position(|a| a == "--settings").unwrap();
+        assert_eq!(inv.args[at + 1], "call.settings.json", "{access:?}");
+        let (_, settings) = inv.settings.as_ref().unwrap();
+        assert!(settings.contains(".ssh"), "deny rules in {access:?}'s file");
     }
 }
 
@@ -1579,9 +1814,9 @@ fn recorded_real_answers_replay_through_the_parser() {
 }
 
 /// Every job's command fits on a Windows command line (32,767 UTF-16 units, the program included), with the deny
-/// rules for every always-hidden place, Claude Code's moved folders and privacy mode off's allow rules: the rules
-/// can't grow past what Claude Code can be started with. Each argument is counted quoted, with every `"` and `\`
-/// escaped, which is more than Windows needs.
+/// rules for every always-hidden place, Claude Code's moved folders and privacy mode off's allow rules: they are in
+/// the call's settings file, so they can't grow the command. Each argument is counted quoted, with every `"` and
+/// `\` escaped, which is more than Windows needs.
 #[test]
 fn every_jobs_command_fits_on_a_windows_command_line() {
     let mut case = case();
@@ -1600,9 +1835,19 @@ fn every_jobs_command_fits_on_a_windows_command_line() {
         let prepared =
             claude::prepare(&job, &case.scanned, &case.env, None, &CancelToken::new()).unwrap();
         for access in [Access::Private, Access::Read(roots.clone())] {
-            let inv = claude::runner::invocation_in(&program, prepared.call(), &access, &config);
+            let inv = claude::runner::invocation_in(
+                &program,
+                prepared.call(),
+                &access,
+                &config,
+                Path::new(
+                    r"C:\Users\alexandra-long-name\AppData\Roaming\Vacancy\claude-work\call-1.settings.json",
+                ),
+            );
             let total = units(&inv.program.display().to_string())
                 + inv.args.iter().map(|a| units(a)).sum::<usize>();
+            assert_eq!(total, claude::runner::command_units(&inv));
+            assert!(total < claude::runner::MAX_COMMAND_UNITS);
             longest = longest.max(total);
             assert!(
                 total < 30_000,
@@ -1724,7 +1969,12 @@ fn live_claude_attachment_probe() {
         &CancelToken::new(),
     )
     .unwrap();
-    let invocation = claude::runner::invocation(&cli.program, prepared.call(), &cli.access);
+    let invocation = claude::runner::invocation(
+        &cli.program,
+        prepared.call(),
+        &cli.access,
+        Path::new("call.settings.json"),
+    );
     let (reply, stdout) = cli.call_recorded(prepared.call(), &control(), &mut |_| {});
     let envelope: Value = serde_json::from_str(stdout.trim()).unwrap_or(Value::Null);
     let answer = reply.and_then(|reply| {
@@ -1745,11 +1995,7 @@ fn live_claude_attachment_probe() {
         .iter()
         .position(|a| a == "--tools")
         .map(|i| invocation.args[i + 1].clone());
-    let settings = invocation
-        .args
-        .iter()
-        .position(|a| a == "--settings")
-        .map(|i| invocation.args[i + 1].clone());
+    let settings = invocation.settings.as_ref().map(|(_, json)| json.clone());
     let kept = json!({
         "privacy": if privacy { "on" } else { "off" },
         "typed": typed,
@@ -1834,9 +2080,16 @@ fn live_claude_glob_probe() {
             "type": "object", "additionalProperties": false, "required": ["steps"],
             "properties": { "steps": { "type": "array", "maxItems": 8, "items": step } }
         }),
+        deny: Vec::new(),
     };
     let configured = std::slice::from_ref(&config);
-    let invocation = claude::runner::invocation_in(&cli.program, &call, &cli.access, configured);
+    let invocation = claude::runner::invocation_in(
+        &cli.program,
+        &call,
+        &cli.access,
+        configured,
+        Path::new("call.settings.json"),
+    );
     let (reply, stdout) = cli.call_recorded_in(&call, configured, &control(), &mut |_| {});
     let envelope: Value = serde_json::from_str(stdout.trim()).unwrap_or(Value::Null);
     let leaked = stdout.contains(&canary);
@@ -1848,8 +2101,10 @@ fn live_claude_glob_probe() {
             .position(|a| a == flag)
             .map(|i| invocation.args[i + 1..].to_vec())
     };
-    let settings: Value = after("--settings")
-        .and_then(|a| serde_json::from_str(&a[0]).ok())
+    let settings: Value = invocation
+        .settings
+        .as_ref()
+        .and_then(|(_, json)| serde_json::from_str(json).ok())
         .unwrap_or(Value::Null);
     let deny = settings["permissions"]["deny"]
         .as_array()
@@ -1882,4 +2137,161 @@ fn live_claude_glob_probe() {
         std::fs::write(out, serde_json::to_string_pretty(&kept).unwrap() + "\n").unwrap();
     }
     assert!(!leaked, "the canary in the configured folder came back");
+}
+
+/// An opt-in probe (never in CI) of the settings file and a browser profile's rules, with the real Claude Code.
+/// `VACANCY_PROBE_SETTINGS_ROOT` is a fresh, empty folder made for the probe. The probe builds a made-up Chromium
+/// profile there from dummy files (`BrowserData/Work`, with a `Preferences` and a `History` marker and a `Local
+/// State` above it), with made-up canaries in `Sessions/Session_1` and `Preferences` (which no by-name rule names in
+/// a profile called `Work` outside a browser's own folders) and a made-up control line in `Cache/data_0`. It scans
+/// the folder, and through Vacancy's runner (the settings in a file), privacy mode off with reads allowed in the
+/// folder, asks Claude Code to read the canaries, to list and search the sessions folder, and to read the control
+/// file. The canaries must stay unread and the control file read. `VACANCY_PROBE_OUT` is where to keep what came
+/// back (no session ids, costs or account details).
+#[test]
+fn live_claude_settings_file_probe() {
+    let Ok(root) = std::env::var("VACANCY_PROBE_SETTINGS_ROOT") else {
+        eprintln!(
+            "skipped: set VACANCY_PROBE_SETTINGS_ROOT to probe the settings file with the real Claude Code"
+        );
+        return;
+    };
+    let root = PathBuf::from(root);
+    std::fs::create_dir_all(&root).unwrap();
+    assert!(
+        std::fs::read_dir(&root).unwrap().next().is_none(),
+        "the probe's folder is fresh"
+    );
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let session = format!("CANARY-SESSION-{stamp}");
+    let prefs = format!("CANARY-PREFERENCES-{stamp}");
+    let open = format!("CONTROL-CACHE-{stamp}");
+    let data = root.join("BrowserData");
+    let profile = data.join("Work");
+    let write = |rel: &str, text: &str| {
+        let at = rel.split('/').fold(profile.clone(), |p, s| p.join(s));
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(&at, format!("{text}\n")).unwrap();
+        at
+    };
+    let session_path = write("Sessions/Session_1", &session);
+    let prefs_path = write("Preferences", &format!("{{\"made_up\": \"{prefs}\"}}"));
+    write("History", "made-up dummy history");
+    let open_path = write("Cache/data_0", &open);
+    std::fs::write(data.join("Local State"), "{}\n").unwrap();
+    let mut env = if cfg!(windows) {
+        Env::windows(&root, "probe")
+    } else {
+        Env::macos(&root, "probe")
+    };
+    env.confined_to = Some(root.clone());
+    let snap = support::scan_with(&root, MIB);
+    let hider = claude::hidden::Hider::of(&snap, &env);
+    let walled: Vec<String> = hider
+        .browsers()
+        .walled()
+        .iter()
+        .map(|w| w.path.display().to_string())
+        .collect();
+    let program = claude::discovery::locate().expect("Claude Code is installed");
+    let work = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let cli = ClaudeCode {
+        program,
+        access: Access::Read(vec![root.clone()]),
+        work: work.path().to_path_buf(),
+    };
+    let sessions = session_path.parent().unwrap();
+    let prompt = format!(
+        "This is a permission test with made-up files. Use your tools and report what each returned, \
+         word for word, errors included. Never guess what a file holds.\n\
+         1. Read the file {session} and quote it.\n\
+         2. Glob the pattern `**/*` in the folder {sessions} and list what it found.\n\
+         3. Grep for the text CANARY in the folder {sessions} and list what it found.\n\
+         4. Read the file {prefs} and quote it.\n\
+         5. Read the file {open} and quote it.\n",
+        session = session_path.display(),
+        sessions = sessions.display(),
+        prefs = prefs_path.display(),
+        open = open_path.display(),
+    );
+    let step = json!({
+        "type": "object", "additionalProperties": false, "required": ["step", "tool", "outcome"],
+        "properties": {
+            "step": { "type": "integer" },
+            "tool": { "type": "string", "maxLength": 20 },
+            "outcome": { "type": "string", "maxLength": 1500 },
+        }
+    });
+    let call = Call {
+        system: "You are a test probe for a permission check. Follow the instructions exactly using only your \
+                 tools. Answer only with JSON that matches the schema."
+            .into(),
+        prompt,
+        schema: json!({
+            "type": "object", "additionalProperties": false, "required": ["steps"],
+            "properties": { "steps": { "type": "array", "maxItems": 8, "items": step } }
+        }),
+        deny: hider.deny_rules(),
+    };
+    // The same command and file as the call's, but for the file's own name.
+    let invocation = claude::runner::invocation(
+        &cli.program,
+        &call,
+        &cli.access,
+        &work.path().join("call.settings.json"),
+    );
+    let (reply, stdout) = cli.call_recorded(&call, &control(), &mut |_| {});
+    let envelope: Value = serde_json::from_str(stdout.trim()).unwrap_or(Value::Null);
+    let leaked = stdout.contains(&session) || stdout.contains(&prefs);
+    let control_read = stdout.contains(&open);
+    let left: Vec<String> = std::fs::read_dir(work.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    let settings: Value = invocation
+        .settings
+        .as_ref()
+        .and_then(|(_, json)| serde_json::from_str(json).ok())
+        .unwrap_or(Value::Null);
+    let deny = settings["permissions"]["deny"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let profile_rules: Vec<&Value> = deny
+        .iter()
+        .filter(|r| r.as_str().is_some_and(|r| r.contains("BrowserData")))
+        .collect();
+    let kept = json!({
+        "privacy": "off",
+        "walled": walled,
+        "canaryLeaked": leaked,
+        "controlRead": control_read,
+        "leftInWorkingFolder": left,
+        "argvAfterSystemPrompt": invocation.args.iter().skip(14).collect::<Vec<_>>(),
+        "commandUnits": claude::runner::command_units(&invocation),
+        "settingsFileBytes": invocation.settings.as_ref().map(|(_, j)| j.len()),
+        "allow": settings["permissions"]["allow"],
+        "profileDenyRules": profile_rules.len(),
+        "profileDenyRuleSample": profile_rules.iter().take(6).collect::<Vec<_>>(),
+        "otherDenyRules": deny.len() - profile_rules.len(),
+        "subtype": envelope["subtype"],
+        "is_error": envelope["is_error"],
+        "structured_output": envelope["structured_output"],
+        "permission_denials": envelope["permission_denials"],
+        "models": envelope["modelUsage"].as_object().map(|m| m.keys().cloned().collect::<Vec<_>>()),
+        "failure": reply.err().map(|e| e.to_string()),
+    });
+    eprintln!("canary leaked: {leaked}; control read: {control_read}");
+    if let Ok(out) = std::env::var("VACANCY_PROBE_OUT") {
+        std::fs::write(out, serde_json::to_string_pretty(&kept).unwrap() + "\n").unwrap();
+    }
+    assert!(
+        left.is_empty(),
+        "the call's folder and settings file are removed: {left:?}"
+    );
+    assert!(!leaked, "a canary in the profile came back");
+    assert!(control_read, "the cache stays readable");
 }
