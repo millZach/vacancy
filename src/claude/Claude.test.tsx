@@ -752,6 +752,58 @@ describe('the jobs', () => {
     expect(chat.mock.calls[1]![2]).toBe('chat-in-core-1');
   });
 
+  it('a follow-up sent before the core says which chat it is waits for the chat’s id, never opening a new chat', async () => {
+    const bridge = windows({ claude: 'on' });
+    const listeners: ((e: ClaudeEvent) => void)[] = [];
+    const begun: ((started: ClaudeChatStarted) => void)[] = [];
+    const chat = vi.spyOn(bridge, 'claudeChat').mockImplementation((_m, _s, _c, _a, _t, onEvent) => {
+      listeners.push(onEvent);
+      return new Promise((resolve) => {
+        begun.push(resolve);
+      });
+    });
+    const reply = (text: string): ClaudeEvent => ({
+      kind: 'done',
+      requestId: `claude-r${listeners.length}`,
+      answer: {
+        job: 'ask',
+        basis: { privacy: true, text: 'From names, sizes and dates only.', opened: [], refused: [] },
+        result: { kind: 'ask', reply: text, followUps: ['Is it safe?'] },
+        dropped: [],
+        refreshed: null,
+      },
+    });
+    await toMap(bridge);
+    await openPlan();
+    const row = within(tray()).getByText('Rust build output in 12 projects').closest('.tray-row') as HTMLElement;
+    await userEvent.click(within(row).getByRole('button', { name: 'Ask Claude' }));
+    await waitFor(() => expect(listeners).toHaveLength(1));
+    // Done comes first; the core's ChatStarted, with the chat's id, hasn't yet.
+    act(() => listeners[0]!(reply('Build output; it comes back.')));
+    expect(await within(panel()).findByText(/Build output; it comes back/)).toBeInTheDocument();
+
+    // The follow-up, asked now from its chip or the composer, waits: nothing goes, so no new chat opens in the core.
+    const followUp = within(panel()).getByRole('button', { name: 'Is it safe?' });
+    expect(followUp).toBeDisabled();
+    await userEvent.click(followUp);
+    const input = within(panel()).getByRole('textbox', { name: 'Starting the chat…' });
+    await userEvent.type(input, 'Does it come back?{Enter}');
+    expect(within(panel()).getByRole('button', { name: 'Send' })).toBeDisabled();
+    expect(chat).toHaveBeenCalledTimes(1);
+
+    // ChatStarted: the chat has its id, and the follow-up goes in it.
+    await act(async () => {
+      begun[0]!({ requestId: 'claude-r1', conversation: 'chat-in-core-1' });
+      await Promise.resolve();
+    });
+    expect(within(panel()).getByRole('textbox', { name: 'Ask about Rust build output in 12 projects' })).toHaveValue('Does it come back?');
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Send' }));
+    await waitFor(() => expect(chat).toHaveBeenCalledTimes(2));
+    expect(chat.mock.calls[0]![2]).toBeNull();
+    expect(chat.mock.calls[1]![2]).toBe('chat-in-core-1');
+    expect(chat.mock.calls[1]![4]).toBe('Does it come back?');
+  });
+
   it('Ask Claude: a row’s chat gets a first answer, suggested follow-ups and the composer', async () => {
     const bridge = windows({ claude: 'on' });
     const chat = vi.spyOn(bridge, 'claudeChat');

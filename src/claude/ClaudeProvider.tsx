@@ -12,6 +12,7 @@ import type { DriveScan } from '../drives/session';
 import { errorMessage } from '../errors';
 import {
   ClaudeContext,
+  chatStarting,
   isEnabled,
   pickOffer,
   readsFiles,
@@ -384,7 +385,7 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
         kind: 'chat', id: `chat-${++seq}`, about, name, conversation: null, turns: [{ from: 'person', text: FIRST_QUESTION, privacy }], phase: 'working', failure: null,
       };
       question = FIRST_QUESTION;
-    } else if (text !== undefined && text.trim() && !busy) {
+    } else if (text !== undefined && text.trim() && !busy && !chatStarting(had)) {
       chat = { ...had, turns: [...had.turns, { from: 'person', text: text.trim(), privacy }], phase: 'working', failure: null };
       question = text.trim();
     } else if (text === undefined && had.phase === 'failed') {

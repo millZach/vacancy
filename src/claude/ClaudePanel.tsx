@@ -22,7 +22,7 @@ import { RiskChip, SourceTag } from '../plan/bits';
 import { activeMoves, kindFolders } from '../tidy/model';
 import { Basis, Dropped, HiddenFold, JobLine, Mark, PrivacyNotice, PrivacyRow } from './bits';
 import { FIRST_QUESTION } from './ClaudeProvider';
-import { jobRunning, pickOffer, readsFiles, tileAt, useClaude, type ChatEntry, type Claude, type Conversation, type JobEntry, type JobKind, type Scope } from './context';
+import { chatStarting, jobRunning, pickOffer, readsFiles, tileAt, useClaude, type ChatEntry, type Claude, type Conversation, type JobEntry, type JobKind, type Scope } from './context';
 import './claude.css';
 
 interface Props {
@@ -209,6 +209,7 @@ function PanelOn(p: OnProps) {
     </button>
   );
   const aboutBusy = about?.phase === 'working' || about?.phase === 'slow';
+  const aboutStarting = about !== null && chatStarting(about);
   return (
     <>
       <div className="cp-status">
@@ -249,8 +250,8 @@ function PanelOn(p: OnProps) {
         </div>
         <Composer
           key={about?.id ?? 'none'}
-          disabled={!about || about.turns.length < 2 || aboutBusy || claude.privacyChanging}
-          placeholder={about ? `Ask about ${about.name}` : 'Ask Claude about a row or a folder first'}
+          disabled={!about || about.turns.length < 2 || aboutBusy || aboutStarting || claude.privacyChanging}
+          placeholder={about ? (aboutStarting ? 'Starting the chat…' : `Ask about ${about.name}`) : 'Ask Claude about a row or a folder first'}
           onSend={(q) => about && claude.ask(scope, about.about, about.name, q)}
         >
           {about && (
@@ -690,9 +691,15 @@ function ChatItem({ e, ...p }: OnProps & { e: ChatEntry }) {
             ),
           )}
           {e.phase === 'done' && chips.length > 0 && (
-            <div className="cl-chips">
+            <div className="cl-chips" aria-busy={chatStarting(e)}>
               {chips.map((q) => (
-                <button key={q} type="button" className="cl-chip" onClick={() => claude.ask(scope, e.about, e.name, q)}>
+                <button
+                  key={q}
+                  type="button"
+                  className="cl-chip"
+                  onClick={() => claude.ask(scope, e.about, e.name, q)}
+                  disabled={chatStarting(e) || claude.privacyChanging}
+                >
                   {q}
                 </button>
               ))}

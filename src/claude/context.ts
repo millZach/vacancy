@@ -100,6 +100,14 @@ export interface ChatEntry {
 
 export type Entry = JobEntry | ChatEntry;
 
+/**
+ * A chat answered before the core said which chat it is (its Done can come before its ChatStarted): a follow-up now
+ * would open a new chat in the core, so none goes until the chat's id has come.
+ */
+export function chatStarting(e: ChatEntry): boolean {
+  return e.phase === 'done' && e.conversation === null;
+}
+
 /** A job of this kind is running in the conversation: its chip and every Try again of that kind wait for it. */
 export function jobRunning(c: Conversation, job: JobKind): boolean {
   return c.entries.some((e) => e.kind === 'job' && e.job === job && (e.phase === 'working' || e.phase === 'slow'));
