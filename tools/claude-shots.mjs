@@ -1,0 +1,361 @@
+// Screenshots the Claude panel (ADR 0008, prototype/ai-advisor variant B) in Edge, on the mock bridge's Claude, which
+// never calls Claude: off with the privacy notice and what always stays hidden, turning on, on, each job's answer
+// (Explain big folders with its hover card, a folder chat with a follow-up and a typed question, Review my plan, a
+// row's Ask Claude, Let Claude pick's changes with Keep mine and Use Claude's plan, Suggest Tidy up layouts with
+// Claude's layout picked and its drawer), what Vacancy left out, the privacy confirm and an answer with privacy mode
+// off, Claude's marks in the confirm dialog, the summary and Past runs, then each other state on a fresh page (not
+// found, not signed in, slow with Cancel, cancelled, an error and a timeout in Claude's words, off again with
+// Claude's items still in the plan, the folded rail), a macOS pass (no Tidy up layouts) and a 1024x700 pass.
+//
+//   npm run dev                       (the UI on the mock bridge, http://localhost:1420)
+//   npm run claude-shots -- [options]
+//
+// Options (all optional):
+//   --base <url>       the dev server              (default http://localhost:1420/)
+//   --out <dir>        where PNGs go               (default shots/claude)
+//   --name <prefix>    file name prefix            (default claude)
+//   --viewport <WxH>   browser viewport            (default 1280x800)
+//   --only <which>     all (default), win, states, mac or small
+//
+// Fails on a page error, or a screen that doesn't say what it should.
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { parseArgs } from 'node:util';
+import { chromium } from 'playwright';
+
+const { values: o } = parseArgs({
+  options: {
+    base: { type: 'string', default: 'http://localhost:1420/' },
+    out: { type: 'string', default: 'shots/claude' },
+    name: { type: 'string', default: 'claude' },
+    viewport: { type: 'string', default: '1280x800' },
+    only: { type: 'string', default: 'all' },
+  },
+  allowPositionals: true,
+});
+const [vw, vh] = o.viewport.split('x').map(Number);
+await mkdir(o.out, { recursive: true });
+const browser = await chromium.launch({ channel: 'msedge' });
+const errors = [];
+const notes = [];
+const settle = (page, ms = 500) => page.waitForTimeout(ms);
+const want = (which) => o.only === 'all' || o.only === which;
+
+function check(ok, what) {
+  if (!ok) throw new Error(`check failed: ${what}`);
+  notes.push({ check: what });
+}
+
+async function open(query, viewport = { width: vw, height: vh }) {
+  const page = await browser.newPage({ viewport });
+  page.on('pageerror', (e) => errors.push(`${query}: ${String(e)}`));
+  page.on('console', (m) => m.type() === 'error' && errors.push(`${query}: ${m.text()}`));
+  await page.goto(`${o.base}?${query}`);
+  const scan = page.locator('button.cta', { hasText: /^\s*Scan / });
+  await scan.waitFor({ timeout: 30_000 });
+  await scan.click();
+  await page.locator('.atlas.is-map').waitFor({ timeout: 60_000 });
+  await settle(page, 900);
+  return page;
+}
+
+const shot = (page, step) => page.screenshot({ path: join(o.out, `${o.name}-${step}.png`) });
+const panel = (page) => page.getByRole('complementary', { name: 'Claude' });
+const has = async (loc) => (await loc.count()) > 0;
+/** Scrolls the panel's log so `loc` is in view. */
+const into = async (loc) => {
+  await loc.scrollIntoViewIfNeeded();
+  await settle(loc.page(), 400);
+};
+/** Presses a job chip and waits for its answer. */
+async function job(page, name, kind, timeout = 20_000) {
+  const before = await panel(page).locator(`.cp-entry[data-job="${kind}"]`).count();
+  await panel(page).getByRole('button', { name, exact: true }).click();
+  const entry = panel(page).locator(`.cp-entry[data-job="${kind}"]`).nth(before);
+  await entry.locator('.cp-msg').waitFor({ timeout });
+  await settle(page, 600);
+  return entry;
+}
+
+// ---------------------------------------------------------------- Windows: every job, then the marks after a run
+async function windows() {
+  const page = await open('fixture=windows&claudeMs=1200&run=1500&dups=1200');
+  const p = panel(page);
+  check(await has(p.getByRole('heading', { name: 'Turn on Claude?' })), 'off: the panel is the turn-on step');
+  check(await has(page.getByRole('button', { name: /^Rules only/ })), 'off: the header says Rules only');
+  await shot(page, '01-off');
+  await p.getByRole('button', { name: 'What always stays hidden' }).click();
+  await settle(page);
+  check(await has(p.getByText('Password managers and wallets')), 'off: the hidden places are listed');
+  await shot(page, '02-off-hidden');
+  await p.getByRole('button', { name: 'Turn on Claude' }).click();
+  await p.getByText('Checking that Claude Code answers…').waitFor({ timeout: 2_000 });
+  await shot(page, '03-turning-on');
+  await p.getByRole('button', { name: 'Turn off Claude' }).waitFor({ timeout: 10_000 });
+  await settle(page);
+  check(await has(p.getByRole('switch', { name: 'Privacy mode', checked: true })), 'on: privacy mode is on by default');
+  await shot(page, '04-on');
+
+  // The plan: Review my plan (working first), a row's Ask Claude.
+  await page.getByRole('button', { name: 'Build a plan' }).click();
+  const tray = page.getByRole('complementary', { name: 'Plan' });
+  await tray.waitFor();
+  await settle(page);
+  await p.getByRole('button', { name: 'Review my plan', exact: true }).click();
+  await p.getByText('Claude is reviewing your plan…').waitFor({ timeout: 2_000 });
+  await shot(page, '05-working');
+  const review = p.locator('.cp-entry[data-job="reviewPlan"]').first();
+  await review.locator('.cp-msg').waitFor({ timeout: 20_000 });
+  await settle(page, 700);
+  check(await has(review.locator('.cl-flag')), 'review: flags risky items');
+  check(await has(review.locator('.cl-basis')), 'review: the answer says what it was based on');
+  await into(review.locator('.cp-you'));
+  await shot(page, '06-review');
+  await review.getByRole('button', { name: 'Keep it' }).first().click();
+  await settle(page, 300);
+  await tray.locator('.tray-row', { hasText: 'Rust build output' }).getByRole('button', { name: 'Ask Claude' }).click();
+  await p.locator('.cp-entry[data-chat="Rust build output in 12 projects"] .cl-first').waitFor({ timeout: 20_000 });
+  await settle(page, 700);
+  await shot(page, '07-row-chat');
+
+  // Let Claude pick: its changes go in at once; Keep mine puts the plan back; again, then Use Claude's plan.
+  const planBefore = await tray.locator('.tray-total-num').innerText();
+  const pick = await job(page, 'Let Claude pick', 'pickPlan');
+  check(await has(pick.getByRole('button', { name: 'Keep mine' })), 'pick: Keep mine is offered');
+  check(await has(tray.getByText('Android emulator images')), 'pick: Claude’s own items are in the tray at once');
+  check(!(await tray.getByRole('checkbox', { name: 'Include Android emulator images' }).isChecked()), 'pick: its own items start unticked');
+  check(await has(pick.getByText('Left out by Vacancy').first()), 'pick: what the Guard refused is shown with why');
+  await into(pick.locator('.cl-diff-total'));
+  await shot(page, '08-pick-changes');
+  await into(pick.locator('.cl-diff-actions'));
+  await shot(page, '09-pick-left-out');
+  await pick.getByRole('button', { name: 'Keep mine' }).click();
+  await pick.getByText('You kept your plan.', { exact: false }).waitFor({ timeout: 10_000 });
+  await settle(page);
+  check((await tray.locator('.tray-total-num').innerText()) === planBefore, 'keep mine: the plan is as it was');
+  check(!(await has(tray.getByText('Installers in Public Downloads'))), 'keep mine: Claude’s own items are out again');
+  await shot(page, '10-keep-mine');
+  const pick2 = await job(page, 'Let Claude pick', 'pickPlan');
+  await pick2.getByRole('button', { name: 'Use Claude’s plan' }).click();
+  await pick2.getByText('You’re using my plan.', { exact: false }).waitFor();
+  await tray.locator('.tray-row.is-ai').first().scrollIntoViewIfNeeded();
+  await settle(page);
+  check(await has(tray.locator('.tray-row.is-ai .cl-note')), 'tray: Claude’s items carry its note');
+  await shot(page, '11-use-claudes-plan');
+
+  // Explain big folders: the answer, a ✳ tile's hover card, then a folder chat with a follow-up and a typed question.
+  await page.getByRole('button', { name: 'Hide the plan' }).click();
+  const explain = await job(page, 'Explain big folders', 'explainFolders');
+  check(await has(explain.getByText('in the tray unticked').first()), 'explain: suggestions are added unticked');
+  await into(explain.locator('.cp-you'));
+  await shot(page, '12-explain');
+  const dropped = explain.locator('.cl-dropped');
+  if (await has(dropped)) {
+    await into(dropped);
+    await shot(page, '13-explain-left-out');
+  }
+  const tile = page.locator('.map-tile.is-explained').first();
+  check(await has(tile), 'explain: explained folders have a ✳ on the map');
+  await tile.hover();
+  await page.locator('.map-tip .cl-tip').waitFor({ timeout: 5_000 });
+  await settle(page, 300);
+  await shot(page, '14-explain-hover');
+  await tile.click();
+  const chat = p.locator('.cp-entry[data-chat]').last();
+  await chat.locator('.cl-first').waitFor({ timeout: 20_000 });
+  await settle(page);
+  await shot(page, '15-folder-chat');
+  await chat.locator('.cl-chips .cl-chip').first().click();
+  await chat.locator('.cl-msg:not(.is-you)').first().waitFor({ timeout: 20_000 });
+  const input = p.locator('.cl-compose input');
+  await input.fill('Can you look inside it?');
+  await input.press('Enter');
+  await page.waitForFunction(() => {
+    const c = [...document.querySelectorAll('.cp-entry[data-chat]')].at(-1);
+    return c && c.querySelectorAll('.cl-msg:not(.is-you)').length >= 2;
+  }, null, { timeout: 20_000 });
+  await settle(page, 700);
+  await shot(page, '16-chat-follow-up');
+  await page.getByRole('button', { name: 'Build a plan' }).click();
+  await tray.waitFor();
+  await settle(page, 300);
+
+  // Suggest Tidy up layouts: Claude's layout for Downloads, and its drawer.
+  const tidy = await job(page, 'Suggest Tidy up layouts', 'tidyLayout');
+  await into(tidy.locator('.cp-tidy').first());
+  await shot(page, '17-tidy-layouts');
+  await tidy.getByRole('radiogroup', { name: 'Layout for Downloads' }).getByRole('radio', { name: /Claude’s/ }).click();
+  await page.waitForFunction(() => document.querySelector('.tidy-row.is-ai'), null, { timeout: 10_000 });
+  await settle(page);
+  await tray.getByRole('checkbox', { name: 'Include Sort Downloads' }).click();
+  await tray.locator('.tidy-row.is-ai').scrollIntoViewIfNeeded();
+  await settle(page);
+  await shot(page, '18-tidy-chosen');
+  await tidy.getByRole('button', { name: 'See the trees' }).first().click();
+  await page.getByRole('dialog', { name: 'Sort Downloads' }).waitFor();
+  await settle(page);
+  check(await has(page.getByRole('dialog', { name: 'Sort Downloads' }).getByText('Claude’s layout:')), 'tidy: the drawer says it is Claude’s layout');
+  await shot(page, '19-tidy-drawer');
+  await page.keyboard.press('Escape');
+  await settle(page, 300);
+
+  // Privacy mode off: the confirm, then an answer that read files.
+  await p.getByRole('switch', { name: 'Privacy mode' }).click();
+  const confirm = page.getByRole('alertdialog', { name: 'Let Claude read your files?' });
+  await confirm.waitFor();
+  await settle(page, 300);
+  check(await has(confirm.getByText('Keys and sign-ins')), 'privacy confirm: lists what always stays hidden');
+  await shot(page, '20-privacy-confirm');
+  await confirm.getByRole('button', { name: 'Turn privacy mode off' }).click();
+  await settle(page);
+  check(await has(p.getByRole('switch', { name: 'Privacy mode', checked: false })), 'privacy: off after the confirm');
+  check(await has(page.getByRole('button', { name: /^Claude on · reads files/ })), 'privacy off: the header says so');
+  const review2 = await job(page, 'Review my plan', 'reviewPlan');
+  check(await has(review2.locator('.cl-basis.is-open')), 'privacy off: the answer says which files Claude opened');
+  await into(review2.locator('.cl-basis'));
+  await shot(page, '21-review-privacy-off');
+  await p.getByRole('switch', { name: 'Privacy mode' }).click();
+  await settle(page, 300);
+
+  // Claude's marks: the confirm dialog, the run, the summary, Past runs.
+  const android = tray.getByRole('checkbox', { name: 'Include Android emulator images' });
+  if (!(await android.isChecked())) await android.click();
+  await settle(page, 300);
+  await tray.locator('.tray-cta').click();
+  const dialog = page.getByRole('alertdialog', { name: /^Permanently delete/ });
+  await dialog.waitFor({ timeout: 10_000 });
+  await settle(page, 400);
+  check(await has(dialog.getByText('1 item was suggested by Claude.')), 'confirm: marks Claude’s item');
+  check(await has(dialog.getByText('sorted into Claude’s folders', { exact: false })), 'confirm: marks Claude’s layout');
+  await shot(page, '22-confirm');
+  await dialog.getByRole('button', { name: /permanently$/ }).click();
+  await page.getByRole('button', { name: 'See what changed' }).waitFor({ timeout: 60_000 });
+  await page.getByRole('button', { name: 'See what changed' }).click();
+  const summary = page.getByRole('complementary', { name: 'What Vacancy did' });
+  for (let i = 0; i < 12 && !(await summary.isVisible().catch(() => false)); i++) {
+    await page.keyboard.press('Escape');
+    await settle(page, 400);
+  }
+  await summary.waitFor({ timeout: 10_000 });
+  await settle(page, 2600);
+  const sec = summary.getByRole('region', { name: 'Suggested by Claude' });
+  check(await has(sec), 'summary: has a Suggested by Claude section');
+  await sec.scrollIntoViewIfNeeded();
+  await settle(page, 300);
+  await shot(page, '23-summary');
+  await page.getByRole('button', { name: 'Past runs' }).click();
+  await page.getByRole('menu', { name: 'Past runs' }).waitFor();
+  await settle(page, 600);
+  check(await has(page.locator('.history-tag.is-claude')), 'Past runs: marks the run with Claude’s steps');
+  await shot(page, '24-past-runs');
+  await page.close();
+}
+
+// ---------------------------------------------------------------- the other states, each on a fresh page
+async function states() {
+  {
+    const page = await open('fixture=windows&claude=notfound');
+    check(await has(panel(page).getByRole('heading', { name: 'Claude Code isn’t on this PC.' })), 'not found');
+    await shot(page, '30-not-found');
+    await page.close();
+  }
+  {
+    const page = await open('fixture=windows&claude=signedout');
+    check(await has(panel(page).getByRole('heading', { name: 'Sign in to Claude Code first.' })), 'not signed in');
+    await shot(page, '31-not-signed-in');
+    await page.close();
+  }
+  {
+    const page = await open('fixture=windows&claude=slow');
+    await page.getByRole('button', { name: 'Build a plan' }).click();
+    await panel(page).getByRole('button', { name: 'Review my plan', exact: true }).click();
+    await panel(page).getByText('Still working.').waitFor({ timeout: 5_000 });
+    await settle(page, 300);
+    check(await has(panel(page).getByText('On · replies are slow')), 'slow: the head says so');
+    await shot(page, '32-slow');
+    await panel(page).getByRole('button', { name: 'Cancel' }).click();
+    await panel(page).getByText('Cancelled. Nothing changed.').waitFor();
+    await settle(page, 300);
+    await shot(page, '33-cancelled');
+    await page.close();
+  }
+  {
+    const page = await open('fixture=windows&claude=error');
+    await page.getByRole('button', { name: 'Build a plan' }).click();
+    await panel(page).getByRole('button', { name: 'Review my plan', exact: true }).click();
+    await panel(page).getByText('Claude Code stopped with an error.', { exact: false }).waitFor({ timeout: 10_000 });
+    await settle(page, 300);
+    check(await has(panel(page).getByText('rate_limit_error', { exact: false })), 'error: shows Claude’s message');
+    await shot(page, '34-error');
+    await page.close();
+  }
+  {
+    const page = await open('fixture=windows&claude=timeout');
+    await panel(page).getByRole('button', { name: 'Explain big folders', exact: true }).click();
+    await panel(page).getByText('took too long', { exact: false }).waitFor({ timeout: 10_000 });
+    await settle(page, 300);
+    await shot(page, '35-timed-out');
+    await page.close();
+  }
+  {
+    const page = await open('fixture=windows&claude=on&claudeMs=300');
+    await job(page, 'Explain big folders', 'explainFolders');
+    await panel(page).getByRole('button', { name: 'Turn off Claude' }).click();
+    await panel(page).getByRole('heading', { name: 'Turn on Claude?' }).waitFor();
+    await page.getByRole('button', { name: 'Build a plan' }).click();
+    const tray = page.getByRole('complementary', { name: 'Plan' });
+    await tray.locator('.tray-row.is-ai').first().scrollIntoViewIfNeeded();
+    await settle(page);
+    check(await has(tray.getByText('Android emulator images')), 'off again: Claude’s items stay in the plan');
+    check(!(await has(page.locator('.map-tile.is-explained'))), 'off again: no ✳ on the map');
+    await shot(page, '36-off-again');
+    await panel(page).getByRole('button', { name: 'Fold the Claude panel' }).click();
+    await settle(page, 300);
+    await shot(page, '37-folded');
+    await page.close();
+  }
+}
+
+// ---------------------------------------------------------------- macOS: the same jobs, no Tidy up layouts
+async function mac() {
+  const page = await open('fixture=macos&claude=on&claudeMs=400');
+  const p = panel(page);
+  check(!(await has(p.getByRole('button', { name: 'Suggest Tidy up layouts' }))), 'macOS: no Tidy up layouts job');
+  await shot(page, '40-mac-on');
+  await job(page, 'Explain big folders', 'explainFolders');
+  await shot(page, '41-mac-explain');
+  await page.getByRole('button', { name: 'Build a plan' }).click();
+  await job(page, 'Review my plan', 'reviewPlan');
+  await shot(page, '42-mac-review');
+  const pick = await job(page, 'Let Claude pick', 'pickPlan');
+  await into(pick.locator('.cl-diff-total'));
+  await shot(page, '43-mac-pick');
+  await page.close();
+}
+
+// ---------------------------------------------------------------- 1024x700: the panel, the map and the tray together
+async function small() {
+  const page = await open('fixture=windows&claude=on&claudeMs=300', { width: 1024, height: 700 });
+  await page.getByRole('button', { name: 'Build a plan' }).click();
+  const pick = await job(page, 'Let Claude pick', 'pickPlan');
+  await into(pick.locator('.cl-diff-total'));
+  await shot(page, '50-small-pick');
+  await page.close();
+}
+
+try {
+  if (want('win')) await windows();
+  if (want('states')) await states();
+  if (want('mac')) await mac();
+  if (want('small')) await small();
+} catch (e) {
+  errors.push(String(e?.stack ?? e));
+} finally {
+  await browser.close();
+  await writeFile(join(o.out, `${o.name}-notes.json`), JSON.stringify({ notes, errors }, null, 2));
+}
+if (errors.length) {
+  console.error(errors.join('\n'));
+  process.exit(1);
+}
+console.log(`${notes.length} checks passed; shots in ${o.out}`);

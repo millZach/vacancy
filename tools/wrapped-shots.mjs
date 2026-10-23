@@ -216,7 +216,8 @@ try {
     await page.getByRole('menuitem').first().waitFor({ timeout: 10_000 });
     await wait(page, 400);
     await shot(page, 'history');
-    const rows = page.getByRole('menuitem');
+    // Run rows only: a run that moved files also lists its folders' Undo buttons as menu items.
+    const rows = page.locator('.history-row');
     await rows.nth((await rows.count()) > 1 ? 1 : 0).click();
     await summary.waitFor({ timeout: 10_000 });
     await away(page);
