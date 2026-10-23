@@ -124,24 +124,32 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   };
 
   /**
+   * Goes up whenever Claude's mode changes (privacy mode either way, Claude on or off): a status read begun before
+   * then answers for a mode that has ended, and is dropped.
+   */
+  const modeGen = useRef(0);
+
+  /**
    * Checks this Claude Code before privacy mode off lets Claude open files ("Checking Claude Code…"), when the check
-   * is due or `again` (Check again). The newest check's answer wins.
+   * is due or `again` (Check again). The newest check's answer wins, and only while the mode it began in holds.
    */
   const verifyToken = useRef(0);
   const verify = useCallback(
     (again: boolean) => {
       const token = ++verifyToken.current;
+      const gen = modeGen.current;
       setVerifying(true);
       bridge.claudeCheck(again).then(
         (s) => {
           if (token !== verifyToken.current) return;
           setVerifying(false);
+          if (gen !== modeGen.current) return;
           setStatus({ phase: 'ready', status: s });
         },
         (error: unknown) => {
           if (token !== verifyToken.current) return;
           setVerifying(false);
-          setSettingError(errorMessage(error));
+          if (gen === modeGen.current) setSettingError(errorMessage(error));
         },
       );
     },
@@ -177,12 +185,6 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     [edit],
   );
 
-  /**
-   * Goes up whenever Claude's mode changes (privacy mode either way, Claude on or off): a status read begun before
-   * then answers for a mode that has ended, and is dropped.
-   */
-  const modeGen = useRef(0);
-
   const recheck = useCallback(() => {
     setChecking(true);
     const gen = modeGen.current;
@@ -206,15 +208,38 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   const newMode = () => {
     modeGen.current++;
   };
-  /** A change of mode the core keeps: once it has (a refused one changes nothing), status reads still out are dropped. */
-  const modeSetting = (p: Promise<ClaudeStatus>) =>
-    p.then(
+  /** Each change of mode asked for, newest last: only the newest one's answer is shown. */
+  const modeReq = useRef(0);
+  /**
+   * A change of mode the core keeps: once it has (a refused one changes nothing), status reads still out are dropped.
+   * An older change that answers after a newer one was asked (privacy mode, then Turn off Claude) may have been kept
+   * by the core in either order, so its answer isn't shown: the status is read again instead.
+   */
+  const modeSetting = (p: Promise<ClaudeStatus>, then?: (s: ClaudeStatus) => void) => {
+    const req = ++modeReq.current;
+    return p.then(
       (s) => {
         newMode();
-        ready(s);
+        if (req === modeReq.current) {
+          ready(s);
+          then?.(s);
+          return;
+        }
+        const gen = modeGen.current;
+        bridge.claudeStatus().then(
+          (now) => {
+            if (gen === modeGen.current) setStatus({ phase: 'ready', status: now });
+          },
+          () => {
+            // The newer change's answer, or the next status read, puts the row right.
+          },
+        );
       },
-      (error: unknown) => setSettingError(errorMessage(error)),
+      (error: unknown) => {
+        if (req === modeReq.current) setSettingError(errorMessage(error));
+      },
     );
+  };
 
   /**
    * A request with privacy mode off has ended: its own check of Claude Code may have run, found it changed, or kept
@@ -589,22 +614,11 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       verifyToken.current++;
       setVerifying(false);
     }
-    void bridge
-      .claudeSetPrivacy(on)
-      .then(
-        (s) => {
-          // The mode changed (only now: a change the core refused leaves a status read still out valid).
-          newMode();
-          ready(s);
-          // Privacy mode off: Claude Code is checked first, if it hasn't passed already.
-          checkIfDue(s);
-        },
-        (error: unknown) => setSettingError(errorMessage(error)),
-      )
-      .finally(() => {
-        changing.current = false;
-        setPrivacyChanging(false);
-      });
+    // Privacy mode off: Claude Code is checked first, if it hasn't passed already.
+    void modeSetting(bridge.claudeSetPrivacy(on), checkIfDue).finally(() => {
+      changing.current = false;
+      setPrivacyChanging(false);
+    });
   };
 
   // Folded while Claude is off (the map gets the room); open once it's turned on. A choice the person made wins.
@@ -630,20 +644,9 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       const token = ++turnOnToken.current;
       setTurningOn(true);
       setSettingError(null);
-      bridge.claudeSetEnabled(true).then(
-        (s) => {
-          if (token !== turnOnToken.current) return;
-          newMode();
-          setTurningOn(false);
-          ready(s);
-          checkIfDue(s);
-        },
-        (error: unknown) => {
-          if (token !== turnOnToken.current) return;
-          setTurningOn(false);
-          setSettingError(errorMessage(error));
-        },
-      );
+      void modeSetting(bridge.claudeSetEnabled(true), checkIfDue).finally(() => {
+        if (token === turnOnToken.current) setTurningOn(false);
+      });
     },
     cancelTurnOn: () => {
       turnOnToken.current++;
