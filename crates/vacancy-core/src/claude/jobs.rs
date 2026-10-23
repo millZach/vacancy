@@ -42,7 +42,10 @@ const MAX_PROPOSALS: usize = 80;
 const MAX_LOOSE: usize = 300;
 /// The messages of a chat sent again each turn, and the characters of each.
 const MAX_MESSAGES: usize = 12;
-const MAX_MESSAGE_CHARS: usize = 2000;
+pub(crate) const MAX_MESSAGE_CHARS: usize = 2000;
+/// Why a chat with turns from privacy mode off isn't sent with privacy mode on.
+pub const PRIVACY_TURNS: &str = "This chat began with privacy mode off. With it on, Vacancy won't send what was \
+said then. Start a new chat.";
 /// A folder's biggest items a chat about it sends.
 const MAX_CHILDREN: usize = 40;
 
@@ -92,6 +95,8 @@ pub fn prepare(
 ) -> Result<Prepared, Failure> {
     let privacy = readable.is_none();
     let shown = |p: &Path| shown(p, env, privacy);
+    // With privacy mode on, Claude's items made with it off go by their name in the scan only.
+    let redact = |p: &Proposal| privacy && scanned.claude_off.made(&p.id);
     let proposals = scanned.proposals.list();
     let (context, prompt, schema) = match job {
         Job::ReviewPlan { ids } => {
@@ -109,7 +114,7 @@ pub fn prepare(
                 .iter()
                 .filter(|p| plan.contains(&p.id))
                 .take(MAX_PROPOSALS)
-                .map(|p| proposal_json(p, None, &shown))
+                .map(|p| proposal_json(p, None, &shown, redact(p)))
                 .collect();
             let reads = read_note(readable, &sample_dirs(proposals, &plan), &shown);
             let prompt = format!(
@@ -146,7 +151,7 @@ pub fn prepare(
             let items: Vec<Value> = proposals
                 .iter()
                 .take(MAX_PROPOSALS)
-                .map(|p| proposal_json(p, Some(plan.contains(&p.id)), &shown))
+                .map(|p| proposal_json(p, Some(plan.contains(&p.id)), &shown, redact(p)))
                 .collect();
             let mut dirs = sample_dirs(
                 proposals,
@@ -158,8 +163,9 @@ pub fn prepare(
                 "Job: pick the person's cleanup plan for them. They gave no goal: free a good amount of space \
                  without risking anything they'd miss.\n{reads}\n\
                  `tick` proposals worth adding to the plan and `untick` ones in it that are risky, each with a \
-                 short `why`. You may also `add` up to {MAX_ITEMS} items of your own from the unknown folders \
-                 below: `target` is an entry id from them (or, if you read files, the full path of a folder or \
+                 short `why`: only proposals with `suggestedBy` \"rules\". The person ticks your own items \
+                 (`suggestedBy` \"claude\") themselves; leave them as they are. You may also `add` up to \
+                 {MAX_ITEMS} items of your own from the unknown folders below: `target` is an entry id from them (or, if you read files, the full path of a folder or \
                  file inside one of them), with a short `title` and `why`. Your own items start unticked; Vacancy \
                  checks each one and drops anything unsafe. `summary` is one or two sentences.\n\n\
                  From Vacancy's scan (sizes in bytes, dates as last used):\n```json\n{}\n```",
@@ -184,7 +190,16 @@ pub fn prepare(
             )
         }
         Job::Ask { about, messages } => {
-            let (subject, dirs) = subject_json(about, scanned, &shown)?;
+            // Nothing said with privacy mode off goes back to Claude with it on: neither a turn marked as made then,
+            // nor a reply Claude gave then, however the turn is marked.
+            if privacy
+                && messages
+                    .iter()
+                    .any(|m| !m.privacy || scanned.claude_off.said(&m.text))
+            {
+                return Err(Failure::error(PRIVACY_TURNS));
+            }
+            let (subject, dirs) = subject_json(about, scanned, &shown, privacy)?;
             let conversation = conversation(messages)?;
             let reads = read_note(readable, &dirs, &shown);
             let prompt = format!(
@@ -553,6 +568,19 @@ pub fn apply(
                         });
                         continue;
                     };
+                    // Only the rules' proposals: Claude's own items stay as the person left them.
+                    if p.source != ProposalSource::Rule {
+                        if touched.insert(w.id.clone()) {
+                            dropped.push(Dropped {
+                                name: p.title.clone(),
+                                path: String::new(),
+                                reason: "It is one of Claude's own items: you tick those yourself, so its tick \
+                                         stays as you left it."
+                                    .into(),
+                            });
+                        }
+                        continue;
+                    }
                     let ticked = plan.contains(&w.id);
                     if ticked == tick || !touched.insert(w.id.clone()) {
                         continue;
@@ -583,6 +611,7 @@ pub fn apply(
                 &unknown,
                 &roots,
                 out.add,
+                privacy,
                 &mut dropped,
                 cancel,
             )?;
@@ -620,6 +649,9 @@ pub fn apply(
             let out: AskOut = parse(reply.structured)?;
             let reply = clean(&out.reply, 3000, true)
                 .ok_or_else(|| Failure::error("Claude's answer was empty. Ask again."))?;
+            if !privacy {
+                scanned.claude_off.reply(&reply);
+            }
             (
                 JobResult::Ask {
                     reply,
@@ -670,6 +702,7 @@ pub fn apply(
                     &unknown,
                     &[root],
                     f.remove,
+                    privacy,
                     &mut dropped,
                     cancel,
                 )?;
@@ -857,13 +890,16 @@ fn root_dirs(unknown: &Unknown) -> Vec<DirId> {
 
 /// Checks each of Claude's suggested `items` and adds those that pass to the scan's proposals, unticked, with
 /// risk Review, marked Claude's. Every one must be a node of the scan inside one of `roots` (the folders asked
-/// about), and pass the Guard on both checks like a rule's target. The rest are dropped, each with why.
+/// about), and pass the Guard on both checks like a rule's target. The rest are dropped, each with why. Each one
+/// added is recorded as made with privacy mode on or off (`privacy`).
+#[allow(clippy::too_many_arguments)]
 fn admit_all(
     scanned: &mut ScannedVolume,
     env: &Env,
     unknown: &Unknown,
     roots: &[DirId],
     items: Vec<ItemOut>,
+    privacy: bool,
     dropped: &mut Vec<Dropped>,
     cancel: &CancelToken,
 ) -> Result<Vec<Proposal>, Failure> {
@@ -934,6 +970,7 @@ fn admit_all(
         let id = proposal.id.clone();
         added.push(proposal.clone());
         scanned.proposals.insert_advice(proposal, target);
+        scanned.claude_off.item(&id, !privacy);
         // Delete wins over sort: a sort leaves out a loose file this item takes, while it is in the plan.
         scanned.tidy.cover(&scanned.snapshot, &id, &[target]);
     }
@@ -1174,7 +1211,15 @@ fn read_note(
     }
 }
 
-fn proposal_json(p: &Proposal, ticked: Option<bool>, shown: &dyn Fn(&Path) -> String) -> Value {
+/// A proposal as a prompt shows it. `redact`: one of Claude's items made with privacy mode off, in a call with it
+/// on, so its title and why (Claude's words, which may come from files it read) stay out: it goes by the name of
+/// what it takes, from the scan.
+fn proposal_json(
+    p: &Proposal,
+    ticked: Option<bool>,
+    shown: &dyn Fn(&Path) -> String,
+    redact: bool,
+) -> Value {
     let samples: Vec<String> = p
         .sample_paths
         .iter()
@@ -1183,11 +1228,22 @@ fn proposal_json(p: &Proposal, ticked: Option<bool>, shown: &dyn Fn(&Path) -> St
         .take(3)
         .map(|s| shown(&s))
         .collect();
+    let (title, why) = if redact {
+        let name = p
+            .sample_paths
+            .first()
+            .and_then(|s| Path::new(s).file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "an item".to_owned());
+        (format!("Claude's item: {name}"), String::new())
+    } else {
+        (p.title.clone(), p.why.clone())
+    };
     let mut v = json!({
         "id": p.id,
-        "title": p.title,
+        "title": title,
         "summary": p.summary,
-        "why": p.why,
+        "why": why,
         "risk": p.risk,
         "action": p.action,
         "comesBack": p.regenerable,
@@ -1282,6 +1338,7 @@ fn subject_json(
     about: &About,
     scanned: &ScannedVolume,
     shown: &dyn Fn(&Path) -> String,
+    privacy: bool,
 ) -> Result<(Value, Vec<PathBuf>), Failure> {
     let snap = &scanned.snapshot;
     match about {
@@ -1294,8 +1351,9 @@ fn subject_json(
                 .ok_or_else(|| {
                     Failure::error("That item isn't in this scan any more. Scan again.")
                 })?;
-            let mut v = proposal_json(p, None, shown);
-            if let Some(note) = &p.claude_note {
+            let redact = privacy && scanned.claude_off.made(&p.id);
+            let mut v = proposal_json(p, None, shown, redact);
+            if let Some(note) = p.claude_note.as_ref().filter(|_| !redact) {
                 v["claudeSaid"] = json!(note);
             }
             Ok((
@@ -1492,6 +1550,7 @@ mod tests {
         let m = |from, text: &str| Message {
             from,
             text: text.into(),
+            privacy: true,
         };
         assert!(conversation(&[]).is_err());
         assert!(conversation(&[m(Speaker::Claude, "hi")]).is_err());

@@ -424,7 +424,9 @@ fn claude_home(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 /// Claude's status now: whether Claude Code is found, whether Claude is on (and then signed in), and privacy mode.
-/// Looks for Claude Code again each time ("Check again"). Fixture mode looks too: only reads are confined there.
+/// Looks for Claude Code again each time ("Check again"). Fixture mode looks too: only reads are confined there. A
+/// sign-in check that doesn't work (Claude Code went missing, took too long, or failed) says so with why; it is
+/// never shown as "not signed in".
 fn claude_status_now(app: &AppHandle) -> Result<claude::Status, String> {
     let home = claude_home(app)?;
     let settings = claude::settings::load(&home);
@@ -434,10 +436,9 @@ fn claude_status_now(app: &AppHandle) -> Result<claude::Status, String> {
         settings,
         found.is_some(),
         fixture,
-        || {
-            found.as_deref().is_some_and(|exe| {
-                claude::runner::signed_in(exe, &home.join("claude-work")).unwrap_or(false)
-            })
+        || match found.as_deref() {
+            Some(exe) => claude::runner::signed_in(exe, &home.join("claude-work")),
+            None => Err(Failure::NotFound),
         },
     ))
 }

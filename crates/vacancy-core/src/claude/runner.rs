@@ -5,15 +5,18 @@
 //! ```text
 //! claude -p --setting-sources "" --strict-mcp-config --disable-slash-commands --no-session-persistence
 //!        --permission-prompts none --output-format json --json-schema <schema> --system-prompt <Vacancy's>
-//!        --tools ""                                                     (privacy mode on)
+//!        --tools "" --settings <deny rules>                                           (privacy mode on)
 //!        --tools Read,Glob,Grep --settings <deny and allow rules> --add-dir <roots...>   (privacy mode off)
 //! ```
 //!
 //! The prompt goes over standard input: `--add-dir` and `--tools` take any number of values and would swallow a
 //! prompt given after them, and a command line has a length limit a prompt mustn't meet. No `--model`: the
-//! account's default applies. With privacy mode off, the always-hidden places are `permissions.deny` rules
-//! Claude Code enforces (see [`super::hidden`]), and reads are allowed on every drive, or in fixture mode only in
-//! the fixture folder: anything else would need a permission prompt, which `--permission-prompts none` refuses.
+//! account's default applies. The always-hidden places are `permissions.deny` rules Claude Code enforces (see
+//! [`super::hidden`]) in both modes: with privacy mode on Claude has no tool to read with, so they are defence in
+//! depth there. With privacy mode off, reads are allowed on every drive, or in fixture mode only in the fixture
+//! folder: anything else would need a permission prompt, which `--permission-prompts none` refuses. In both modes
+//! Claude Code expands no `@` file mention and attaches nothing (`CLAUDE_CODE_DISABLE_ATTACHMENTS`,
+//! `CLAUDE_CODE_DISABLE_FILE_MENTIONS`), so a path the person types in a chat stays text.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -35,11 +38,15 @@ pub const SLOW_AFTER: Duration = Duration::from_secs(20);
 /// The most of Claude Code's output Vacancy keeps; an answer is far smaller.
 const OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 
-/// The environment every call gets on top of the app's own.
-pub const ENV_SET: [(&str, &str); 3] = [
+/// The environment every call gets on top of the app's own: no CLAUDE.md files, no auto-memory, no nonessential
+/// traffic, and no `@` file mention expanded or attached (with attachments off a mention is sent as plain text; with
+/// file mentions off too, Claude Code would at most tell Claude a path it can't read without tools).
+pub const ENV_SET: [(&str, &str); 5] = [
     ("CLAUDE_CODE_DISABLE_CLAUDE_MDS", "1"),
     ("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1"),
     ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+    ("CLAUDE_CODE_DISABLE_ATTACHMENTS", "1"),
+    ("CLAUDE_CODE_DISABLE_FILE_MENTIONS", "1"),
 ];
 /// Taken out of every call's environment: with it set, Claude Code would bill an API key instead of the
 /// subscription.
@@ -112,8 +119,9 @@ pub fn rule_path(path: &Path) -> String {
 }
 
 /// The `--settings` JSON for privacy mode off: Read allowed under `roots`, and the always-hidden places denied
-/// (deny rules win over allow rules in Claude Code).
-pub fn read_settings(roots: &[PathBuf]) -> Value {
+/// (deny rules win over allow rules in Claude Code), Claude Code's and Codex's own folders where `config` puts them
+/// among them.
+pub fn read_settings_in(roots: &[PathBuf], config: &[PathBuf]) -> Value {
     let allow: Vec<String> = roots
         .iter()
         .map(|root| format!("Read(/{}/**)", rule_path(root)))
@@ -121,22 +129,51 @@ pub fn read_settings(roots: &[PathBuf]) -> Value {
     serde_json::json!({
         "permissions": {
             "allow": allow,
-            "deny": hidden::deny_rules(),
+            "deny": hidden::deny_rules_in(config),
+        }
+    })
+}
+
+/// [`read_settings_in`] with the app's own config folders ([`hidden::config_dirs`]).
+pub fn read_settings(roots: &[PathBuf]) -> Value {
+    read_settings_in(roots, hidden::config_dirs())
+}
+
+/// The `--settings` JSON for privacy mode on: nothing allowed, and the always-hidden places denied all the same.
+pub fn private_settings_in(config: &[PathBuf]) -> Value {
+    serde_json::json!({
+        "permissions": {
+            "deny": hidden::deny_rules_in(config),
         }
     })
 }
 
 /// The command for `call`, with Claude Code at `program`.
 pub fn invocation(program: &Path, call: &Call, access: &Access) -> Invocation {
+    invocation_in(program, call, access, hidden::config_dirs())
+}
+
+/// [`invocation`], with Claude Code's and Codex's own folders where `config` puts them.
+pub fn invocation_in(
+    program: &Path,
+    call: &Call,
+    access: &Access,
+    config: &[PathBuf],
+) -> Invocation {
     let mut args = locked(call);
     match access {
-        Access::Private => args.extend(["--tools".to_owned(), String::new()]),
+        Access::Private => args.extend([
+            "--tools".to_owned(),
+            String::new(),
+            "--settings".to_owned(),
+            private_settings_in(config).to_string(),
+        ]),
         Access::Read(roots) => {
             args.extend([
                 "--tools".to_owned(),
                 "Read,Glob,Grep".to_owned(),
                 "--settings".to_owned(),
-                read_settings(roots).to_string(),
+                read_settings_in(roots, config).to_string(),
                 "--add-dir".to_owned(),
             ]);
             args.extend(roots.iter().map(|r| r.display().to_string()));
@@ -145,13 +182,17 @@ pub fn invocation(program: &Path, call: &Call, access: &Access) -> Invocation {
     Invocation {
         program: program.to_path_buf(),
         args,
-        env_set: ENV_SET
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-            .collect(),
+        env_set: env_set(),
         env_remove: ENV_REMOVE.iter().map(|k| (*k).to_owned()).collect(),
         stdin: call.prompt.clone(),
     }
+}
+
+fn env_set() -> Vec<(String, String)> {
+    ENV_SET
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect()
 }
 
 /// Why a call gave no answer, as the panel says it.
@@ -327,22 +368,23 @@ fn run_in_empty_folder(
     Ok(output)
 }
 
+/// The longest `claude auth status` may take.
+pub const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Whether Claude Code at `program` is signed in: `claude auth status`'s exit code, from an empty folder under
-/// `work`, with the same environment as every call. What it prints is never read.
+/// `work`, with the same environment as every call. What it prints is never read. When the check itself doesn't
+/// work, why: not found, timed out, or an error with what went wrong.
 pub fn signed_in(program: &Path, work: &Path) -> Result<bool, Failure> {
     let invocation = Invocation {
         program: program.to_path_buf(),
         args: vec!["auth".into(), "status".into()],
-        env_set: ENV_SET
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-            .collect(),
+        env_set: env_set(),
         env_remove: ENV_REMOVE.iter().map(|k| (*k).to_owned()).collect(),
         stdin: String::new(),
     };
     let control = Control {
         cancel: CancelToken::new(),
-        timeout: Duration::from_secs(30),
+        timeout: AUTH_TIMEOUT,
         slow_after: Duration::MAX,
     };
     let output = run_in_empty_folder(work, &invocation, &control, &mut |_| {})?;
@@ -496,7 +538,13 @@ mod tests {
                     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_owned(),
                     "1".to_owned()
                 ),
-            ]
+                ("CLAUDE_CODE_DISABLE_ATTACHMENTS".to_owned(), "1".to_owned()),
+                (
+                    "CLAUDE_CODE_DISABLE_FILE_MENTIONS".to_owned(),
+                    "1".to_owned()
+                ),
+            ],
+            "in both modes: no CLAUDE.md, no memory, no nonessential traffic, no @ mention expanded or attached"
         );
         assert_eq!(inv.env_remove, vec!["ANTHROPIC_API_KEY".to_owned()]);
         assert_eq!(
@@ -527,14 +575,56 @@ mod tests {
     }
 
     #[test]
-    fn privacy_on_pins_the_exact_argv_and_env_with_no_tools() {
+    fn privacy_on_pins_the_exact_argv_and_env_with_no_tools_and_the_deny_rules() {
         let program = PathBuf::from("claude");
-        let inv = invocation(&program, &call(), &Access::Private);
+        let inv = invocation_in(&program, &call(), &Access::Private, &[]);
         let mut expected: Vec<String> = LOCKED.iter().map(|s| (*s).to_owned()).collect();
         expected.push(String::new());
+        expected.push("--settings".into());
+        expected.push(
+            serde_json::json!({"permissions": {"deny": hidden::deny_rules_in(&[])}}).to_string(),
+        );
         assert_eq!(inv.args, expected);
         assert_eq!(inv.program, program);
         env_pinned(&inv);
+        // No tools, so nothing to allow; the always-hidden places are denied all the same.
+        let settings = private_settings_in(&[]);
+        assert!(settings["permissions"].get("allow").is_none());
+        assert!(
+            settings["permissions"]["deny"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d == "Read(//**/.ssh/**)")
+        );
+        assert!(!inv.args.iter().any(|a| a == "--add-dir"));
+    }
+
+    #[test]
+    fn a_moved_claude_or_codex_folder_is_denied_in_both_modes() {
+        let moved = if cfg!(windows) {
+            PathBuf::from(r"D:\Work\claude-config")
+        } else {
+            PathBuf::from("/Volumes/Work/claude-config")
+        };
+        let rule = format!("Read(/{}/**)", rule_path(&moved));
+        let config = std::slice::from_ref(&moved);
+        for access in [
+            Access::Private,
+            Access::Read(vec![moved.parent().unwrap().to_path_buf()]),
+        ] {
+            let inv = invocation_in(Path::new("claude"), &call(), &access, config);
+            let settings = &inv.args[inv.args.iter().position(|a| a == "--settings").unwrap() + 1];
+            let settings: Value = serde_json::from_str(settings).unwrap();
+            assert!(
+                settings["permissions"]["deny"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|d| d == &rule),
+                "{access:?}: {settings}"
+            );
+        }
     }
 
     #[test]

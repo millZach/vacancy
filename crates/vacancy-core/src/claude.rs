@@ -14,7 +14,14 @@
 //!
 //! A call can take minutes, so a job is prepared from the scan, the call runs without it, and the answer is
 //! applied to the scan afterwards (the caller checks it is still the same scan).
+//!
+//! What Claude said with privacy mode off can come from files it read, so it never goes back to Claude with privacy
+//! mode on: each chat turn carries the mode it was made in, and the scan keeps a record ([`PrivacyOff`]) of the
+//! replies and items Claude gave with privacy mode off. A call with privacy mode on refuses a chat that holds any of
+//! them, and sends such an item by its name in the scan only, without what Claude said about it.
 
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -33,7 +40,7 @@ pub mod runner;
 pub mod settings;
 
 pub use fake::FakeClaude;
-pub use jobs::{Prepared, SYSTEM, apply, prepare, remove_items, run};
+pub use jobs::{PRIVACY_TURNS, Prepared, SYSTEM, apply, prepare, remove_items, run};
 pub use runner::{Access, Call, ClaudeCode, Cli, Control, Failure, Progress, Reply};
 pub use settings::Settings;
 
@@ -51,6 +58,10 @@ pub enum State {
     Off,
     /// Claude is on and ready.
     On,
+    /// Claude is on, but asking Claude Code whether it is signed in took too long ([`Status::message`] says so).
+    CheckTimedOut,
+    /// Claude is on, but asking Claude Code whether it is signed in failed: [`Status::message`] says how.
+    CheckFailed,
 }
 
 /// What the panel needs to draw its head, its privacy switch and the privacy screens.
@@ -65,30 +76,54 @@ pub struct Status {
     pub fixture: bool,
     /// What always stays hidden, even with privacy mode off, for the privacy screens.
     pub hidden: Vec<hidden::Hidden>,
+    /// Why the sign-in check didn't work, in words, for [`State::CheckTimedOut`] and [`State::CheckFailed`] (and
+    /// [`State::NotFound`] when Claude Code went missing as it was checked).
+    pub message: Option<String>,
 }
 
 impl Status {
     /// The status for `settings`, with Claude Code `found` or not, and `signed_in` asked only when Claude is on.
+    /// A sign-in check that doesn't work keeps why: Claude Code went missing, it took too long, or an error. It is
+    /// never taken for "not signed in".
     pub fn of(
         settings: Settings,
         found: bool,
         fixture: bool,
-        signed_in: impl FnOnce() -> bool,
+        signed_in: impl FnOnce() -> Result<bool, Failure>,
     ) -> Self {
-        let state = if !found {
-            State::NotFound
+        let (state, message) = if !found {
+            (State::NotFound, None)
         } else if !settings.enabled {
-            State::Off
-        } else if signed_in() {
-            State::On
+            (State::Off, None)
         } else {
-            State::SignedOut
+            match signed_in() {
+                Ok(true) => (State::On, None),
+                Ok(false) | Err(Failure::SignedOut) => (State::SignedOut, None),
+                Err(Failure::NotFound) => (
+                    State::NotFound,
+                    Some(
+                        "Claude Code went missing while Vacancy checked whether it's signed in."
+                            .to_owned(),
+                    ),
+                ),
+                Err(Failure::TimedOut) => (
+                    State::CheckTimedOut,
+                    Some(format!(
+                        "Claude Code didn't answer within {} seconds when Vacancy asked whether it's signed in.",
+                        runner::AUTH_TIMEOUT.as_secs()
+                    )),
+                ),
+                Err(failure @ (Failure::Cancelled | Failure::Error { .. })) => {
+                    (State::CheckFailed, Some(failure.to_string()))
+                }
+            }
         };
         Self {
             state,
             privacy: settings.privacy,
             fixture,
             hidden: hidden::list(),
+            message,
         }
     }
 }
@@ -167,6 +202,49 @@ pub enum Speaker {
 pub struct Message {
     pub from: Speaker,
     pub text: String,
+    /// Privacy mode when the message was made: a call with privacy mode on never sends one made with it off.
+    pub privacy: bool,
+}
+
+/// What Claude gave about one scan with privacy mode off, which may come from files it read: its chat replies (by
+/// fingerprint) and its own items. A call with privacy mode on never sends them back to Claude.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PrivacyOff {
+    replies: HashSet<u64>,
+    items: HashSet<String>,
+}
+
+impl PrivacyOff {
+    /// A chat text's fingerprint, as a prompt would send it (trimmed, and as long as a sent message is at most).
+    fn key(text: &str) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let kept: String = text.trim().chars().take(jobs::MAX_MESSAGE_CHARS).collect();
+        kept.trim().hash(&mut h);
+        h.finish()
+    }
+
+    pub(crate) fn reply(&mut self, text: &str) {
+        self.replies.insert(Self::key(text));
+    }
+
+    /// Whether `text` is a reply Claude gave with privacy mode off.
+    pub fn said(&self, text: &str) -> bool {
+        self.replies.contains(&Self::key(text))
+    }
+
+    /// Claude's item `id` was made with privacy mode off (`off`), or on.
+    pub(crate) fn item(&mut self, id: &str, off: bool) {
+        if off {
+            self.items.insert(id.to_owned());
+        } else {
+            self.items.remove(id);
+        }
+    }
+
+    /// Whether Claude's item `id` was made with privacy mode off.
+    pub fn made(&self, id: &str) -> bool {
+        self.items.contains(id)
+    }
 }
 
 /// What an answer was based on, which every answer says: names, sizes and dates only (privacy mode on), or the

@@ -21,6 +21,8 @@ All of these appear in a docked Claude side panel (prototype `prototype/ai-advis
   - It runs from an empty folder Vacancy owns.
   - `ANTHROPIC_API_KEY` is removed from its environment.
   - `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` are set.
+  - `CLAUDE_CODE_DISABLE_ATTACHMENTS=1` and `CLAUDE_CODE_DISABLE_FILE_MENTIONS=1` are set in both modes, so an `@` path typed in a chat is never expanded into a file's contents (review of #29; `docs/proof/t12-attach-probes/`).
+  - The always-hidden deny rules are passed with `--settings` in both modes: with privacy mode on, as defence in depth.
 
   So the user's hooks, plugins, MCP servers, CLAUDE.md files and settings don't load, and no transcript is kept. `--bare` can't be used because it never reads the subscription login.
 
@@ -43,5 +45,6 @@ The advisor shows one of these states:
 
 - **Not found:** no `claude` was found. Vacancy looks in `%USERPROFILE%\.local\bin\claude.exe` and the PATH on Windows, and `~/.local/bin/claude`, Homebrew and npm global plus the login shell's PATH on macOS. It spawns the `.exe`, never a `.cmd`.
 - **Not signed in:** `claude auth status` fails.
+- **The sign-in check timed out, or failed:** `claude auth status` didn't answer in 30 seconds, or couldn't run. Each shows its own state with why; neither is shown as "not signed in".
 - **Off, on, working:** working can be cancelled, and slow shows after a while.
 - **Timed out, and error:** each with Claude's message.

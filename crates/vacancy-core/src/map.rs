@@ -366,6 +366,8 @@ pub struct ScannedVolume {
     pub overview: Overview,
     /// How the drive was read.
     pub how: HowScanned,
+    /// What Claude gave about this scan with privacy mode off, which no call with privacy mode on sends back.
+    pub claude_off: crate::claude::PrivacyOff,
 }
 
 impl ScannedVolume {
@@ -712,6 +714,7 @@ pub(crate) fn finish_map(
         tidy,
         overview,
         how,
+        claude_off: Default::default(),
     })
 }
 
