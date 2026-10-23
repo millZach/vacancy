@@ -339,6 +339,40 @@ describe('privacy mode', () => {
     expect(within(panel()).getByRole('note')).toHaveTextContent(CHECK_UNVERIFIED);
   });
 
+  it('back from not signed in with privacy mode off, checks Claude Code before the row says Claude reads files', async () => {
+    const bridge = windows({ claude: 'on', privacy: 'off', canary: 'ok' });
+    const real = bridge.claudeStatus.bind(bridge);
+    vi.spyOn(bridge, 'claudeStatus').mockImplementationOnce(async () => ({ ...(await real()), state: 'signedOut' }));
+    const check = vi.spyOn(bridge, 'claudeCheck');
+    await toMap(bridge);
+    expect(await within(panel()).findByRole('heading', { name: 'Sign in to Claude Code first.' })).toBeInTheDocument();
+    expect(check).not.toHaveBeenCalled();
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Check again' }));
+    await waitFor(() => expect(check).toHaveBeenCalledWith(false));
+    expect(await within(panel()).findByText(/Off: Vacancy is checking Claude Code before Claude opens files/)).toBeInTheDocument();
+    expect(within(panel()).queryByText(/Off: Claude can read files/)).toBeNull();
+    expect(await within(panel()).findByText(/Off: Claude can read files on the drive you scanned/, undefined, { timeout: 4000 })).toBeInTheDocument();
+  });
+
+  it('while the check is due the row never says Claude reads files, and a job’s own check that fails shows in it', async () => {
+    const bridge = windows({ claude: 'on', privacy: 'off', canary: 'fail' });
+    // The check from the panel doesn't run here (as if it were still to come): the status stays due.
+    const check = vi.spyOn(bridge, 'claudeCheck').mockImplementation(() => bridge.claudeStatus());
+    await toMap(bridge);
+    await openPlan();
+    expect(check).toHaveBeenCalled();
+    const note = await within(panel()).findByRole('note');
+    expect(note).toHaveTextContent(/hasn’t checked this Claude Code yet/);
+    expect(within(note).getByRole('button', { name: 'Check now' })).toBeInTheDocument();
+    expect(within(panel()).getByText(/Off, but Claude can’t open files for now/)).toBeInTheDocument();
+    expect(within(header()).getByText('Claude on')).toBeInTheDocument();
+    // The job checks first, as the core does, and fails: the row says so once the job has ended.
+    const review = await job('Review my plan', 'reviewPlan');
+    expect(within(review).getByText(CHECK_UNVERIFIED)).toBeInTheDocument();
+    await waitFor(() => expect(within(panel()).getByRole('note')).toHaveTextContent(CHECK_UNVERIFIED));
+    expect(within(panel()).getByRole('button', { name: 'Check again' })).toBeInTheDocument();
+  });
+
   it('every answer says what it was based on; changing the mode ends the conversation, and says so', async () => {
     await toMap(windows({ claude: 'on' }));
     await openPlan();

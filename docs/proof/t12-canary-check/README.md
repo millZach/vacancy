@@ -12,7 +12,13 @@ call (`crates/vacancy-core/src/claude/canary.rs`, ADR 0008):
 - the call is built by the same builder as every privacy-off call: the settings in a file, the same flags and
   environment, `blockReadsOutsideWorkingDirectories`, no `--model`, the folder as the read scope (as a drive, with
   the drive list's other drives and every mount point);
-- it passes only if the control's words come back, the canary's don't, and Claude Code refuses the canary's read.
+- it passes only if the control's words come back, the canary's don't, and Claude Code's JSON output records refusing
+  the canary's read (`permission_denials` names its path). Claude might simply skip a read, so the canary's absence
+  alone never passes.
+
+The pass rule was tightened after this run (review of 82244a5): an empty `permission_denials` used to count, if the
+control came back and the canary didn't. This run had `refusalSeen: true`, so it passes the stricter rule as it
+stands, and it wasn't run again.
 
 ## The run: one real call
 

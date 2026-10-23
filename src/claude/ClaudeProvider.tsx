@@ -183,9 +183,35 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     setChecking(true);
     bridge
       .claudeStatus()
-      .then(ready, (error: unknown) => setStatus({ phase: 'error', message: errorMessage(error) }))
+      .then(
+        (s) => {
+          ready(s);
+          // Back from not signed in (or a sign-in check that failed) with privacy mode off: Claude Code is checked
+          // before Claude opens files, if it hasn't passed already.
+          if (s.state === 'on' && !s.privacy && s.check.kind === 'unchecked') verify(false);
+        },
+        (error: unknown) => setStatus({ phase: 'error', message: errorMessage(error) }),
+      )
       .finally(() => setChecking(false));
-  }, [bridge]);
+  }, [bridge, verify]);
+
+  /**
+   * A request with privacy mode off has ended: its own check of Claude Code may have run (or found it changed), so
+   * the status is read again, quietly, when the row may no longer be right: the check wasn't passed, or the answer
+   * came from names, sizes and dates though the row says Claude reads files.
+   */
+  const refreshAfter = (event: ClaudeEvent) => {
+    const s = statusRef.current.phase === 'ready' ? statusRef.current.status : null;
+    if (!s || s.state !== 'on' || s.privacy) return;
+    const stale = s.check.kind !== 'passed' || (event.kind === 'done' && event.answer.basis.privacy && readsFiles(s));
+    if (!stale) return;
+    bridge.claudeStatus().then(
+      (now) => setStatus({ phase: 'ready', status: now }),
+      () => {
+        // The row stays as it was; the next status read puts it right.
+      },
+    );
+  };
 
   /** The attempt `token` is still the one wanted for `rkey`: not cancelled, not ended, not retried since. */
   const current = (rkey: string, token: number) => {
@@ -225,6 +251,7 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   const finished = (rkey: string, token: number, event: ClaudeEvent) => {
     if (requests.current.get(rkey)?.token === token) requests.current.delete(rkey);
     if (event.kind === 'failed' && (event.failure.kind === 'notFound' || event.failure.kind === 'signedOut')) recheck();
+    else refreshAfter(event);
   };
 
   /** Stops every request running and forgets every conversation (turning Claude off, or privacy mode changing). */

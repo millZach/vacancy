@@ -544,11 +544,14 @@ pub enum Event {
 /// What Claude may read for a call with privacy mode off about the scan of the drive at `mount_point`: that drive
 /// only, or in fixture mode the fixture folder only. `drives` are the mount points the drive list offers: the
 /// others are denied by name too ([`runner::off_drive_rules_in`]). `mounts` are every place a file system is mounted
-/// now ([`mounts::list`], read right before the call): each is denied unless it is the drive or holds it
-/// ([`runner::mount_rules_in`]).
+/// now ([`mounts::list`], read right before the call): each is denied unless it is the drive (or in fixture mode the
+/// fixture folder's own volume) or holds it ([`runner::mount_rules_in`]).
 pub fn access(env: &Env, mount_point: &str, drives: &[String], mounts: &[PathBuf]) -> Access {
     match &env.confined_to {
-        Some(root) => Access::Read(vec![root.clone()]),
+        Some(root) => Access::Fixture {
+            root: root.clone(),
+            mounts: mounts.to_vec(),
+        },
         None => Access::Drive(runner::Drive {
             root: PathBuf::from(mount_point),
             others: drives
@@ -582,11 +585,7 @@ pub fn access_on(
 /// can name it ([`runner::mounts_unavailable`]), or this scan's rules wouldn't fit in the settings Claude Code takes
 /// ([`too_big_on`]). `None` when neither, or for [`Access::Private`].
 pub fn closed_on(scanned: &ScannedVolume, env: &Env, access: &Access) -> Option<String> {
-    match access {
-        Access::Drive(drive) => runner::mounts_unavailable(drive),
-        _ => None,
-    }
-    .or_else(|| too_big_on(scanned, env, access))
+    runner::access_mounts_unavailable(access).or_else(|| too_big_on(scanned, env, access))
 }
 
 /// Why privacy mode off can't let Claude open files on `scanned`: the rules that keep its browser profiles and the

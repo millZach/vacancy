@@ -866,7 +866,13 @@ fn claude_reads_only_the_fixture_or_the_scanned_drive() {
     let case = case();
     let drives: Vec<String> = vec!["C:\\".into(), "D:\\".into(), "E:\\".into()];
     let fixture = claude::access(&case.env, "D:\\", &drives, &[]);
-    assert_eq!(fixture, Access::Read(vec![case.root.clone()]));
+    assert_eq!(
+        fixture,
+        Access::Fixture {
+            root: case.root.clone(),
+            mounts: Vec::new(),
+        }
+    );
     assert_eq!(fixture.roots(), Some(vec![case.root.clone()]));
     let mut real = case.env.clone();
     real.confined_to = None;

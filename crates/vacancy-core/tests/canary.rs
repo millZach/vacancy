@@ -24,7 +24,11 @@ fn home() -> (tempfile::TempDir, PathBuf) {
 }
 
 fn new_check(home: &Path) -> Canary {
-    Canary::new(&home.join(canary::FOLDER), Scope::Folder).expect("the check's folder")
+    Canary::new(
+        &home.join(canary::FOLDER),
+        Scope::Folder { mounts: Vec::new() },
+    )
+    .expect("the check's folder")
 }
 
 /// What a Claude Code that keeps its settings answers: the control file's text, the canary's read refused.
@@ -76,9 +80,28 @@ fn the_check_passes_only_when_the_canary_stays_hidden_and_the_control_comes_back
             .contains(&hidden_file.display().to_string())
     );
 
-    // With no refusal listed at all, the control's presence and the canary's absence decide.
+    // With no refusal recorded, it doesn't pass: Claude may simply have skipped the canary's read.
     let verdict = canary::run(&honest(&check, false), &check, &cancel);
-    assert!(verdict.passed && !verdict.refusal_seen, "{verdict:?}");
+    assert!(
+        !verdict.passed && !verdict.refusal_seen && verdict.keep,
+        "{verdict:?}"
+    );
+    assert!(
+        verdict
+            .why
+            .unwrap()
+            .contains("didn't record refusing the hidden file")
+    );
+    // A refusal recorded with the path spelled another way still counts.
+    let skipped = check.files().1.display().to_string().replace('\\', "/");
+    let control_path = check.files().0.to_path_buf();
+    let fake = FakeClaude::new(move |_| {
+        Ok(Reply {
+            structured: json!({"first": std::fs::read_to_string(&control_path).unwrap(), "second": "denied"}),
+            refused: vec![skipped.clone()],
+        })
+    });
+    assert!(canary::run(&fake, &check, &cancel).passed);
 
     // Each other outcome fails, and privacy mode off stays unavailable.
     let control_text = words(control);
@@ -109,12 +132,20 @@ fn the_check_passes_only_when_the_canary_stays_hidden_and_the_control_comes_back
             "didn't return the check's readable file",
         ),
         (
-            "another read refused",
+            "only another read refused",
             Ok(Reply {
                 structured: json!({"first": control_text, "second": "Error"}),
                 refused: vec!["/elsewhere/x".into()],
             }),
-            "refused other reads",
+            "didn't record refusing the hidden file",
+        ),
+        (
+            "the canary skipped, nothing refused",
+            Ok(Reply {
+                structured: json!({"first": control_text, "second": "I didn't read it."}),
+                refused: Vec::new(),
+            }),
+            "didn't record refusing the hidden file",
         ),
         (
             "an error",
@@ -269,12 +300,41 @@ fn the_check_is_a_privacy_off_call_from_the_real_settings_builder() {
         deny.contains(&mount.to_owned()),
         "the mounts, as a real call's"
     );
-    // In fixture mode, as the fixture folder is read.
-    let folder = new_check(&home);
+    // In fixture mode, as the fixture folder is read, with every mount point: one nested in the folder is denied,
+    // and the volume holding it isn't.
+    let probe = new_check(&home);
+    let volume = probe.dir().ancestors().last().unwrap().to_path_buf();
+    drop(probe);
+    let folder = Canary::new(
+        &home.join(canary::FOLDER),
+        Scope::Folder {
+            mounts: vec![volume.clone()],
+        },
+    )
+    .unwrap();
     assert_eq!(
         folder.access(),
-        &Access::Read(vec![folder.dir().to_path_buf()])
+        &Access::Fixture {
+            root: folder.dir().to_path_buf(),
+            mounts: vec![volume.clone()],
+        }
     );
+    let access = folder
+        .access()
+        .with_mounts(vec![volume, folder.dir().join("Mount").join("Image")]);
+    let inv = runner::invocation(Path::new("claude"), folder.call(), &access, &file);
+    let settings: Value = serde_json::from_str(&inv.settings.unwrap().1).unwrap();
+    let deny: Vec<String> =
+        serde_json::from_value(settings["permissions"]["deny"].clone()).unwrap();
+    let nested = folder.dir().join("Mount").join("Image");
+    let rule = format!("Read(/{}/**)", runner::rule_path(&nested).unwrap());
+    assert!(deny.contains(&rule), "{rule}");
+    assert!(
+        !deny
+            .iter()
+            .any(|r| r == "Read(//**)" || r == "Read(//*/**)")
+    );
+    assert!(runner::access_mounts_unavailable(&access).is_none());
 }
 
 /// The kept result holds for exactly one Claude Code: its resolved path, size, modified time and version. Any change
@@ -293,19 +353,58 @@ fn a_kept_result_holds_for_one_executable_only() {
         }
     };
     let first = Identity::of(&exe, None, version("2.1.309 (Claude Code)")).unwrap();
-    assert_eq!(
-        first.path,
-        std::fs::canonicalize(&exe).unwrap().to_string_lossy()
+    assert_eq!(first.path, canary::resolve(&exe).unwrap().to_string_lossy());
+    assert!(
+        !first.path.starts_with(r"\\?\"),
+        "a path that can be started as it is"
     );
     assert_eq!(first.size, 3);
     assert!(first.modified.is_some());
+    // The SHA-256 of "one".
+    assert_eq!(
+        first.sha256,
+        "7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add73ff431ed"
+    );
     assert_eq!(asked.load(Ordering::SeqCst), 1);
-    // The same file: its version stands, nothing is started.
+    assert!(first.is(&exe));
+    // The same file, as this process found it: its hash and version stand, nothing is read or started.
     assert_eq!(
         Identity::of(&exe, Some(&first), version("x")).unwrap(),
         first
     );
     assert_eq!(asked.load(Ordering::SeqCst), 1);
+    // Another executable of the same size with the same modified time (a copy that kept its timestamps): a fresh
+    // look (each process's first, and Check again) hashes it, so it doesn't inherit the pass.
+    let twin = dir.path().join("twin.exe");
+    std::fs::write(&twin, b"two").unwrap();
+    let stamp = std::fs::metadata(&exe).unwrap().modified().unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&twin)
+        .unwrap()
+        .set_modified(stamp)
+        .unwrap();
+    std::fs::copy(&twin, &exe).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&exe)
+        .unwrap()
+        .set_modified(stamp)
+        .unwrap();
+    let swapped = Identity::of(&exe, None, version("2.1.309 (Claude Code)")).unwrap();
+    assert_eq!(
+        (swapped.size, swapped.modified),
+        (first.size, first.modified)
+    );
+    assert_ne!(swapped.sha256, first.sha256);
+    std::fs::write(&exe, b"one").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&exe)
+        .unwrap()
+        .set_modified(stamp)
+        .unwrap();
+    asked.store(1, Ordering::SeqCst);
 
     canary::save(
         &home,
@@ -357,6 +456,11 @@ fn a_kept_result_holds_for_one_executable_only() {
         },
         Identity {
             version: "2.1.310".into(),
+            ..first.clone()
+        },
+        swapped.clone(),
+        Identity {
+            sha256: swapped.sha256.clone(),
             ..first.clone()
         },
     ] {

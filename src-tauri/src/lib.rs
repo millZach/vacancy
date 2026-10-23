@@ -39,8 +39,11 @@ struct Session {
     claude_check: Mutex<()>,
     /// A check is running now, for the status.
     claude_checking: AtomicBool,
-    /// The Claude Code last identified, so its version isn't asked again on every call while it is the same file.
+    /// The Claude Code last identified, so its bytes aren't hashed and its version asked again on every call while it
+    /// is the same file.
     claude_identity: Mutex<Option<claude::canary::Identity>>,
+    /// The latest check this process made: it wins over the kept file, even when keeping it failed.
+    claude_verdict: Mutex<Option<claude::canary::Record>>,
 }
 
 impl Session {
@@ -55,6 +58,7 @@ impl Session {
             claude_check: Mutex::new(()),
             claude_checking: AtomicBool::new(false),
             claude_identity: Mutex::new(None),
+            claude_verdict: Mutex::new(None),
         }
     }
 
@@ -503,19 +507,41 @@ fn claude_status_now(app: &AppHandle) -> Result<claude::Status, String> {
     status.reads_unavailable = claude_reads_unavailable(mode).or_else(|| claude_mounts(mode).err());
     if let (claude::State::On, false, Some(exe)) = (status.state, status.privacy, found.as_deref())
     {
-        status.check = claude_check_state(app, exe, &home);
+        status.check = match claude::canary::resolve(exe) {
+            Ok(exe) => claude_check_state(app, &exe, &home),
+            Err(e) => claude::canary::Check::Failed {
+                message: claude::canary::unverified(&format!(
+                    "Vacancy couldn't read {}: {e}",
+                    exe.display()
+                )),
+            },
+        };
     }
     Ok(status)
 }
 
 /// Every place a file system is mounted now, read right before a call with privacy mode off: each is denied unless
-/// it is the scanned drive or holds it. In fixture mode none (reads stay in the fixture folder). Why, in words, when
-/// the list can't be read: then the call runs as if privacy mode were on.
+/// it is the scanned drive (in fixture mode, the fixture folder's own volume) or holds it. Why, in words, when the
+/// list can't be read: then the call runs as if privacy mode were on.
 fn claude_mounts(mode: &Mode) -> Result<Vec<PathBuf>, String> {
     match mode {
-        Mode::Real => claude::mounts::list(),
-        _ => Ok(Vec::new()),
+        Mode::Real | Mode::Fixture { .. } => claude::mounts::list(),
+        Mode::Refused(_) => Ok(Vec::new()),
     }
+}
+
+/// Claude Code as found now ([`claude::discovery::locate`]), resolved ([`claude::canary::resolve`]): the one path
+/// a call checks and starts.
+fn claude_program() -> Option<PathBuf> {
+    claude::canary::resolve(&claude::discovery::locate()?).ok()
+}
+
+/// The latest check result: this process's own once it has checked (it wins over the kept file even when keeping
+/// it failed), or else the kept one.
+fn claude_record(app: &AppHandle, home: &Path) -> Option<claude::canary::Record> {
+    lock(&app.state::<Session>().claude_verdict)
+        .clone()
+        .or_else(|| claude::canary::load(home))
 }
 
 /// Which Claude Code is at `exe` now. Its version is asked again only when the file changed, or when `fresh`.
@@ -550,7 +576,7 @@ fn claude_check_state(app: &AppHandle, exe: &Path, home: &Path) -> claude::canar
         return Check::Checking;
     }
     match claude_identity(app, exe, home, false) {
-        Ok(identity) => canary::state(canary::load(home).as_ref(), &identity),
+        Ok(identity) => canary::state(claude_record(app, home).as_ref(), &identity),
         Err(why) => Check::Failed {
             message: canary::unverified(&why),
         },
@@ -566,16 +592,20 @@ impl Drop for Checking<'_> {
     }
 }
 
-/// Checks Claude Code at `exe` before privacy mode off lets Claude open files (ADR 0008; [`claude::canary`]), if
-/// the check is due for it or `again` (Check again), and keeps the result. One check at a time: a call that needs one
-/// waits for the one running, then uses its result. Gives where the check is now.
+/// Checks Claude Code at `exe` (resolved: [`claude_program`]) before privacy mode off lets Claude open files (ADR
+/// 0008; [`claude::canary`]), if the check is due for it or `again` (Check again), and keeps the result. One check
+/// at a time: a call that needs one waits for the one running, then uses its result. Gives where the check is now,
+/// and which Claude Code it was about (a call it lets read starts exactly that one, if it is still the same file).
+///
+/// The result just found is this process's from then on ([`Session::claude_verdict`]), even if the file it is kept
+/// in can't be written: then that file is removed too, so a restart never trusts an older result over it.
 fn claude_verify(
     app: &AppHandle,
     exe: &Path,
     home: &Path,
     again: bool,
     cancel: &CancelToken,
-) -> claude::canary::Check {
+) -> (claude::canary::Check, Option<claude::canary::Identity>) {
     use claude::canary::{self, Check};
     let session = app.state::<Session>();
     let _one = lock(&session.claude_check);
@@ -584,103 +614,125 @@ fn claude_verify(
     };
     let identity = match claude_identity(app, exe, home, again) {
         Ok(identity) => identity,
-        Err(why) => return failed(&why),
+        Err(why) => return (failed(&why), None),
     };
     if !again {
-        let kept = canary::state(canary::load(home).as_ref(), &identity);
+        let kept = canary::state(claude_record(app, home).as_ref(), &identity);
         if kept != Check::Unchecked {
-            return kept;
+            return (kept, Some(identity));
         }
     }
     session.claude_checking.store(true, Ordering::SeqCst);
     let _running = Checking(&session.claude_checking);
+    // The check's own settings are a privacy-off call's: every mount point, read now, right before its call.
+    let mounts = match claude_mounts(&session.mode) {
+        Ok(mounts) => mounts,
+        Err(why) => return (Check::Failed { message: why }, Some(identity)),
+    };
     let scope = match &session.mode {
-        Mode::Real => match claude_mounts(&session.mode) {
-            Ok(mounts) => canary::Scope::Drive {
-                others: claude_drives(&session.mode, "")
-                    .into_iter()
-                    .map(PathBuf::from)
-                    .collect(),
-                mounts,
-            },
-            Err(why) => return Check::Failed { message: why },
+        Mode::Real => canary::Scope::Drive {
+            others: claude_drives(&session.mode, "")
+                .into_iter()
+                .map(PathBuf::from)
+                .collect(),
+            mounts,
         },
-        _ => canary::Scope::Folder,
+        _ => canary::Scope::Folder { mounts },
     };
     let check = match canary::Canary::new(&home.join(canary::FOLDER), scope) {
         Ok(check) => check,
-        Err(why) => return failed(&why),
+        Err(why) => return (failed(&why), Some(identity)),
     };
     let cli = ClaudeCode {
-        program: exe.to_path_buf(),
+        program: PathBuf::from(&identity.path),
         access: check.access().clone(),
         work: home.join("claude-work"),
     };
-    let verdict = canary::run(&cli, &check, cancel);
+    let verdict = if identity.is(exe) {
+        canary::run(&cli, &check, cancel)
+    } else {
+        canary::Verdict {
+            passed: false,
+            why: Some("Claude Code changed while Vacancy checked it.".into()),
+            refusal_seen: false,
+            keep: false,
+        }
+    };
     drop(check);
     if verdict.keep {
-        // Not kept, the check is simply due again next time.
-        let _ = canary::save(
-            home,
-            &canary::Record {
-                identity,
-                passed: verdict.passed,
-                why: verdict.why.clone(),
-            },
-        );
+        let record = canary::Record {
+            identity: identity.clone(),
+            passed: verdict.passed,
+            why: verdict.why.clone(),
+        };
+        *lock(&session.claude_verdict) = Some(record.clone());
+        if canary::save(home, &record).is_err() {
+            let _ = std::fs::remove_file(canary::path(home));
+        }
     }
-    match verdict.why {
+    let check = match verdict.why {
         None => Check::Passed,
         Some(why) => failed(&why),
-    }
+    };
+    (check, Some(identity))
 }
 
-/// Why a call with privacy mode off can't let Claude open files because of the check ([`claude_verify`], run now
-/// if due), or `None` once Claude Code passed it.
-fn claude_check_blocks(
-    app: &AppHandle,
-    exe: &Path,
-    home: &Path,
-    cancel: &CancelToken,
-) -> Option<String> {
-    match claude_verify(app, exe, home, false, cancel) {
-        claude::canary::Check::Passed => None,
-        claude::canary::Check::Failed { message } => Some(message),
-        _ => Some(claude::canary::unverified("The check hasn't finished.")),
-    }
+/// What a call with Claude on and privacy mode off may read with ([`claude_off_wanted`]): the Claude Code that
+/// passed the check, and the mount points, listed after it passed.
+struct OffNow {
+    identity: claude::canary::Identity,
+    mounts: Vec<PathBuf>,
 }
 
-/// For a call with Claude on and privacy mode off (`None` otherwise): the mount points to deny, or why Claude can't
-/// open files now after all, in words. A Claude Code or Codex folder no rule can name (or a fixture folder no rule
-/// spells), a mount list that can't be read, or a Claude Code that hasn't passed the check, which runs now if it is
-/// due ([`claude_verify`]).
+/// For a call with Claude on and privacy mode off (`None` otherwise), with Claude Code at `exe` (resolved: the one
+/// the call starts): what it may read with, or why Claude can't open files now after all, in words. A Claude Code
+/// or Codex folder no rule can name (or a fixture folder no rule spells), a Claude Code that hasn't passed the check
+/// (which runs now if it is due: [`claude_verify`]), or a mount list that can't be read, read only once the check
+/// has passed.
 fn claude_off_wanted(
     app: &AppHandle,
+    exe: &Path,
     cancel: &CancelToken,
-) -> Option<Result<Vec<PathBuf>, Closed>> {
+) -> Option<Result<OffNow, Closed>> {
     let home = claude_home(app).ok()?;
     let settings = claude::settings::load(&home);
     if !settings.enabled || settings.privacy {
         return None;
     }
-    let exe = claude::discovery::locate()?;
     let mode = &app.state::<Session>().mode;
     Some((|| {
         if let Some(why) = claude_reads_unavailable(mode) {
             return Err(Closed { why, lasting: true });
         }
-        let mounts = claude_mounts(mode).map_err(|why| Closed {
+        let transient = |why: String| Closed {
             why,
             lasting: false,
-        })?;
-        if let Some(why) = claude_check_blocks(app, &exe, &home, cancel) {
-            return Err(Closed {
-                why,
-                lasting: false,
-            });
-        }
-        Ok(mounts)
+        };
+        let identity = match claude_verify(app, exe, &home, false, cancel) {
+            (claude::canary::Check::Passed, Some(identity)) => identity,
+            (claude::canary::Check::Failed { message }, _) => return Err(transient(message)),
+            _ => {
+                return Err(transient(claude::canary::unverified(
+                    "The check hasn't finished.",
+                )));
+            }
+        };
+        let mounts = claude_mounts(mode).map_err(transient)?;
+        Ok(OffNow { identity, mounts })
     })())
+}
+
+/// Runs `body` with a cancel token registered as a request of its own, so turning Claude off stops it (a check
+/// before a chat's first question, or one asked for from the panel).
+fn claude_cancellable<T>(app: &AppHandle, what: &str, body: impl FnOnce(&CancelToken) -> T) -> T {
+    let session = app.state::<Session>();
+    let cancel = CancelToken::new();
+    let n = session.claude_next.fetch_add(1, Ordering::Relaxed) + 1;
+    let id = format!("claude-{what}-{n}");
+    lock(&session.claude).insert(id.clone(), cancel.clone());
+    let out = body(&cancel);
+    lock(&session.claude).remove(&id);
+    out
 }
 
 /// Why a call with privacy mode off can't let Claude open files now. `lasting`: it holds until something on this
@@ -703,16 +755,12 @@ async fn claude_check(again: bool, app: AppHandle) -> Result<claude::Status, Str
         let settings = claude::settings::load(&home);
         if settings.enabled
             && !settings.privacy
-            && let Some(exe) = claude::discovery::locate()
+            && let Some(exe) = claude_program()
         {
             // Turning Claude off stops it, like every request.
-            let cancel = CancelToken::new();
-            let session = app.state::<Session>();
-            let n = session.claude_next.fetch_add(1, Ordering::Relaxed) + 1;
-            let id = format!("claude-check-{n}");
-            lock(&session.claude).insert(id.clone(), cancel.clone());
-            claude_verify(&app, &exe, &home, again, &cancel);
-            lock(&session.claude).remove(&id);
+            claude_cancellable(&app, "check", |cancel| {
+                claude_verify(&app, &exe, &home, again, cancel)
+            });
         }
         claude_status_now(&app)
     })
@@ -871,10 +919,14 @@ async fn claude_chat(
     let conversation = match conversation {
         Some(id) => id,
         None => {
-            // Privacy mode off first needs Claude Code checked (now, if the check is due), and the mounts read.
+            // Privacy mode off first needs Claude Code checked (now, if the check is due; turning Claude off stops
+            // it), and then the mounts read.
             let worker = app.clone();
             let off_now = tauri::async_runtime::spawn_blocking(move || {
-                claude_off_wanted(&worker, &CancelToken::new())
+                let exe = claude_program()?;
+                claude_cancellable(&worker, "chat-check", |cancel| {
+                    claude_off_wanted(&worker, &exe, cancel)
+                })
             })
             .await
             .map_err(|e| e.to_string())?;
@@ -884,7 +936,7 @@ async fn claude_chat(
             // this scan (something mounted no rule can name, or rules that wouldn't fit in Claude Code's settings).
             let settings = claude::settings::load(&claude_home(&app)?);
             let mounts = match (&off_now, settings.privacy) {
-                (Some(Ok(mounts)), false) => Some(mounts.clone()),
+                (Some(Ok(off)), false) => Some(off.mounts.clone()),
                 _ => None,
             };
             let env = session.mode.env_for(&mount_point)?;
@@ -936,12 +988,17 @@ fn claude_job(
 ) -> Result<claude::Answer, Failure> {
     let session = app.state::<Session>();
     let home = claude_home(app).map_err(Failure::error)?;
-    let program = claude::discovery::locate().ok_or(Failure::NotFound)?;
+    // Found and resolved once: the Claude Code the check is about is the one this job starts.
+    let program = claude_program().ok_or(Failure::NotFound)?;
     let env = session.mode.env_for(mount_point).map_err(Failure::error)?;
     let drives = claude_drives(&session.mode, mount_point);
-    // Privacy mode off first needs Claude Code checked (now, if the check is due), and the mounts read, right before
-    // the call and before the job is prepared (a check can take a while).
-    let off_now = claude_off_wanted(app, cancel);
+    // Privacy mode off first needs Claude Code checked (now, if the check is due), and only then the mounts read,
+    // before the job is prepared (a check can take a while). They are read once more right before the launch.
+    let off_now = claude_off_wanted(app, &program, cancel);
+    let identity = match &off_now {
+        Some(Ok(off)) => Some(off.identity.clone()),
+        _ => None,
+    };
     let (access, unavailable, prepared) = {
         let _mode = lock(&session.claude_mode);
         let settings = claude::settings::load(&home);
@@ -952,7 +1009,7 @@ fn claude_job(
         // hasn't passed the check: it runs as if privacy mode were on.
         let (global, mounts) = match (settings.privacy, &off_now) {
             (true, _) => (None, None),
-            (false, Some(Ok(mounts))) => (None, Some(mounts)),
+            (false, Some(Ok(off))) => (None, Some(&off.mounts)),
             (false, Some(Err(closed))) => (Some(closed.clone()), None),
             // Privacy mode went off since it was read, before the check could run.
             (false, None) => (
@@ -982,6 +1039,24 @@ fn claude_job(
         let (access, too_big, prepared) = prepared?;
         let too_big = too_big.map(|why| Closed { why, lasting: true });
         (access, global.or(too_big), prepared)
+    };
+    // A call that reads: right before it starts, the Claude Code that passed the check must still be the same file,
+    // and the mounts are listed again and its settings built from that list. If either fails, nothing starts.
+    let access = if access.roots().is_some() {
+        let same = identity.as_ref().is_some_and(|i| i.is(&program));
+        if !same {
+            return Err(Failure::error(
+                "Claude Code changed since Vacancy checked it. Ask again, and Vacancy checks it first.",
+            ));
+        }
+        let fresh = claude_mounts(&session.mode).map_err(Failure::error)?;
+        let access = access.with_mounts(fresh);
+        if let Some(why) = claude::runner::access_mounts_unavailable(&access) {
+            return Err(Failure::error(why));
+        }
+        access
+    } else {
+        access
     };
     let cli = ClaudeCode {
         program,

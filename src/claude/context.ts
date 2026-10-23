@@ -227,14 +227,19 @@ export function readsFiles(status: ClaudeStatus): boolean {
   return !status.privacy && status.readsUnavailable === null && status.check.kind === 'passed';
 }
 
+/** Where the check of Claude Code is, as the privacy row shows it with privacy mode off. */
+export type CheckShown = { kind: 'checking' } | { kind: 'failed'; message: string } | { kind: 'unchecked' };
+
 /**
- * Where the check of Claude Code is, for the privacy row with privacy mode off: `checking` while it runs (or is
- * about to), `failed` with why, or null once passed (or not needed).
+ * Where the check of Claude Code is, for the privacy row with privacy mode off: `checking` while it runs, `failed`
+ * with why, `unchecked` while it is due (Claude doesn't open files until it passes), or null once passed (or not
+ * needed: privacy mode on, or Claude not on).
  */
-export function checkShown(status: ClaudeStatus, verifying: boolean): { kind: 'checking' } | { kind: 'failed'; message: string } | null {
+export function checkShown(status: ClaudeStatus, verifying: boolean): CheckShown | null {
   if (status.privacy || status.state !== 'on') return null;
   if (verifying || status.check.kind === 'checking') return { kind: 'checking' };
   if (status.check.kind === 'failed') return status.check;
+  if (status.check.kind === 'unchecked') return { kind: 'unchecked' };
   return null;
 }
 

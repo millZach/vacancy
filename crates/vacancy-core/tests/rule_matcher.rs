@@ -1189,6 +1189,20 @@ fn mount_scope_checks(style: Style, checks: &mut Checks) -> usize {
                     (r"D:\Users\alex\notes.txt", false),
                 ],
             );
+            // Fixture mode: a disk image mounted inside the fixture folder; the fixture's own volume isn't denied.
+            case(
+                r"D:\tmp\vacancy-fixture-1",
+                &[r"D:\", r"D:\tmp\vacancy-fixture-1\Users\fixture\Archive\"],
+                &[
+                    (
+                        r"D:\tmp\vacancy-fixture-1\Users\fixture\Archive\Chrome\Default\Cookies",
+                        true,
+                    ),
+                    (r"D:\tmp\vacancy-fixture-1\Users\fixture\Archive", true),
+                    (r"D:\tmp\vacancy-fixture-1\Users\fixture\Archive2\x", false),
+                    (r"D:\tmp\vacancy-fixture-1\Users\fixture\Documents\x", false),
+                ],
+            );
         }
         Style::Unix => {
             case(
@@ -1244,6 +1258,24 @@ fn mount_scope_checks(style: Style, checks: &mut Checks) -> usize {
                     ("/Volumes/USB/x", false),
                     ("/Volumes/USB/Inner2/x", false),
                     ("/Volumes/USB/Inne/x", false),
+                ],
+            );
+            // Fixture mode: a disk image mounted inside the fixture folder; the startup disk isn't denied.
+            case(
+                "/tmp/vacancy-fixture-1",
+                &[
+                    "/",
+                    "/System/Volumes/Data",
+                    "/tmp/vacancy-fixture-1/Users/fixture/Archive",
+                ],
+                &[
+                    (
+                        "/tmp/vacancy-fixture-1/Users/fixture/Archive/Library/Cookies/x",
+                        true,
+                    ),
+                    ("/tmp/vacancy-fixture-1/Users/fixture/Archive", true),
+                    ("/tmp/vacancy-fixture-1/Users/fixture/Archive2/x", false),
+                    ("/tmp/vacancy-fixture-1/Users/fixture/Documents/x", false),
                 ],
             );
         }

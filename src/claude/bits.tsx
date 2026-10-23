@@ -3,7 +3,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent
 import { createPortal } from 'react-dom';
 import type { ClaudeBasis, ClaudeDropped, ClaudeFailure, ClaudeFolderNote, ClaudeHidden, Proposal } from '../bridge';
 import { formatBytes } from '../format';
-import { checkShown, failureText, isOn, readsFiles, useClaude, type Claude, type Phase } from './context';
+import { failureText, isOn, readsFiles, useClaude, type CheckShown, type Claude, type Phase } from './context';
 import './claude.css';
 
 /** Claude's mark, in its lilac. */
@@ -95,12 +95,14 @@ export function PrivacyRow({
   fixture: boolean;
   /** Why Claude can't open files though privacy mode is off (the core's `readsUnavailable`). */
   unavailable: string | null;
-  /** The check of Claude Code with privacy mode off: running, or failed with why ([`checkShown`]). */
-  check?: ReturnType<typeof checkShown>;
+  /** The check of Claude Code with privacy mode off: running, failed with why, or due ([`checkShown`]). */
+  check?: CheckShown | null;
 }) {
   const failed = !privacy && unavailable === null && check?.kind === 'failed' ? check.message : null;
   const verifying = !privacy && unavailable === null && check?.kind === 'checking';
-  const closed = !privacy && (unavailable !== null || failed !== null);
+  // Due and not running: Claude doesn't open files until it has passed, so the row never says it can.
+  const due = !privacy && unavailable === null && check?.kind === 'unchecked';
+  const closed = !privacy && (unavailable !== null || failed !== null || due);
   return (
     <>
     <div className="cl-provider cl-privacy-row">
@@ -143,12 +145,12 @@ export function PrivacyRow({
       <p className="cl-job is-slow cl-unavailable" role="note">
         <EyeOff size={13} aria-hidden />{' '}
         <span>
-          {unavailable ?? failed}
-          {failed !== null && (
+          {unavailable ?? failed ?? 'Vacancy hasn’t checked this Claude Code yet, so Claude gets names, sizes, counts and dates only until it passes.'}
+          {(failed !== null || due) && (
             <>
               {' '}
               <button type="button" className="link-button cl-check-again" onClick={claude.verify} disabled={claude.verifying}>
-                Check again
+                {due ? 'Check now' : 'Check again'}
               </button>
             </>
           )}

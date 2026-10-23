@@ -11,15 +11,16 @@
 //!   machinery that hides a real profile ([`super::hidden::Hider`]).
 //! - **The call:** made exactly as a privacy-off call is, by the same builder ([`super::runner::invocation`]): the
 //!   settings in a file, the same flags and environment, `blockReadsOutsideWorkingDirectories`, and the folder as
-//!   what Claude may read ([`Access::Drive`] with the folder as its root, or in fixture mode [`Access::Read`]). No
-//!   `--model`. Claude is asked to Read both files and say what it read, in a strict JSON schema.
-//! - **Passed** only when the control's words came back, the canary's didn't, and Claude Code refused the canary's
-//!   read (its JSON output lists refusals; with none listed at all, the control's presence and the canary's absence
-//!   decide). Anything else (the canary read, the control missing, an error, a timeout, an answer that doesn't parse)
-//!   isn't, and privacy mode off stays unavailable: calls run as if it were on, and the panel says why, with Check
-//!   again.
-//! - **Kept** per executable ([`Identity`]: its resolved path, size, modified time and `claude --version`), in the
-//!   app's data folder ([`FILE`]). Any change to them makes the check due again ([`state`]).
+//!   what Claude may read ([`Access::Drive`] with the folder as its root, or in fixture mode [`Access::Fixture`]).
+//!   No `--model`. Claude is asked to Read both files and say what it read, in a strict JSON schema.
+//! - **Passed** only when the control's words came back, the canary's didn't, and Claude Code's JSON output records
+//!   refusing the canary's read (`permission_denials`): Claude might simply skip a read, so without that record
+//!   nothing shows the deny rule held. Anything else (the canary read, the control missing, no refusal recorded, an
+//!   error, a timeout, an answer that doesn't parse) isn't, and privacy mode off stays unavailable: calls run as if it
+//!   were on, and the panel says why, with Check again.
+//! - **Kept** per executable ([`Identity`]: its resolved path, size, modified time, a SHA-256 of its bytes and
+//!   `claude --version`), in the app's data folder ([`FILE`]). Any change to them makes the check due again
+//!   ([`state`]). The check and the call it lets read use the same resolved executable ([`resolve`]).
 //!
 //! What it proves: the settings file is honoured, and the browser-profile deny and the read scope work. What it
 //! doesn't: every rule on its own (the differential test, `tests/rule_matcher.rs`, does that against the matcher).
@@ -47,37 +48,76 @@ pub const FOLDER: &str = "claude-check";
 /// How long the check call may take.
 pub const TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Which Claude Code a check was about: the executable as it resolves, its size and modified time, and what
-/// `claude --version` said. Any change to them is another Claude Code, so the check is due again.
+/// Which Claude Code a check was about: the executable as it resolves, its size and modified time, a SHA-256 of
+/// its bytes, and what `claude --version` said. Any change to them is another Claude Code, so the check is due again.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Identity {
+    /// The executable as it resolves ([`resolve`]): the one checked, and the one started.
     pub path: String,
     pub size: u64,
     /// Nanoseconds since 1970, or none when the file system doesn't say.
     pub modified: Option<u64>,
+    /// The SHA-256 of the executable's bytes, in hex.
+    pub sha256: String,
     pub version: String,
 }
 
+/// Claude Code at `program` as it resolves: every link followed (`~/.local/bin/claude` is often a link to the
+/// version installed), and on Windows a `\\?\C:\` prefix taken off again, so that path can be started as it is. The
+/// check and the call it lets read both use exactly this path.
+pub fn resolve(program: &Path) -> io::Result<PathBuf> {
+    let resolved = std::fs::canonicalize(program)?;
+    let text = resolved.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\")
+        && rest.as_bytes().get(1) == Some(&b':')
+    {
+        return Ok(PathBuf::from(rest));
+    }
+    Ok(resolved)
+}
+
+/// The size and modified time of the file at `path`.
+fn stat(path: &Path) -> io::Result<(u64, Option<u64>)> {
+    let meta = std::fs::metadata(path)?;
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+    Ok((meta.len(), modified))
+}
+
+/// The SHA-256 of the file at `path`, in hex.
+fn sha256_of(path: &Path) -> io::Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hash = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = io::Read::read(&mut file, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buf[..n]);
+    }
+    Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
 impl Identity {
-    /// The Claude Code at `program` now. Its version is asked with `version` (`claude --version`), unless `known` is
-    /// the same file (path, size and modified time): then its version stands, so a call doesn't start Claude Code
-    /// twice. Pass no `known` to ask again. An error, in words, when it can't be read.
+    /// The Claude Code at `program` now, resolved ([`resolve`]). Its bytes are hashed and its version asked with
+    /// `version` (`claude --version`, given the resolved path), unless `known` (what this process found before) is
+    /// the same file by path, size and modified time: then its hash and version stand, so a call doesn't read a big
+    /// executable or start Claude Code again. Pass no `known` to hash and ask again (once per process, and on Check
+    /// again). An error, in words, when it can't be read.
     pub fn of(
         program: &Path,
         known: Option<&Identity>,
         version: impl FnOnce(&Path) -> Result<String, Failure>,
     ) -> Result<Self, String> {
         let read = |e: io::Error| format!("Vacancy couldn't read {}: {e}", program.display());
-        let resolved = std::fs::canonicalize(program).map_err(read)?;
-        let meta = std::fs::metadata(&resolved).map_err(read)?;
-        let modified = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+        let resolved = resolve(program).map_err(read)?;
+        let (size, modified) = stat(&resolved).map_err(read)?;
         let path = resolved.to_string_lossy().into_owned();
-        let size = meta.len();
         if let Some(k) = known
             && k.path == path
             && k.size == size
@@ -85,14 +125,30 @@ impl Identity {
         {
             return Ok(k.clone());
         }
-        let version = version(program)
+        let sha256 = sha256_of(&resolved).map_err(read)?;
+        let version = version(&resolved)
             .map_err(|f| format!("Vacancy couldn't ask Claude Code which version it is: {f}"))?;
+        // The file mustn't have changed while it was read.
+        if stat(&resolved).map_err(read)? != (size, modified) {
+            return Err(format!(
+                "Claude Code at {} changed while Vacancy read it.",
+                resolved.display()
+            ));
+        }
         Ok(Self {
             path,
             size,
             modified,
+            sha256,
             version,
         })
+    }
+
+    /// Whether `program` is still this Claude Code, by its resolved path, size and modified time: checked right
+    /// before a call this identity's check lets read.
+    pub fn is(&self, program: &Path) -> bool {
+        resolve(program).is_ok_and(|p| p.to_string_lossy() == self.path)
+            && stat(Path::new(&self.path)).is_ok_and(|s| s == (self.size, self.modified))
     }
 }
 
@@ -175,8 +231,8 @@ pub enum Scope {
         others: Vec<PathBuf>,
         mounts: Vec<PathBuf>,
     },
-    /// Fixture mode: as the fixture folder is ([`Access::Read`]).
-    Folder,
+    /// Fixture mode: as the fixture folder is ([`Access::Fixture`]), with every mount point.
+    Folder { mounts: Vec<PathBuf> },
 }
 
 /// One check: its throwaway folder (removed when it is dropped), its call, and what it may read.
@@ -298,7 +354,7 @@ impl Canary {
                 others,
                 mounts,
             }),
-            Scope::Folder => Access::Read(vec![dir]),
+            Scope::Folder { mounts } => Access::Fixture { root: dir, mounts },
         };
         Ok(canary)
     }
@@ -350,9 +406,10 @@ impl Canary {
             Some(
                 "Claude didn't return the check's readable file, so Vacancy couldn't tell whether Claude Code took its settings.",
             )
-        } else if !refusal_seen && !reply.refused.is_empty() {
+        } else if !refusal_seen {
+            // Claude may simply not have tried: only a refusal Claude Code recorded shows the deny rule held.
             Some(
-                "Claude Code refused other reads than the hidden file's, so Vacancy couldn't tell whether it took its settings.",
+                "Claude Code didn't record refusing the hidden file, so Vacancy couldn't tell whether it took its settings.",
             )
         } else {
             None

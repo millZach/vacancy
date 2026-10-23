@@ -63,9 +63,13 @@ pub const ENV_REMOVE: [&str; 1] = ["ANTHROPIC_API_KEY"];
 pub enum Access {
     /// Privacy mode on: no tools at all. Names, sizes, counts and dates come in the prompt.
     Private,
-    /// Privacy mode off in fixture mode (and the probes): Read, Glob and Grep under these folders only, except the
-    /// always-hidden places. Reads anywhere else would need a permission prompt, which nobody answers.
+    /// The probes: Read, Glob and Grep under these folders only, except the always-hidden places. Reads anywhere else
+    /// would need a permission prompt, which nobody answers.
     Read(Vec<PathBuf>),
+    /// Privacy mode off in fixture mode: Read, Glob and Grep in the fixture folder `root` only, as [`Access::Read`],
+    /// with every file system mounted inside it denied too (`mounts`, as the OS listed them right before the call;
+    /// [`mount_rules_in`]), unless it is the fixture's own volume or holds it.
+    Fixture { root: PathBuf, mounts: Vec<PathBuf> },
     /// Privacy mode off: Read, Glob and Grep on the drive that was scanned only, except the always-hidden places.
     /// Every other drive is denied too ([`off_drive_rules_in`]).
     Drive(Drive),
@@ -77,9 +81,41 @@ impl Access {
         match self {
             Access::Private => None,
             Access::Read(roots) => Some(roots.clone()),
+            Access::Fixture { root, .. } => Some(vec![root.clone()]),
             Access::Drive(drive) => Some(vec![drive.root.clone()]),
         }
     }
+
+    /// The root these mount points are denied around, and the mount points, when this access denies them.
+    fn mounts(&self) -> Option<(&Path, &[PathBuf])> {
+        match self {
+            Access::Fixture { root, mounts } => Some((root, mounts)),
+            Access::Drive(drive) => Some((&drive.root, &drive.mounts)),
+            Access::Private | Access::Read(_) => None,
+        }
+    }
+
+    /// The same access with `mounts` as the mount points, read again (right before a launch).
+    pub fn with_mounts(&self, fresh: Vec<PathBuf>) -> Access {
+        match self {
+            Access::Fixture { root, .. } => Access::Fixture {
+                root: root.clone(),
+                mounts: fresh,
+            },
+            Access::Drive(drive) => Access::Drive(Drive {
+                mounts: fresh,
+                ..drive.clone()
+            }),
+            other => other.clone(),
+        }
+    }
+}
+
+/// Why `access`'s mount points can't all be kept from Claude ([`mount_rules_in`]), in the panel's words, or `None`
+/// when they can (or it denies none). Then the call must not read.
+pub fn access_mounts_unavailable(access: &Access) -> Option<String> {
+    let (root, mounts) = access.mounts()?;
+    mount_rules_in(&root.to_string_lossy(), &texts(mounts), Style::HOST).err()
 }
 
 /// The drive a call may read: the scan's, by its mount point (`C:\`, `/`, `/Volumes/USB`), the other drives the
@@ -582,9 +618,20 @@ pub fn call_settings_in(call: &Call, access: &Access, config: &[PathBuf], file: 
 
 /// `access`'s settings with the deny rules `deny` and one for the settings file `file` added.
 fn with_rules(access: &Access, deny: &[String], config: &[PathBuf], file: &Path) -> Value {
+    let mut mounts = Vec::new();
     let mut settings = match access {
         Access::Private => private_settings_in(config),
         Access::Read(roots) => read_settings_in(roots, config),
+        Access::Fixture {
+            root,
+            mounts: listed,
+        } => {
+            // Every file system mounted inside the fixture folder, as for a drive; if one can't be named, every read
+            // is denied (the caller has already run such a call as if privacy mode were on).
+            mounts = mount_rules_in(&root.to_string_lossy(), &texts(listed), Style::HOST)
+                .unwrap_or_else(|_| DENY_ALL.map(str::to_owned).to_vec());
+            read_settings_in(std::slice::from_ref(root), config)
+        }
         Access::Drive(drive) => drive_settings_in(drive, config),
     };
     let own = cover_path_in(&file.to_string_lossy(), Style::HOST).map(|at| format!("Read(/{at})"));
@@ -593,7 +640,7 @@ fn with_rules(access: &Access, deny: &[String], config: &[PathBuf], file: &Path)
             .iter()
             .filter_map(|r| r.as_str().map(str::to_owned))
             .collect();
-        for rule in deny.iter().cloned().chain(own) {
+        for rule in mounts.into_iter().chain(deny.iter().cloned()).chain(own) {
             if have.insert(rule.clone()) {
                 list.push(Value::String(rule));
             }
@@ -695,7 +742,7 @@ pub fn invocation_in(
             "--settings".to_owned(),
             file,
         ]),
-        Access::Read(_) | Access::Drive(_) => {
+        Access::Read(_) | Access::Fixture { .. } | Access::Drive(_) => {
             args.extend([
                 "--tools".to_owned(),
                 "Read,Glob,Grep".to_owned(),
@@ -1587,6 +1634,59 @@ mod tests {
             assert!(deny.contains(&json(rule)), "{rule}");
         }
         assert!(check_settings(&settings.to_string()).is_ok());
+    }
+
+    /// Fixture mode: a file system mounted inside the fixture folder is denied too; the fixture's own volume, and one
+    /// that holds it, aren't; a mount no rule can name denies every read, and the call runs as if privacy mode were on.
+    #[test]
+    fn the_fixture_settings_deny_a_mount_nested_in_the_fixture() {
+        let (volume, root, inside, odd) = if cfg!(windows) {
+            (
+                r"D:\",
+                r"D:\tmp\vacancy-fixture-1",
+                r"D:\tmp\vacancy-fixture-1\Users\fixture\Archive\",
+                r"\\?\Volume{1b3c}\",
+            )
+        } else {
+            (
+                "/",
+                "/tmp/vacancy-fixture-1",
+                "/tmp/vacancy-fixture-1/Users/fixture/Archive",
+                "relative",
+            )
+        };
+        let mut access = Access::Fixture {
+            root: PathBuf::from(root),
+            mounts: vec![PathBuf::from(volume), PathBuf::from(inside)],
+        };
+        assert_eq!(access_mounts_unavailable(&access), None);
+        assert_eq!(access.roots(), Some(vec![PathBuf::from(root)]));
+        let inv = invocation_in(Path::new("claude"), &call(), &access, &[], &settings_file());
+        let settings = settings_of(&inv);
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        let nested = format!("Read(/{}/**)", rule_path_in(inside, Style::HOST).unwrap());
+        assert!(deny.contains(&json(&nested)), "{settings}");
+        assert!(!deny.iter().any(|r| r == DENY_ALL[0] || r == DENY_ALL[1]));
+        assert_eq!(
+            settings["permissions"]["allow"],
+            serde_json::json!([allow_rule_in(root, Style::HOST).unwrap()])
+        );
+        assert_eq!(inv.args.last().unwrap(), root);
+        assert!(check_settings(&settings.to_string()).is_ok());
+        // Fresh mounts right before a launch replace the old list.
+        access = access.with_mounts(vec![PathBuf::from(volume), PathBuf::from(odd)]);
+        assert!(access_mounts_unavailable(&access).is_some());
+        let settings = settings_of(&invocation_in(
+            Path::new("claude"),
+            &call(),
+            &access,
+            &[],
+            &settings_file(),
+        ));
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        for rule in DENY_ALL {
+            assert!(deny.contains(&json(rule)), "{rule}");
+        }
     }
 
     /// The settings check: what Vacancy writes passes; something Claude Code would drop without a word doesn't, and
