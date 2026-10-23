@@ -29,8 +29,8 @@ All of these appear in a docked Claude side panel (prototype `prototype/ai-advis
 - **On**, the default when Claude is turned on: `--tools ""`. Claude gets names, sizes, counts and dates from the scan only, never file contents.
 - **Off** (the user's choice, after a confirm, and remembered): `--tools Read,Glob,Grep`. Claude can read files anywhere on the PC. It still can't write, delete, run commands or go online. In fixture mode its reads are confined to the fixture folder.
 - **Always hidden, even with privacy mode off.** Vacancy passes Claude Code `permissions.deny` rules for Read, Glob and Grep, so Claude Code enforces them. Vacancy also never puts these places' contents in a prompt:
-  - **keys and sign-ins:** SSH and GPG keys, cloud and developer tokens (.aws, .azure, gh, npm, Docker), `.env` files, Claude Code's and Codex's own sign-in files, Windows Credentials and DPAPI Protect folders, the macOS Keychain;
-  - **browser data:** saved passwords, cookies, history and autofill in Edge, Chrome, Brave, Vivaldi, Firefox and Safari (their caches stay readable);
+  - **keys and sign-ins:** SSH and GPG keys, cloud and developer tokens (.aws, .azure, gh, npm, Docker), `.env` files, Claude Code's and Codex's own folders (`~/.claude`, `~/.claude.json`, `~/.codex`, and wherever `CLAUDE_CONFIG_DIR` and `CODEX_HOME` move them; Vacancy never reads inside them), Windows Credentials and DPAPI Protect folders, the macOS Keychain;
+  - **browser data:** saved passwords and the keys that unlock them, cookies and site sign-ins (local and session storage), history, sessions and bookmarks, and autofill and form history, in Edge, Chrome, Brave, Vivaldi, Firefox and Safari, each database with its `-journal`, `-wal` and backup siblings (their caches stay readable);
   - **password managers and wallets:** 1Password, Bitwarden, KeePass `.kdbx` files and crypto wallets.
 
   Messages and mail are not hidden; Zach chose that.

@@ -8,10 +8,15 @@
 //! - **Vacancy never writes their contents into a prompt**: [`hides`] says whether a path is one of them, or in
 //!   one, so a summary lists such a folder at most by its name and size and never what is inside.
 //!
-//! Patterns match a path's components case-insensitively, anywhere in the path: the same folder names mean the
-//! same thing in any home, the fixture's included. Matching more than is strictly needed only hides more.
+//! Most places are names: patterns match a path's components case-insensitively, anywhere in the path, so the
+//! same folder names mean the same thing in any home, the fixture's included. Matching more than is strictly needed
+//! only hides more. Claude Code's and Codex's own folders can also be moved (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`);
+//! each call inherits the app's environment, so wherever the app's environment puts them is hidden too, by path
+//! ([`config_dirs`]). Vacancy never reads what is inside them.
 
-use std::path::{Component, Path};
+use std::ffi::OsString;
+use std::path::{Component, Path, PathBuf};
+use std::sync::OnceLock;
 
 use serde::Serialize;
 use ts_rs::TS;
@@ -36,7 +41,8 @@ pub enum Group {
     Vaults,
 }
 
-/// One always-hidden place: consecutive path components (each may hold `*`), matched anywhere in a path.
+/// One always-hidden place: consecutive path components, matched anywhere in a path. Each component may hold `*`
+/// (any run of characters) and `|` between alternatives (`Cookies|Cookies-*`).
 #[derive(Clone, Copy, Debug)]
 struct Place {
     group: Group,
@@ -62,8 +68,13 @@ const fn file(group: Group, parts: &'static [&'static str]) -> Place {
 
 use Group::{Browser, Keys, Vaults};
 
+/// A Chromium browser's profile folder (Edge, Chrome, Brave, Vivaldi): `Default`, `Profile 1`, `Guest Profile`. The
+/// names that mean browser data only inside one are matched there.
+const PROFILE: &str = "Default|Profile *|* Profile";
+
 /// Both platforms' places, in one list: a Windows name never matches on a Mac by accident in a way that matters,
-/// and a fixture of either kind is covered on both.
+/// and a fixture of either kind is covered on both. A browser database's `-journal`, `-wal` and `-shm` siblings,
+/// and its backups, hold the same data, so each comes with them.
 const PLACES: &[Place] = &[
     // Keys and sign-ins.
     folder(Keys, &[".ssh"]),
@@ -72,7 +83,7 @@ const PLACES: &[Place] = &[
     folder(Keys, &[".azure"]),
     folder(Keys, &[".claude"]),
     folder(Keys, &[".codex"]),
-    file(Keys, &[".claude.json"]),
+    file(Keys, &[".claude.json|.claude.json.*"]),
     file(Keys, &[".npmrc"]),
     file(Keys, &[".docker", "config.json"]),
     file(Keys, &["gh", "hosts.yml"]),
@@ -82,25 +93,66 @@ const PLACES: &[Place] = &[
     folder(Keys, &["Microsoft", "Credentials"]),
     folder(Keys, &["Microsoft", "Protect"]),
     folder(Keys, &["Library", "Keychains"]),
-    // Browser data: Chromium browsers (Edge, Chrome, Brave, Vivaldi) keep these in each profile, Network\Cookies
-    // included; Firefox in each profile; Safari in the Library. Their caches stay readable.
-    file(Browser, &["Login Data"]),
-    file(Browser, &["Login Data-journal"]),
-    file(Browser, &["Login Data For Account"]),
-    file(Browser, &["Login Data For Account-journal"]),
-    file(Browser, &["Cookies"]),
-    file(Browser, &["Cookies-journal"]),
-    file(Browser, &["History"]),
-    file(Browser, &["History-journal"]),
-    file(Browser, &["Web Data"]),
-    file(Browser, &["Web Data-journal"]),
-    file(Browser, &["logins.json"]),
-    file(Browser, &["key4.db"]),
+    // Chromium browsers (Edge, Chrome, Brave, Vivaldi), in each profile, and Electron apps built on them: saved
+    // passwords, cookies (Network\Cookies included), history, autofill, sessions and site sign-ins. `Local State`
+    // holds the key that unlocks the saved passwords and cookies. Their caches (Cache, Code Cache, GPUCache) stay
+    // readable.
+    file(Browser, &["Login Data*"]),
+    file(Browser, &["Web Data|Web Data-*"]),
+    file(Browser, &["Account Web Data|Account Web Data-*"]),
+    file(Browser, &["Cookies|Cookies-*"]),
+    file(Browser, &["Extension Cookies|Extension Cookies-*"]),
+    file(Browser, &["Safe Browsing Cookies|Safe Browsing Cookies-*"]),
+    file(Browser, &["History|History-*"]),
+    file(Browser, &["Archived History|Archived History-*"]),
+    file(Browser, &["Media History|Media History-*"]),
+    file(Browser, &["History Provider Cache"]),
+    file(
+        Browser,
+        &["Network Action Predictor|Network Action Predictor-*"],
+    ),
+    file(Browser, &["Affiliation Database|Affiliation Database-*"]),
+    file(Browser, &["Local State|Local State-*"]),
+    file(Browser, &["Visited Links"]),
+    file(
+        Browser,
+        &["Current Session|Current Tabs|Last Session|Last Tabs"],
+    ),
+    folder(Browser, &["Local Storage"]),
+    folder(Browser, &["Session Storage"]),
+    file(Browser, &[PROFILE, "Top Sites|Top Sites-*"]),
+    file(Browser, &[PROFILE, "Shortcuts|Shortcuts-*"]),
+    file(Browser, &[PROFILE, "Favicons|Favicons-*"]),
+    file(Browser, &[PROFILE, "Bookmarks|Bookmarks.bak"]),
+    file(Browser, &[PROFILE, "DIPS|DIPS-*"]),
+    folder(Browser, &[PROFILE, "Sessions"]),
+    folder(Browser, &[PROFILE, "IndexedDB"]),
+    // Firefox, in each profile: saved passwords and the keys that unlock them (and the old stores they replaced),
+    // cookies, history and bookmarks, autofill and form history, site storage, the account it's signed in to, and
+    // the session it restores, with their backups.
+    file(Browser, &["logins*.json"]),
+    file(Browser, &["key3.db|key4.db*"]),
+    file(Browser, &["cert8.db|cert9.db*"]),
+    file(Browser, &["signons*"]),
     file(Browser, &["cookies.sqlite*"]),
     file(Browser, &["places.sqlite*"]),
+    file(Browser, &["favicons.sqlite*"]),
+    file(Browser, &["formhistory.sqlite*"]),
+    file(Browser, &["webappsstore.sqlite*"]),
+    file(Browser, &["credentialstate.sqlite*"]),
+    file(Browser, &["autofill-profiles.json*"]),
+    file(Browser, &["signedInUser.json*"]),
+    file(Browser, &["sessionstore*"]),
+    folder(Browser, &["sessionstore-backups"]),
+    folder(Browser, &["bookmarkbackups"]),
+    folder(Browser, &["Profiles", "*", "storage"]),
+    // Safari: its whole Library folder (history, form values, sessions, bookmarks), its cookies and its site data,
+    // in the Library or in Safari's container. Its caches (Library/Caches) stay readable.
     file(Browser, &["History.db*"]),
     file(Browser, &["Cookies.binarycookies"]),
     folder(Browser, &["Library", "Cookies"]),
+    folder(Browser, &["Library", "Safari"]),
+    folder(Browser, &["com.apple.Safari", "Data", "Library", "WebKit"]),
     // Password managers and wallets.
     folder(Vaults, &["1Password"]),
     folder(Vaults, &["*.com.1password"]),
@@ -112,6 +164,50 @@ const PLACES: &[Place] = &[
     folder(Vaults, &["Exodus"]),
     folder(Vaults, &["Ethereum", "keystore"]),
 ];
+
+/// The environment variables that move Claude Code's and Codex's own folders away from `~/.claude` and `~/.codex`.
+pub const CONFIG_VARS: [&str; 2] = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"];
+
+/// The folders [`CONFIG_VARS`] name in an environment read through `var`: each as set, and as the file system
+/// resolves it when that differs (a link, a short name). Only the folder's own path is resolved; nothing inside it
+/// is read.
+pub fn config_dirs_from(var: impl Fn(&str) -> Option<OsString>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for name in CONFIG_VARS {
+        let Some(value) = var(name).filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        let set = PathBuf::from(value);
+        if set.is_absolute()
+            && let Ok(real) = std::fs::canonicalize(&set)
+        {
+            let real = plain(&real);
+            if !dirs.contains(&real) && real != set {
+                dirs.push(real);
+            }
+        }
+        if !dirs.contains(&set) {
+            dirs.push(set);
+        }
+    }
+    dirs
+}
+
+/// `\\?\C:\x` as `C:\x`: what `canonicalize` gives on Windows, as a rule and a prompt spell it.
+fn plain(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => PathBuf::from(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Claude Code's and Codex's own folders where the app's environment moved them, read once. Every call inherits
+/// that environment, so these are the folders Claude Code itself uses.
+pub fn config_dirs() -> &'static [PathBuf] {
+    static DIRS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    DIRS.get_or_init(|| config_dirs_from(|name| std::env::var_os(name)))
+}
 
 /// The privacy screen's list: each group, with what it holds in words.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
@@ -138,7 +234,7 @@ pub fn list() -> Vec<Hidden> {
                 "SSH and GPG keys",
                 ".aws, .azure, gh, npm and Docker tokens",
                 ".env files",
-                "Claude Code's and Codex's own sign-in files",
+                "Claude Code's and Codex's own folders, wherever they're set (CLAUDE_CONFIG_DIR, CODEX_HOME)",
                 "Windows Credentials and DPAPI Protect folders",
                 "the macOS Keychain",
             ],
@@ -147,10 +243,10 @@ pub fn list() -> Vec<Hidden> {
             Browser,
             "Browser data",
             &[
-                "saved passwords",
-                "cookies",
-                "history",
-                "autofill",
+                "saved passwords and their keys",
+                "cookies and site sign-ins",
+                "history, sessions and bookmarks",
+                "autofill and form history",
                 "in Edge, Chrome, Brave, Vivaldi, Firefox and Safari (their caches stay readable)",
             ],
         ),
@@ -177,8 +273,31 @@ fn names(path: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Whether `name` matches the pattern `pattern`, case-insensitively; `*` stands for any run of characters.
+/// A path's components for comparing two absolute paths, lower-cased: its drive (`c:`), then its names. The root
+/// and `.` are left out; `..` is kept, so a path that climbs never matches by accident.
+fn keyed(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|c| match c {
+            Component::Prefix(p) => Some(match p.kind() {
+                std::path::Prefix::Disk(d) | std::path::Prefix::VerbatimDisk(d) => {
+                    format!("{}:", (d as char).to_ascii_lowercase())
+                }
+                _ => p.as_os_str().to_string_lossy().to_lowercase(),
+            }),
+            Component::Normal(n) => Some(n.to_string_lossy().to_lowercase()),
+            Component::ParentDir => Some("..".to_owned()),
+            Component::RootDir | Component::CurDir => None,
+        })
+        .collect()
+}
+
+/// Whether `name` matches the pattern `pattern`, case-insensitively: one of its `|` alternatives, where `*` stands
+/// for any run of characters.
 fn glob(pattern: &str, name: &str) -> bool {
+    pattern.split('|').any(|alt| glob_one(alt, name))
+}
+
+fn glob_one(pattern: &str, name: &str) -> bool {
     let p: Vec<char> = pattern.to_lowercase().chars().collect();
     let n: Vec<char> = name.to_lowercase().chars().collect();
     // Iterative wildcard match with backtracking to the last star.
@@ -206,9 +325,29 @@ fn glob(pattern: &str, name: &str) -> bool {
     i == p.len()
 }
 
-/// The group of the always-hidden place `path` is, or is in. A folder pattern hides the folder and everything in
-/// it; a file pattern hides a path that ends with it.
-pub fn hides(path: &Path) -> Option<Group> {
+/// Whether `path` is the config folder `dir`, or inside it. An absolute `dir` matches by where it is (its drive
+/// and names); a relative one (`~/.claude-work`, say) by its names anywhere, like the named places.
+fn in_config(path: &Path, dir: &Path) -> bool {
+    if dir.is_absolute() {
+        let (p, d) = (keyed(path), keyed(dir));
+        return !d.is_empty() && p.len() >= d.len() && p[..d.len()] == d[..];
+    }
+    let d: Vec<String> = names(dir)
+        .into_iter()
+        .filter(|n| n != "~")
+        .map(|n| n.to_lowercase())
+        .collect();
+    let p: Vec<String> = names(path).into_iter().map(|n| n.to_lowercase()).collect();
+    !d.is_empty() && p.windows(d.len()).any(|w| w == &d[..])
+}
+
+/// The group of the always-hidden place `path` is, or is in, with Claude Code's and Codex's own folders where
+/// `config` puts them. A folder pattern hides the folder and everything in it; a file pattern hides a path that
+/// ends with it.
+pub fn hides_in(path: &Path, config: &[PathBuf]) -> Option<Group> {
+    if config.iter().any(|dir| in_config(path, dir)) {
+        return Some(Keys);
+    }
     let names = names(path);
     PLACES.iter().find_map(|place| {
         let k = place.parts.len();
@@ -230,36 +369,90 @@ pub fn hides(path: &Path) -> Option<Group> {
     })
 }
 
+/// The group of the always-hidden place `path` is, or is in: [`hides_in`] with the app's [`config_dirs`].
+pub fn hides(path: &Path) -> Option<Group> {
+    hides_in(path, config_dirs())
+}
+
 /// Whether a single name (a loose file's, say) is an always-hidden file or folder on its own.
 pub fn hides_name(name: &str) -> bool {
     hides(Path::new(name)).is_some()
 }
 
-/// Claude Code's `permissions.deny` rules for the whole list: `Read(...)` rules, which Claude Code applies to
-/// Read, Glob and Grep alike (see the module docs), as gitignore-style patterns from the file system's root
-/// (`//**/`), so they hold on every drive and in every home.
-pub fn deny_rules() -> Vec<String> {
+/// Every spelling of a place's parts: one per choice of alternative in each part (`a|b`, `c` gives `a/c` and
+/// `b/c`).
+fn spellings(parts: &[&str]) -> Vec<String> {
+    let mut out = vec![String::new()];
+    for part in parts {
+        out = out
+            .iter()
+            .flat_map(|head| {
+                part.split('|').map(move |alt| {
+                    if head.is_empty() {
+                        alt.to_owned()
+                    } else {
+                        format!("{head}/{alt}")
+                    }
+                })
+            })
+            .collect();
+    }
+    out
+}
+
+/// Claude Code's `permissions.deny` rules for the whole list, with Claude Code's and Codex's own folders where
+/// `config` puts them: `Read(...)` rules, which Claude Code applies to Read, Glob and Grep alike (see the module
+/// docs). Named places are gitignore-style patterns from the file system's root (`//**/`), so they hold on every
+/// drive and in every home; a moved folder is its own path from the root (`//c/Users/alex/.claude-work`).
+pub fn deny_rules_in(config: &[PathBuf]) -> Vec<String> {
     let mut rules = Vec::new();
+    let mut push = |rule: String| {
+        if !rules.contains(&rule) {
+            rules.push(rule);
+        }
+    };
     for place in PLACES {
-        let joined = place.parts.join("/");
-        match place.kind {
-            Kind::Folder => {
-                rules.push(format!("Read(//**/{joined})"));
-                rules.push(format!("Read(//**/{joined}/**)"));
+        for joined in spellings(place.parts) {
+            match place.kind {
+                Kind::Folder => {
+                    push(format!("Read(//**/{joined})"));
+                    push(format!("Read(//**/{joined}/**)"));
+                }
+                Kind::File => push(format!("Read(//**/{joined})")),
             }
-            Kind::File => rules.push(format!("Read(//**/{joined})")),
         }
     }
+    for dir in config {
+        let at = if dir.is_absolute() {
+            format!("/{}", super::runner::rule_path(dir))
+        } else {
+            let rest: Vec<String> = names(dir).into_iter().filter(|n| n != "~").collect();
+            if rest.is_empty() {
+                continue;
+            }
+            format!("//**/{}", rest.join("/"))
+        };
+        push(format!("Read({at})"));
+        push(format!("Read({at}/**)"));
+    }
     rules
+}
+
+/// [`deny_rules_in`] with the app's [`config_dirs`].
+pub fn deny_rules() -> Vec<String> {
+    deny_rules_in(config_dirs())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn p(s: &str) -> PathBuf {
         s.split('/').collect()
+    }
+
+    fn hidden(s: &str) -> bool {
+        hides_in(&p(s), &[]).is_some()
     }
 
     #[test]
@@ -270,6 +463,7 @@ mod tests {
             "Users/alex/.SSH/ID_RSA",
             "Users/alex/.aws/credentials",
             "Users/alex/.claude.json",
+            "Users/alex/.claude.json.backup",
             "Users/alex/.claude/.credentials.json",
             "Users/alex/.codex/auth.json",
             "Users/alex/project/.env",
@@ -281,16 +475,6 @@ mod tests {
             "Users/alex/AppData/Roaming/Microsoft/Protect/S-1-5/key",
             "Users/alex/AppData/Local/Microsoft/Credentials/X",
             "Users/alex/Library/Keychains/login.keychain-db",
-            "Users/alex/AppData/Local/Microsoft/Edge/User Data/Default/Login Data",
-            "Users/alex/AppData/Local/Google/Chrome/User Data/Default/Network/Cookies",
-            "Users/alex/AppData/Local/BraveSoftware/Brave-Browser/User Data/Default/History",
-            "Users/alex/AppData/Local/Vivaldi/User Data/Default/Web Data",
-            "Users/alex/AppData/Roaming/Mozilla/Firefox/Profiles/x.default/logins.json",
-            "Users/alex/AppData/Roaming/Mozilla/Firefox/Profiles/x.default/key4.db",
-            "Users/alex/AppData/Roaming/Mozilla/Firefox/Profiles/x.default/cookies.sqlite-wal",
-            "Users/alex/AppData/Roaming/Mozilla/Firefox/Profiles/x.default/places.sqlite",
-            "Users/alex/Library/Safari/History.db",
-            "Users/alex/Library/Cookies/Cookies.binarycookies",
             "Users/alex/AppData/Local/1Password/data/1password.sqlite",
             "Users/alex/Library/Group Containers/2BUA8C4S2C.com.1password/x",
             "Users/alex/AppData/Roaming/Bitwarden/data.json",
@@ -299,53 +483,289 @@ mod tests {
             "Users/alex/AppData/Roaming/Exodus/exodus.wallet",
             "Users/alex/AppData/Roaming/Ethereum/keystore/UTC--2020",
         ] {
-            assert!(hides(&p(hidden)).is_some(), "{hidden} must stay hidden");
-        }
-        for visible in [
-            "Users/alex",
-            "Users/alex/AppData/Local/Microsoft/Edge/User Data/Default/Cache/Cache_Data/f_0001",
-            "Users/alex/AppData/Local/Google/Chrome/User Data/Default/Code Cache",
-            "Users/alex/Documents/History of Rome.pdf",
-            "Users/alex/Documents/environment.txt",
-            "Users/alex/project/.envrc.example.md/x",
-            "Users/alex/AppData/Local/Microsoft/Windows/INetCache",
-            "Users/alex/Downloads/ssh-notes.txt",
-        ] {
-            assert!(hides(&p(visible)).is_none(), "{visible} stays readable");
+            assert!(
+                hides_in(&p(hidden), &[]).is_some(),
+                "{hidden} must stay hidden"
+            );
         }
         assert!(hides_name("vault.kdbx"));
         assert!(hides_name(".env"));
         assert!(!hides_name("invoice.pdf"));
     }
 
+    /// Every Chromium browser's profile, on Windows and macOS: saved passwords, cookies, history, autofill, sessions
+    /// and site sign-ins, each with its `-journal` and `-wal` siblings, and the key in `Local State`.
     #[test]
-    fn deny_rules_cover_every_place_from_the_root() {
-        let rules = deny_rules();
-        assert!(rules.contains(&"Read(//**/.ssh/**)".to_owned()));
-        assert!(rules.contains(&"Read(//**/.ssh)".to_owned()));
-        assert!(rules.contains(&"Read(//**/Login Data)".to_owned()));
-        assert!(rules.contains(&"Read(//**/Microsoft/Protect/**)".to_owned()));
-        assert!(rules.contains(&"Read(//**/*.kdbx)".to_owned()));
-        assert!(
-            rules
-                .iter()
-                .all(|r| r.starts_with("Read(//**/") && r.ends_with(')'))
-        );
-        assert_eq!(
-            rules.len(),
-            PLACES
-                .iter()
-                .map(|p| if p.kind == Kind::Folder { 2 } else { 1 })
-                .sum::<usize>()
-        );
+    fn hides_chromium_browser_data_with_its_journal_and_wal_siblings() {
+        let profiles = [
+            "Users/alex/AppData/Local/Microsoft/Edge/User Data/Default",
+            "Users/alex/AppData/Local/Google/Chrome/User Data/Profile 3",
+            "Users/alex/AppData/Local/BraveSoftware/Brave-Browser/User Data/Guest Profile",
+            "Users/alex/AppData/Local/Vivaldi/User Data/Default",
+            "Users/alex/Library/Application Support/Google/Chrome/Default",
+            "Users/alex/Library/Application Support/Microsoft Edge/Profile 1",
+            "Users/alex/Library/Application Support/BraveSoftware/Brave-Browser/Default",
+        ];
+        let files = [
+            "Login Data",
+            "Login Data-journal",
+            "Login Data-wal",
+            "Login Data For Account",
+            "Login Data For Account-journal",
+            "Web Data",
+            "Web Data-journal",
+            "Web Data-wal",
+            "Account Web Data",
+            "Cookies",
+            "Cookies-journal",
+            "Network/Cookies",
+            "Network/Cookies-journal",
+            "Extension Cookies",
+            "History",
+            "History-journal",
+            "History-wal",
+            "Archived History",
+            "Media History-journal",
+            "Network Action Predictor",
+            "Top Sites",
+            "Top Sites-journal",
+            "Shortcuts",
+            "Shortcuts-journal",
+            "Favicons",
+            "Favicons-journal",
+            "Bookmarks",
+            "Bookmarks.bak",
+            "Visited Links",
+            "Current Session",
+            "Last Tabs",
+            "Sessions/Session_13360000000000000",
+            "Local Storage/leveldb/000003.log",
+            "Session Storage/MANIFEST-000001",
+            "IndexedDB/https_mail.example.com_0.indexeddb.leveldb/000003.log",
+            "Affiliation Database",
+            "DIPS-wal",
+        ];
+        for profile in profiles {
+            for f in files {
+                let path = format!("{profile}/{f}");
+                assert!(hidden(&path), "{path} must stay hidden");
+            }
+        }
+        assert!(hidden(
+            "Users/alex/AppData/Local/Google/Chrome/User Data/Local State"
+        ));
+        assert!(hidden(
+            "Users/alex/Library/Application Support/Google/Chrome/Local State"
+        ));
+        // Electron apps keep their sign-ins the same way.
+        assert!(hidden(
+            "Users/alex/AppData/Roaming/discord/Local Storage/leveldb/000005.ldb"
+        ));
+        assert!(hidden("Users/alex/AppData/Roaming/Slack/Cookies"));
+    }
+
+    /// Firefox, on Windows and macOS: logins and their backup, the keys, form history and autofill, cookies, history,
+    /// site storage, the signed-in account and the session store, with their siblings.
+    #[test]
+    fn hides_firefox_credential_autofill_history_and_backup_stores() {
+        let profiles = [
+            "Users/alex/AppData/Roaming/Mozilla/Firefox/Profiles/x1y2z3.default-release",
+            "Users/alex/Library/Application Support/Firefox/Profiles/abc.default",
+        ];
+        for profile in profiles {
+            for f in [
+                "logins.json",
+                "logins-backup.json",
+                "key3.db",
+                "key4.db",
+                "key4.db-journal",
+                "cert9.db",
+                "signons.sqlite",
+                "signons3.txt",
+                "cookies.sqlite",
+                "cookies.sqlite-wal",
+                "cookies.sqlite-shm",
+                "places.sqlite",
+                "places.sqlite-wal",
+                "favicons.sqlite",
+                "formhistory.sqlite",
+                "formhistory.sqlite-wal",
+                "autofill-profiles.json",
+                "webappsstore.sqlite",
+                "credentialstate.sqlite",
+                "signedInUser.json",
+                "sessionstore.jsonlz4",
+                "sessionstore-backups/recovery.jsonlz4",
+                "sessionstore-backups/previous.jsonlz4",
+                "bookmarkbackups/bookmarks-2026-10-22.jsonlz4",
+                "storage/default/https+++mail.example.com/ls/data.sqlite",
+            ] {
+                let path = format!("{profile}/{f}");
+                assert!(hidden(&path), "{path} must stay hidden");
+            }
+        }
     }
 
     #[test]
-    fn glob_matches_stars() {
+    fn hides_safari_history_cookies_form_values_and_site_data() {
+        for path in [
+            "Users/alex/Library/Safari/History.db",
+            "Users/alex/Library/Safari/History.db-wal",
+            "Users/alex/Library/Safari/Form Values",
+            "Users/alex/Library/Safari/LastSession.plist",
+            "Users/alex/Library/Safari/Bookmarks.plist",
+            "Users/alex/Library/Cookies/Cookies.binarycookies",
+            "Users/alex/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies",
+            "Users/alex/Library/Containers/com.apple.Safari/Data/Library/Safari/History.db",
+            "Users/alex/Library/Containers/com.apple.Safari/Data/Library/WebKit/WebsiteData/LocalStorage/x",
+        ] {
+            assert!(hidden(path), "{path} must stay hidden");
+        }
+    }
+
+    #[test]
+    fn caches_and_ordinary_files_stay_readable() {
+        for visible in [
+            "Users/alex",
+            "Users/alex/AppData/Local/Microsoft/Edge/User Data/Default/Cache/Cache_Data/f_0001",
+            "Users/alex/AppData/Local/Google/Chrome/User Data/Default/Code Cache",
+            "Users/alex/AppData/Local/Google/Chrome/User Data/Default/GPUCache/data_0",
+            "Users/alex/AppData/Local/Mozilla/Firefox/Profiles/x.default-release/cache2/entries/ABC",
+            "Users/alex/Library/Caches/com.apple.Safari/Cache.db",
+            "Users/alex/Library/Caches/Google/Chrome/Default/Cache/Cache_Data/f_0001",
+            "Users/alex/Documents/History of Rome.pdf",
+            "Users/alex/Documents/Sessions/notes.txt",
+            "Users/alex/Documents/Shortcuts/notes.txt",
+            "Users/alex/Documents/storage/boxes.xlsx",
+            "Users/alex/Documents/environment.txt",
+            "Users/alex/project/.envrc.example.md/x",
+            "Users/alex/AppData/Local/Microsoft/Windows/INetCache",
+            "Users/alex/Downloads/ssh-notes.txt",
+        ] {
+            assert!(!hidden(visible), "{visible} stays readable");
+        }
+    }
+
+    #[test]
+    fn moved_config_folders_are_hidden_where_they_are_without_being_read() {
+        let (claude, codex) = if cfg!(windows) {
+            (r"D:\Work\claude-config", r"E:\tools\codex home")
+        } else {
+            ("/Volumes/Work/claude-config", "/opt/codex home")
+        };
+        let lookup = |name: &str| match name {
+            "CLAUDE_CONFIG_DIR" => Some(OsString::from(claude)),
+            "CODEX_HOME" => Some(OsString::from(codex)),
+            _ => None,
+        };
+        let config = config_dirs_from(lookup);
+        assert!(config.contains(&PathBuf::from(claude)) && config.contains(&PathBuf::from(codex)));
+        let inside = |dir: &str, rest: &str| PathBuf::from(dir).join(rest);
+        assert_eq!(
+            hides_in(&inside(claude, ".credentials.json"), &config),
+            Some(Keys)
+        );
+        assert_eq!(
+            hides_in(&inside(claude, ".claude.json"), &config),
+            Some(Keys)
+        );
+        assert_eq!(hides_in(&inside(codex, "auth.json"), &config), Some(Keys));
+        assert_eq!(hides_in(&PathBuf::from(claude), &config), Some(Keys));
+        if cfg!(windows) {
+            // Windows paths match case-insensitively, as Claude Code's rules do.
+            assert!(hides_in(Path::new(r"d:\WORK\Claude-Config\x"), &config).is_some());
+        }
+        // A sibling with a longer name, and the folder above, stay readable.
+        assert!(hides_in(&PathBuf::from(format!("{claude}-old")).join("x"), &config).is_none());
+        assert!(hides_in(PathBuf::from(claude).parent().unwrap(), &config).is_none());
+        let rules = deny_rules_in(&config);
+        let at = |dir: &str| format!("/{}", super::super::runner::rule_path(Path::new(dir)));
+        for dir in [claude, codex] {
+            assert!(rules.contains(&format!("Read({})", at(dir))), "{rules:?}");
+            assert!(
+                rules.contains(&format!("Read({}/**)", at(dir))),
+                "{rules:?}"
+            );
+        }
+        if cfg!(windows) {
+            assert!(rules.contains(&"Read(//d/Work/claude-config/**)".to_owned()));
+        } else {
+            assert!(rules.contains(&"Read(//Volumes/Work/claude-config/**)".to_owned()));
+        }
+        // A relative one is hidden by its names, anywhere.
+        let relative =
+            config_dirs_from(|name| (name == "CODEX_HOME").then(|| "~/.codex-work".into()));
+        assert!(hides_in(&p("Users/alex/.codex-work/auth.json"), &relative).is_some());
+        assert!(deny_rules_in(&relative).contains(&"Read(//**/.codex-work/**)".to_owned()));
+        // Unset or empty: only the defaults (.claude, .claude.json, .codex), by name.
+        assert!(config_dirs_from(|_| Some(OsString::new())).is_empty());
+        assert!(config_dirs_from(|_| None).is_empty());
+    }
+
+    #[test]
+    fn deny_rules_cover_every_place_from_the_root() {
+        let rules = deny_rules_in(&[]);
+        for rule in [
+            "Read(//**/.ssh/**)",
+            "Read(//**/.ssh)",
+            "Read(//**/Login Data*)",
+            "Read(//**/Cookies-*)",
+            "Read(//**/Microsoft/Protect/**)",
+            "Read(//**/*.kdbx)",
+            "Read(//**/logins*.json)",
+            "Read(//**/formhistory.sqlite*)",
+            "Read(//**/autofill-profiles.json*)",
+            "Read(//**/key4.db*)",
+            "Read(//**/Local State)",
+            "Read(//**/Default/Sessions/**)",
+            "Read(//**/Profile */Sessions/**)",
+            "Read(//**/* Profile/Shortcuts-*)",
+            "Read(//**/Profiles/*/storage/**)",
+            "Read(//**/Library/Safari/**)",
+        ] {
+            assert!(rules.contains(&rule.to_owned()), "{rule}");
+        }
+        assert!(
+            rules
+                .iter()
+                .all(|r| r.starts_with("Read(//**/") && r.ends_with(')') && !r.contains('|'))
+        );
+        let expected: usize = PLACES
+            .iter()
+            .map(|p| {
+                let n = spellings(p.parts).len();
+                if p.kind == Kind::Folder { 2 * n } else { n }
+            })
+            .sum();
+        assert_eq!(rules.len(), expected, "no rule twice");
+    }
+
+    /// Each hidden file pattern, spelled as a real path, is hidden by the prompt filter and named by a deny rule;
+    /// so the two halves of the list can't drift apart.
+    #[test]
+    fn the_prompt_filter_and_the_deny_rules_come_from_one_list() {
+        let rules = deny_rules_in(&[]);
+        for place in PLACES {
+            for joined in spellings(place.parts) {
+                let real = joined.replace('*', "x");
+                assert!(
+                    hidden(&format!("Users/alex/{real}")),
+                    "{joined} as a path is hidden"
+                );
+                assert!(rules.contains(&format!("Read(//**/{joined})")));
+            }
+        }
+    }
+
+    #[test]
+    fn glob_matches_stars_and_alternatives() {
         assert!(glob("*.kdbx", "a.KDBX"));
         assert!(glob(".env.*", ".env.production"));
         assert!(!glob(".env.*", ".env"));
         assert!(glob("cookies.sqlite*", "cookies.sqlite"));
         assert!(!glob("History", "History.db"));
+        assert!(glob("History|History-*", "History-journal"));
+        assert!(!glob("History|History-*", "History of Rome.pdf"));
+        assert_eq!(spellings(&["a|b", "c"]), ["a/c", "b/c"]);
     }
 }

@@ -59,7 +59,7 @@ export const HIDDEN: ClaudeHidden[] = [
       'SSH and GPG keys',
       '.aws, .azure, gh, npm and Docker tokens',
       '.env files',
-      "Claude Code's and Codex's own sign-in files",
+      "Claude Code's and Codex's own folders, wherever they're set (CLAUDE_CONFIG_DIR, CODEX_HOME)",
       'Windows Credentials and DPAPI Protect folders',
       'the macOS Keychain',
     ],
@@ -67,7 +67,13 @@ export const HIDDEN: ClaudeHidden[] = [
   {
     group: 'browser',
     title: 'Browser data',
-    items: ['saved passwords', 'cookies', 'history', 'autofill', 'in Edge, Chrome, Brave, Vivaldi, Firefox and Safari (their caches stay readable)'],
+    items: [
+      'saved passwords and their keys',
+      'cookies and site sign-ins',
+      'history, sessions and bookmarks',
+      'autofill and form history',
+      'in Edge, Chrome, Brave, Vivaldi, Firefox and Safari (their caches stay readable)',
+    ],
   },
   {
     group: 'vaults',
