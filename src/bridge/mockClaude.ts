@@ -4,7 +4,8 @@
 // and `checkerror`: Claude is on, but asking Claude Code whether it's signed in timed out, or failed) and privacy mode with
 // `&privacy=on|off` (`&reads=unavailable`: privacy mode off can't let Claude open files, so calls run as if it were
 // on, saying why; `&reads=toobig`: the same for this scan only, because its rules are too many for Claude Code's
-// settings, which the panel learns from the first answer); `&claudeMs=` sets how long an answer takes (default 900 ms; `slow` takes 8 s, saying it's
+// settings, which the panel learns from the first answer); `&canary=ok|slow|fail` makes the check of Claude Code
+// before privacy mode off lets Claude read due (it passes, passes after 6 s, or fails; unset, it passed before); `&claudeMs=` sets how long an answer takes (default 900 ms; `slow` takes 8 s, saying it's
 // slow after 1.5 s). The answers follow the approved prototype's (prototype/ai-advisor, variant B).
 import type {
   ClaudeAbout,
@@ -60,6 +61,12 @@ export interface MockClaudeOptions {
    * status says nothing and each answer says why.
    */
   reads?: 'unavailable' | 'toobig';
+  /**
+   * The check of this Claude Code before privacy mode off lets Claude open files. Unset: it passed before. `ok`:
+   * due, and passes (1.2 s); `slow`: due, and passes after 6 s; `fail`: due, and fails, so calls run as if privacy
+   * mode were on and the privacy row offers Check again (which fails again).
+   */
+  canary?: 'ok' | 'slow' | 'fail';
 }
 
 /** One chat, as the core keeps it: what it's about, the privacy mode it began in, its turns, and whether it ended. */
@@ -127,6 +134,12 @@ const BASIS_ON = 'From names, sizes and dates only. Claude didn’t open any fil
 /** What the core says when no rule can keep a moved Claude Code folder hidden (`runner::reads_unavailable_in`). */
 export const READS_UNAVAILABLE =
   'Claude can’t open files for now: Vacancy can’t name the folder \\\\nas\\home\\claude in a rule that keeps it hidden from Claude, so Claude gets names, sizes, counts and dates only.';
+/** What the core says when this Claude Code didn't pass the check before privacy mode off (`canary::unverified`). */
+export const CHECK_UNVERIFIED =
+  'Claude can’t open files for now: Vacancy couldn’t verify this version of Claude Code keeps files hidden. Claude didn’t return the check’s readable file, so Vacancy couldn’t tell whether Claude Code took its settings. Claude gets names, sizes, counts and dates only.';
+/** What the core says when a call comes before the check has run. */
+export const CHECK_DUE =
+  'Claude can’t open files for now: Vacancy couldn’t verify this version of Claude Code keeps files hidden. The check hasn’t run yet. Claude gets names, sizes, counts and dates only.';
 /** What the core says when a scan's rules would be too big for Claude Code's settings (`runner::settings_too_big`). */
 export const READS_TOO_BIG =
   'Claude can’t open files on this scan: the rules that keep this drive’s browser profiles and other hidden places from Claude would be 2148 KB, more than Claude Code takes (1536 KB), so Claude gets names, sizes, counts and dates only.';
@@ -367,8 +380,22 @@ export function createMockClaude(
   const unavailable = options.reads === 'unavailable' ? READS_UNAVAILABLE : null;
   /** As the core, when the scan's rules wouldn't fit in Claude Code's settings (`&reads=toobig`): why, per answer. */
   const tooBig = options.reads === 'toobig' ? READS_TOO_BIG : null;
+  /**
+   * The check of this Claude Code before privacy mode off lets Claude open files (`&canary=`): unset, it passed
+   * before (as kept from an earlier run); `ok`, `slow` and `fail` start due, and the check passes, passes after six
+   * seconds, or fails. A call with privacy mode off while it is due checks first, as the core does.
+   */
+  let checked: 'unchecked' | 'passed' | 'failed' = options.canary ? 'unchecked' : 'passed';
+  let checking = false;
+  let pending: Promise<ClaudeStatus> | null = null;
+  /** A call with privacy mode off while the check is due checks first, as the core's does. */
+  const due = () => {
+    if (enabled && !setting && checked === 'unchecked' && !checking) checked = options.canary === 'fail' ? 'failed' : 'passed';
+  };
+  /** Why Claude can't open files because of the check, or null once it passed. */
+  const checkWhy = () => (checked === 'passed' ? null : checked === 'failed' ? CHECK_UNVERIFIED : CHECK_DUE);
   /** Privacy mode for a call: on, or off with reads unavailable, when the core runs it as if it were on. */
-  const calls = () => setting || unavailable !== null || tooBig !== null;
+  const calls = () => setting || unavailable !== null || tooBig !== null || checkWhy() !== null;
   const canned = platform === 'windows' ? windows() : macos();
   const requests = new Map<string, { timers: number[]; finish: (failure: ClaudeFailure) => void }>();
   let next = 0;
@@ -392,12 +419,25 @@ export function createMockClaude(
     fixture: false,
     readsUnavailable: unavailable,
     hidden: structuredClone(HIDDEN),
+    check:
+      !enabled || setting || state === 'notfound' || state === 'signedout' || state === 'checktimeout' || state === 'checkerror'
+        ? { kind: 'unchecked' }
+        : checking
+          ? { kind: 'checking' }
+          : checked === 'passed'
+            ? { kind: 'passed' }
+            : checked === 'failed'
+              ? { kind: 'failed', message: CHECK_UNVERIFIED }
+              : { kind: 'unchecked' },
   });
 
   const basis = (opened: string[]): ClaudeBasis => {
-    const why = setting ? null : (unavailable ?? tooBig);
+    // As the core: the check's reason goes in the answer's text only (the status says it while it lasts); a
+    // lasting one (no rule for a folder, or this scan's rules too many) in its basis for the privacy row too.
+    const why = setting ? null : (unavailable ?? checkWhy() ?? tooBig);
+    const lasting = setting ? null : (unavailable ?? (checkWhy() === null ? tooBig : null));
     return calls()
-      ? { privacy: true, text: why ?? BASIS_ON, opened: [], refused: [], unavailable: why }
+      ? { privacy: true, text: why ?? BASIS_ON, opened: [], refused: [], unavailable: lasting }
       : {
           privacy: false,
           text:
@@ -590,6 +630,7 @@ export function createMockClaude(
       if (state === 'timeout') return finish({ kind: 'timedOut' });
       if (state === 'error')
         return finish({ kind: 'error', message: 'API Error: 429 rate_limit_error: This request would exceed your account’s rate limit. Please try again later.' });
+      due();
       const scan = scanOf(mountPoint, scanId);
       if (!scan) return finish({ kind: 'error', message: SCAN_GONE });
       const result = answer(scan, job);
@@ -619,6 +660,22 @@ export function createMockClaude(
       endChats();
       return Promise.resolve(status());
     },
+    /** As the core's `claude_check`: checks this Claude Code when the check is due, or always with `again`. */
+    check: (again: boolean): Promise<ClaudeStatus> => {
+      if (!enabled || setting || state === 'notfound' || (!again && checked !== 'unchecked') || checking)
+        return checking ? (pending ?? Promise.resolve(status())) : Promise.resolve(status());
+      checking = true;
+      const ms = options.canary === 'slow' ? 6000 : 1200;
+      pending = new Promise<ClaudeStatus>((resolve) =>
+        window.setTimeout(() => {
+          checking = false;
+          pending = null;
+          checked = options.canary === 'fail' ? 'failed' : 'passed';
+          resolve(status());
+        }, ms),
+      );
+      return pending;
+    },
     start,
     chat: (
       mountPoint: string,
@@ -632,6 +689,7 @@ export function createMockClaude(
       if (id === null) {
         const scan = scanOf(mountPoint, scanId);
         if (!scan) return Promise.reject(new Error(SCAN_GONE));
+        due();
         id = `chat-${++chats}`;
         scan.chats.set(id, { about, privacy: calls(), turns: [], ended: false });
       }

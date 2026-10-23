@@ -35,10 +35,12 @@ use crate::rules::{Proposal, ProposalSource, Risk};
 use crate::tidy::TidyProposal;
 
 pub mod browsers;
+pub mod canary;
 pub mod discovery;
 mod fake;
 pub mod hidden;
 mod jobs;
+pub mod mounts;
 pub mod runner;
 pub mod settings;
 
@@ -85,6 +87,9 @@ pub struct Status {
     /// Why privacy mode off can't let Claude open files here, in words ([`runner::reads_unavailable_in`]): then
     /// every call runs as if privacy mode were on, and the panel says so. `None` when it can.
     pub reads_unavailable: Option<String>,
+    /// Whether this Claude Code passed the check privacy mode off needs before Claude opens files ([`canary`]):
+    /// until it has, every call runs as if privacy mode were on. Asked only with Claude on and privacy mode off.
+    pub check: canary::Check,
 }
 
 impl Status {
@@ -131,6 +136,7 @@ impl Status {
             hidden: hidden::list(),
             message,
             reads_unavailable: None,
+            check: canary::Check::Unchecked,
         }
     }
 }
@@ -537,8 +543,10 @@ pub enum Event {
 
 /// What Claude may read for a call with privacy mode off about the scan of the drive at `mount_point`: that drive
 /// only, or in fixture mode the fixture folder only. `drives` are the mount points the drive list offers: the
-/// others are denied by name too ([`runner::off_drive_rules_in`]).
-pub fn access(env: &Env, mount_point: &str, drives: &[String]) -> Access {
+/// others are denied by name too ([`runner::off_drive_rules_in`]). `mounts` are every place a file system is mounted
+/// now ([`mounts::list`], read right before the call): each is denied unless it is the drive or holds it
+/// ([`runner::mount_rules_in`]).
+pub fn access(env: &Env, mount_point: &str, drives: &[String], mounts: &[PathBuf]) -> Access {
     match &env.confined_to {
         Some(root) => Access::Read(vec![root.clone()]),
         None => Access::Drive(runner::Drive {
@@ -548,13 +556,14 @@ pub fn access(env: &Env, mount_point: &str, drives: &[String]) -> Access {
                 .filter(|d| d.as_str() != mount_point)
                 .map(PathBuf::from)
                 .collect(),
+            mounts: mounts.to_vec(),
         }),
     }
 }
 
 /// What a call about `scanned` may read: `wanted` (from [`access`], with privacy mode off; `None` with it on), unless
-/// this scan's rules wouldn't fit in the settings Claude Code takes ([`too_big_on`]). Then nothing, as with privacy
-/// mode on, with why for the answer and the panel. Rules are never left out to make them fit.
+/// Claude can't be kept where it may read on this scan ([`closed_on`]). Then nothing, as with privacy mode on, with
+/// why for the answer and the panel. Rules are never left out to make them fit.
 pub fn access_on(
     scanned: &ScannedVolume,
     env: &Env,
@@ -562,11 +571,22 @@ pub fn access_on(
 ) -> (Access, Option<String>) {
     match wanted {
         None => (Access::Private, None),
-        Some(access) => match too_big_on(scanned, env, &access) {
+        Some(access) => match closed_on(scanned, env, &access) {
             Some(why) => (Access::Private, Some(why)),
             None => (access, None),
         },
     }
+}
+
+/// Why privacy mode off can't let Claude open files on `scanned` with `access`: something is mounted where no rule
+/// can name it ([`runner::mounts_unavailable`]), or this scan's rules wouldn't fit in the settings Claude Code takes
+/// ([`too_big_on`]). `None` when neither, or for [`Access::Private`].
+pub fn closed_on(scanned: &ScannedVolume, env: &Env, access: &Access) -> Option<String> {
+    match access {
+        Access::Drive(drive) => runner::mounts_unavailable(drive),
+        _ => None,
+    }
+    .or_else(|| too_big_on(scanned, env, access))
 }
 
 /// Why privacy mode off can't let Claude open files on `scanned`: the rules that keep its browser profiles and the

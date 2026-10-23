@@ -10,7 +10,7 @@ import {
   type FixtureName,
   type MockOptions,
 } from '.';
-import { SCAN_GONE } from './mockClaude';
+import { CHECK_UNVERIFIED, SCAN_GONE } from './mockClaude';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -74,6 +74,45 @@ describe('the mock bridge’s Claude', () => {
     // Turning Claude off keeps the privacy choice.
     const off = await bridge.claudeSetEnabled(false);
     expect(off).toMatchObject({ state: 'off', privacy: false });
+  });
+
+  it('checks Claude Code before privacy mode off lets Claude read, as the core does (`&canary=`)', async () => {
+    // Unset: it passed before; set in the address, it is due.
+    const passed = createMockBridge(fixtures.windows, { claude: 'on', privacy: 'off', claudeMs: 0 });
+    expect((await passed.claudeStatus()).check).toEqual({ kind: 'passed' });
+    for (const canary of ['ok', 'slow', 'fail'])
+      expect((await defaultBridge(`?claude=on&privacy=off&canary=${canary}`).claudeStatus()).check).toEqual({ kind: 'unchecked' });
+    // Due, then it runs: checking, then passed, and kept (no second check unless again).
+    const { bridge, mountPoint, scan } = await scanned('windows', { claude: 'on', privacy: 'off', canary: 'ok', claudeMs: 0 });
+    expect((await bridge.claudeStatus()).check).toEqual({ kind: 'unchecked' });
+    const running = bridge.claudeCheck(false);
+    expect((await bridge.claudeStatus()).check).toEqual({ kind: 'checking' });
+    await vi.advanceTimersByTimeAsync(1300);
+    expect((await running).check).toEqual({ kind: 'passed' });
+    const review = done(await play(bridge, mountPoint, scan, { job: 'reviewPlan', ids: ['w-node'] }));
+    expect(review.basis.privacy).toBe(false);
+    // Privacy mode on: no check is asked about.
+    expect((await bridge.claudeSetPrivacy(true)).check).toEqual({ kind: 'unchecked' });
+    expect((await bridge.claudeCheck(false)).check).toEqual({ kind: 'unchecked' });
+
+    // Failed: every call runs as if privacy mode were on, its text says why, its basis keeps nothing for the row.
+    const failing = await scanned('windows', { claude: 'on', privacy: 'off', canary: 'fail', claudeMs: 0 });
+    const failed = failing.bridge.claudeCheck(false);
+    await vi.advanceTimersByTimeAsync(1300);
+    expect((await failed).check).toEqual({ kind: 'failed', message: CHECK_UNVERIFIED });
+    const answer = done(await play(failing.bridge, failing.mountPoint, failing.scan, { job: 'reviewPlan', ids: ['w-node'] }));
+    expect(answer.basis).toMatchObject({ privacy: true, text: CHECK_UNVERIFIED, unavailable: null });
+    // Check again checks again.
+    const again = failing.bridge.claudeCheck(true);
+    expect((await failing.bridge.claudeStatus()).check).toEqual({ kind: 'checking' });
+    await vi.advanceTimersByTimeAsync(1300);
+    expect((await again).check.kind).toBe('failed');
+
+    // A call while it is due checks first.
+    const due = await scanned('windows', { claude: 'on', privacy: 'off', canary: 'ok', claudeMs: 0 });
+    const first = done(await play(due.bridge, due.mountPoint, due.scan, { job: 'reviewPlan', ids: ['w-node'] }));
+    expect(first.basis.privacy).toBe(false);
+    expect((await due.bridge.claudeStatus()).check).toEqual({ kind: 'passed' });
   });
 
   it.each([

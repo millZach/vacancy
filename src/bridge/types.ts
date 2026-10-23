@@ -63,6 +63,7 @@ import type { ClaudeAnswer } from '../bindings/ClaudeAnswer';
 import type { ClaudeBasis } from '../bindings/ClaudeBasis';
 import type { ClaudeChange } from '../bindings/ClaudeChange';
 import type { ClaudeChangeKind } from '../bindings/ClaudeChangeKind';
+import type { ClaudeCheck } from '../bindings/ClaudeCheck';
 import type { ClaudeDropped } from '../bindings/ClaudeDropped';
 import type { ClaudeEvent } from '../bindings/ClaudeEvent';
 import type { ClaudeFailure } from '../bindings/ClaudeFailure';
@@ -158,6 +159,7 @@ export type {
   ClaudeChatStarted,
   ClaudeRefreshed,
   ClaudeResult,
+  ClaudeCheck,
   ClaudeState,
   ClaudeStatus,
   TidyLayout,
@@ -265,6 +267,13 @@ export interface Bridge {
   claudeSetEnabled(on: boolean): Promise<ClaudeStatus>;
   /** Turns privacy mode on or off (confirm before turning it off). Remembered, also while Claude is off. */
   claudeSetPrivacy(on: boolean): Promise<ClaudeStatus>;
+  /**
+   * Checks this Claude Code before privacy mode off lets Claude open files (`check` in the status): one small real
+   * call that reads a file Vacancy made and is refused one Vacancy hides. Kept per Claude Code (its path, size,
+   * modified time and version), so it runs when the check is due, or always with `again` (Check again). Only with
+   * Claude on and privacy mode off. Until it passes, every call runs as if privacy mode were on.
+   */
+  claudeCheck(again: boolean): Promise<ClaudeStatus>;
   // Every command below that touches a drive's scan names it: `scan` is the id its map came with (`ScanOutcome`'s
   // `scan`). Once the drive has a newer scan (or its plan ran, or it went away) the command is refused and changes
   // nothing: an item id like `claude-d17` means another item in another scan.

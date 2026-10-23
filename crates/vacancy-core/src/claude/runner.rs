@@ -82,12 +82,15 @@ impl Access {
     }
 }
 
-/// The drive a call may read: the scan's, by its mount point (`C:\`, `/`, `/Volumes/USB`), and the other drives the
-/// drive list offers, which are denied by their mount points as well as by [`off_drive_rules_in`]'s own.
+/// The drive a call may read: the scan's, by its mount point (`C:\`, `/`, `/Volumes/USB`), the other drives the
+/// drive list offers, which are denied by their mount points as well as by [`off_drive_rules_in`]'s own, and every
+/// place a file system is mounted, as the OS listed them right before the call ([`super::mounts::list`]), each
+/// denied unless it is the drive itself or holds it ([`mount_rules_in`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Drive {
     pub root: PathBuf,
     pub others: Vec<PathBuf>,
+    pub mounts: Vec<PathBuf>,
 }
 
 /// The most bytes of settings Vacancy hands Claude Code, well below the 2 MiB Claude Code takes (a bigger
@@ -404,20 +407,102 @@ pub fn off_drive_rules_in(root: &str, others: &[String], style: Style) -> Vec<St
     out
 }
 
+/// The deny rules that keep Claude's reads on the drive at `root` (in `style`) off every other file system mounted,
+/// wherever it is mounted. `mounts` are every place the OS says a file system is mounted ([`super::mounts::list`]),
+/// whether or not the drive list offers it: a disk image at `/Users/alex/Archive`, a VHD or a second disk in the
+/// empty folder `D:\Mount\Disk2`, a share, a snapshot. The scan stays on one file system, so it never went into
+/// them and no browser profile's rules were made for what they hold, while `--add-dir` and the allow rule name only
+/// paths and would cover them. Each is denied whole, spelled as a deny rule spells a path ([`rule_cover`]: more,
+/// never less), except a mount point that is the drive itself or holds it (`/` for `/Volumes/USB`), which
+/// [`off_drive_rules_in`] already narrows to the way down. On a Mac a file system mounted inside the Data volume is
+/// denied by the name the scan shows it under too: `/System/Volumes/Data/Users/alex/Archive` is also
+/// `/Users/alex/Archive` (and `/System/Volumes/Data` itself is `/`, the startup disk's other half).
+///
+/// An error, in words, when a mount point can't be spelled as a rule at all (not absolute in `style`, or holding a
+/// `.` or `..` name): then the call must not read.
+pub fn mount_rules_in(root: &str, mounts: &[String], style: Style) -> Result<Vec<String>, String> {
+    let unspelled = |m: &str| {
+        format!(
+            "Claude can't open files for now: something is mounted at {m}, which Vacancy can't name in a rule that \
+             keeps Claude off it, so Claude gets names, sizes, counts and dates only."
+        )
+    };
+    let key = |names: &[&str]| -> Vec<String> {
+        names
+            .iter()
+            .map(|n| match style {
+                Style::Windows => n.to_lowercase(),
+                Style::Unix => (*n).to_owned(),
+            })
+            .collect()
+    };
+    let (drive, names) = absolute_names(root, style).ok_or_else(|| unspelled(root))?;
+    let here = (drive, key(&names));
+    let mut out: Vec<String> = Vec::new();
+    for mount in mounts {
+        let (d, names) = absolute_names(mount, style).ok_or_else(|| unspelled(mount))?;
+        if names.iter().any(|n| matches!(*n, "." | "..")) {
+            return Err(unspelled(mount));
+        }
+        let mut spellings = vec![names.clone()];
+        if style == Style::Unix && names.len() >= 3 && names[..3] == ["System", "Volumes", "Data"] {
+            spellings.push(names[3..].to_vec());
+        }
+        for names in spellings {
+            let k = key(&names);
+            let holds = d == here.0 && k.len() <= here.1.len() && k[..] == here.1[..k.len()];
+            if holds {
+                continue;
+            }
+            let at = joined(d, names.iter().map(|n| rule_cover(n)));
+            for rule in [format!("Read(/{at})"), format!("Read(/{at}/**)")] {
+                if !out.contains(&rule) {
+                    out.push(rule);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Why `drive`'s mount points can't all be kept from Claude ([`mount_rules_in`]), in the panel's words, or `None`
+/// when they can. Then the call runs as if privacy mode were on.
+pub fn mounts_unavailable(drive: &Drive) -> Option<String> {
+    mount_rules_in(
+        &drive.root.to_string_lossy(),
+        &texts(&drive.mounts),
+        Style::HOST,
+    )
+    .err()
+}
+
+fn texts(paths: &[PathBuf]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// What denies every read: the settings' second wall when a mount point can't be named after all
+/// ([`mounts_unavailable`] keeps such a call from reading first).
+const DENY_ALL: [&str; 2] = ["Read(//**)", "Read(//*/**)"];
+
 /// The `--settings` JSON for privacy mode off in normal mode: Read allowed on the scanned drive only, every other
-/// drive denied ([`off_drive_rules_in`]), reads outside the working directories refused by Claude Code itself
-/// (`blockReadsOutsideWorkingDirectories`: the drive is the one `--add-dir` names), and the always-hidden places
-/// denied, Claude Code's and Codex's own folders where `config` puts them among them.
+/// drive denied ([`off_drive_rules_in`]), every other file system mounted denied wherever it is mounted
+/// ([`mount_rules_in`]; if one can't be named, every read is denied), reads outside the working directories refused
+/// by Claude Code itself (`blockReadsOutsideWorkingDirectories`: the drive is the one `--add-dir` names), and the
+/// always-hidden places denied, Claude Code's and Codex's own folders where `config` puts them among them.
 pub fn drive_settings_in(drive: &Drive, config: &[PathBuf]) -> Value {
     let root = drive.root.to_string_lossy();
     let allow: Vec<String> = allow_rule_in(&root, Style::HOST).into_iter().collect();
-    let others: Vec<String> = drive
-        .others
-        .iter()
-        .map(|o| o.to_string_lossy().into_owned())
-        .collect();
+    let others = texts(&drive.others);
+    let mounts = mount_rules_in(&root, &texts(&drive.mounts), Style::HOST)
+        .unwrap_or_else(|_| DENY_ALL.map(str::to_owned).to_vec());
     let mut deny = hidden::deny_rules_in(config);
-    for rule in off_drive_rules_in(&root, &others, Style::HOST) {
+    for rule in off_drive_rules_in(&root, &others, Style::HOST)
+        .into_iter()
+        .chain(mounts)
+    {
         if !deny.contains(&rule) {
             deny.push(rule);
         }
@@ -918,6 +1003,46 @@ pub fn signed_in(program: &Path, work: &Path) -> Result<bool, Failure> {
     }
 }
 
+/// What `claude --version` says for Claude Code at `program` (at most 200 characters), from an empty folder under
+/// `work`, with the same environment as every call: part of which Claude Code a check was about
+/// ([`super::canary::Identity`]). It reads nothing of Claude Code's own files.
+pub fn version(program: &Path, work: &Path) -> Result<String, Failure> {
+    let invocation = Invocation {
+        program: program.to_path_buf(),
+        args: vec!["--version".into()],
+        env_set: env_set(),
+        env_remove: ENV_REMOVE.iter().map(|k| (*k).to_owned()).collect(),
+        stdin: String::new(),
+        settings: None,
+    };
+    let control = Control {
+        cancel: CancelToken::new(),
+        timeout: AUTH_TIMEOUT,
+        slow_after: Duration::MAX,
+    };
+    let folder = CallFolder::new(work)?;
+    let output = run_in(&folder, &invocation, &control, &mut |_| {})?;
+    match output.status {
+        Status::Success => {
+            let text: String = output.stdout.trim().chars().take(200).collect();
+            if text.is_empty() {
+                Err(Failure::error(
+                    "Claude Code didn't say which version it is.",
+                ))
+            } else {
+                Ok(text)
+            }
+        }
+        Status::Failed(_) => Err(classify(&output.stderr)),
+        Status::Missing => Err(Failure::NotFound),
+        Status::TimedOut => Err(Failure::TimedOut),
+        Status::Cancelled => Err(Failure::Cancelled),
+        Status::Refused(why) => Err(Failure::error(format!(
+            "Vacancy couldn't start Claude Code: {why}"
+        ))),
+    }
+}
+
 /// The most of Claude's own words an error keeps.
 const MESSAGE_CHARS: usize = 600;
 
@@ -1199,6 +1324,7 @@ mod tests {
         let drive = Drive {
             root: root.clone(),
             others: vec![other.clone()],
+            mounts: Vec::new(),
         };
         let inv = invocation(
             &program,
@@ -1308,6 +1434,161 @@ mod tests {
         assert!(rules.iter().any(|r| r.starts_with("Read(//c/Mounts/[")));
     }
 
+    fn strings(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// Every other file system mounted is denied wherever it is mounted, inside the scanned drive too, by each name
+    /// it has; the drive itself, and a mount that holds it, aren't.
+    #[test]
+    fn every_other_mount_is_denied_wherever_it_is() {
+        // A Mac's startup disk, with a read-only disk image of browser backups under the home, one mounted inside the
+        // Data volume (reported by its Data-volume path), the system's own volumes and devfs.
+        let mac = strings(&[
+            "/",
+            "/dev",
+            "/System/Volumes/Data",
+            "/System/Volumes/VM",
+            "/System/Volumes/Data/home",
+            "/Users/alex/Archive",
+            "/System/Volumes/Data/Users/alex/Backups",
+            "/Users/alex/Archive/Inner",
+            "/Volumes/USB",
+        ]);
+        let rules = mount_rules_in("/", &mac, Style::Unix).unwrap();
+        for want in [
+            "Read(//dev)",
+            "Read(//dev/**)",
+            "Read(//System/Volumes/Data/**)",
+            "Read(//System/Volumes/VM/**)",
+            "Read(//home/**)",
+            "Read(//System/Volumes/Data/home/**)",
+            "Read(//Users/alex/Archive)",
+            "Read(//Users/alex/Archive/**)",
+            "Read(//Users/alex/Backups/**)",
+            "Read(//System/Volumes/Data/Users/alex/Backups/**)",
+            "Read(//Users/alex/Archive/Inner/**)",
+            "Read(//Volumes/USB/**)",
+        ] {
+            assert!(rules.contains(&want.to_owned()), "{want} in {rules:?}");
+        }
+        assert!(
+            !rules
+                .iter()
+                .any(|r| r == "Read(//**)" || r == "Read(/)" || r == "Read(//)"),
+            "the scanned drive itself (and the Data volume as `/`) stays readable: {rules:?}"
+        );
+        // A drive mounted in a folder: the mounts that hold it aren't denied, one inside it is.
+        let rules = mount_rules_in("/Volumes/USB", &mac, Style::Unix).unwrap();
+        assert!(rules.contains(&"Read(//Users/alex/Archive/**)".to_owned()));
+        assert!(rules.contains(&"Read(//System/Volumes/Data/**)".to_owned()));
+        assert!(
+            !rules.iter().any(|r| r.contains("//Volumes/USB")),
+            "{rules:?}"
+        );
+        let rules = mount_rules_in(
+            "/Volumes/USB",
+            &strings(&["/", "/Volumes/USB", "/Volumes/USB/inner"]),
+            Style::Unix,
+        )
+        .unwrap();
+        assert_eq!(
+            rules,
+            ["Read(//Volumes/USB/inner)", "Read(//Volumes/USB/inner/**)"]
+        );
+        // Windows: a VHD in an empty folder of the scanned drive, one nested in it, another drive's folder mount; the
+        // drive's own path in any case isn't denied.
+        let win = strings(&[
+            r"C:\",
+            r"D:\",
+            r"D:\Mount\Disk2\",
+            r"D:\Mount\Disk2\Inner\",
+            r"C:\Mount\X\",
+            r"E:\",
+        ]);
+        let rules = mount_rules_in(r"d:\", &win, Style::Windows).unwrap();
+        assert_eq!(
+            rules,
+            [
+                "Read(//c)",
+                "Read(//c/**)",
+                "Read(//d/Mount/Disk2)",
+                "Read(//d/Mount/Disk2/**)",
+                "Read(//d/Mount/Disk2/Inner)",
+                "Read(//d/Mount/Disk2/Inner/**)",
+                "Read(//c/Mount/X)",
+                "Read(//c/Mount/X/**)",
+                "Read(//e)",
+                "Read(//e/**)",
+            ]
+        );
+        // Odd characters: escaped, or a `*` for what no rule spells (more hidden, never less).
+        let rules = mount_rules_in(
+            "/",
+            &strings(&[
+                "/Users/alex/[Backup] {1}!#",
+                "/Users/alex/a\nb",
+                "/Volumes/Zoë ",
+            ]),
+            Style::Unix,
+        )
+        .unwrap();
+        for want in [
+            r"Read(//Users/alex/\[Backup\] \{1\}\!\#/**)",
+            "Read(//Users/alex/a*b/**)",
+            r"Read(//Volumes/Zo*\ /**)",
+        ] {
+            assert!(rules.contains(&want.to_owned()), "{want} in {rules:?}");
+        }
+        let rules = mount_rules_in(r"C:\", &strings(&[r"C:\Mount\Zoë\"]), Style::Windows).unwrap();
+        assert_eq!(rules, ["Read(//c/Mount/Zo*)", "Read(//c/Mount/Zo*/**)"]);
+        // A mount point no rule can start from: the call must not read.
+        for (style, odd) in [
+            (Style::Windows, r"\\?\Volume{1b3c}\"),
+            (Style::Windows, r"\\server\share\"),
+            (Style::Unix, "relative/mnt"),
+            (Style::Unix, "/Users/alex/../mnt"),
+        ] {
+            let root = if style == Style::Windows { r"C:\" } else { "/" };
+            let why = mount_rules_in(root, &strings(&[odd]), style).unwrap_err();
+            assert!(why.contains("names, sizes, counts and dates only"), "{why}");
+        }
+    }
+
+    /// The drive's settings carry every mount's rules, and a mount no rule can name denies every read as a second
+    /// wall (the caller has already run such a call as if privacy mode were on).
+    #[test]
+    fn the_drive_settings_deny_each_mount_and_fail_closed() {
+        let (root, inside, odd) = if cfg!(windows) {
+            (r"D:\", r"D:\Mount\Disk2\", r"\\?\Volume{1b3c}\")
+        } else {
+            ("/", "/Users/alex/Archive", "relative")
+        };
+        let mut drive = Drive {
+            root: PathBuf::from(root),
+            others: Vec::new(),
+            mounts: vec![PathBuf::from(root), PathBuf::from(inside)],
+        };
+        assert_eq!(mounts_unavailable(&drive), None);
+        let settings = drive_settings_in(&drive, &[]);
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        let want = if cfg!(windows) {
+            "Read(//d/Mount/Disk2/**)"
+        } else {
+            "Read(//Users/alex/Archive/**)"
+        };
+        assert!(deny.contains(&json(want)), "{settings}");
+        assert!(!deny.contains(&json(DENY_ALL[0])));
+        drive.mounts.push(PathBuf::from(odd));
+        assert!(mounts_unavailable(&drive).is_some());
+        let settings = drive_settings_in(&drive, &[]);
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        for rule in DENY_ALL {
+            assert!(deny.contains(&json(rule)), "{rule}");
+        }
+        assert!(check_settings(&settings.to_string()).is_ok());
+    }
+
     /// The settings check: what Vacancy writes passes; something Claude Code would drop without a word doesn't, and
     /// neither does a file over the cap.
     #[test]
@@ -1347,6 +1628,7 @@ mod tests {
         let drive = Access::Drive(Drive {
             root: PathBuf::from(if cfg!(windows) { r"D:\" } else { "/" }),
             others: Vec::new(),
+            mounts: Vec::new(),
         });
         let why = settings_too_big_in(&huge.deny, &drive, &[]).expect("over the cap");
         assert!(

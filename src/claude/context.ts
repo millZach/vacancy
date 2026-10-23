@@ -159,6 +159,13 @@ export interface Claude {
   turningOn: boolean;
   /** Looking for Claude Code again (not found, not signed in). */
   checking: boolean;
+  /**
+   * Checking this Claude Code before privacy mode off lets Claude open files ("Checking Claude Code…"): when privacy
+   * mode goes off, at start with it off, and on Check again.
+   */
+  verifying: boolean;
+  /** Check again: checks this Claude Code once more, even if a result is kept. */
+  verify: () => void;
   /** The panel is folded to its rail. */
   folded: boolean;
   setFolded: (folded: boolean) => void;
@@ -212,11 +219,23 @@ export function isEnabled(state: ClaudeStatus['state']): boolean {
 }
 
 /**
- * Claude may open files: privacy mode is off, and the core can keep Claude where it may read. With privacy mode off
- * but reads unavailable (`readsUnavailable`), every call runs as if privacy mode were on.
+ * Claude may open files: privacy mode is off, the core can keep Claude where it may read, and this Claude Code passed
+ * the check (`check`). With privacy mode off but reads unavailable (`readsUnavailable`), or the check not passed,
+ * every call runs as if privacy mode were on.
  */
 export function readsFiles(status: ClaudeStatus): boolean {
-  return !status.privacy && status.readsUnavailable === null;
+  return !status.privacy && status.readsUnavailable === null && status.check.kind === 'passed';
+}
+
+/**
+ * Where the check of Claude Code is, for the privacy row with privacy mode off: `checking` while it runs (or is
+ * about to), `failed` with why, or null once passed (or not needed).
+ */
+export function checkShown(status: ClaudeStatus, verifying: boolean): { kind: 'checking' } | { kind: 'failed'; message: string } | null {
+  if (status.privacy || status.state !== 'on') return null;
+  if (verifying || status.check.kind === 'checking') return { kind: 'checking' };
+  if (status.check.kind === 'failed') return status.check;
+  return null;
 }
 
 /**

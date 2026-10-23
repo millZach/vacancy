@@ -1,7 +1,13 @@
 // Runs Vacancy's Claude Code permission rules through the matcher Claude Code itself uses, for the differential
-// test `crates/vacancy-core/tests/rule_matcher.rs` (ADR 0008). It reads a JSON file of checks, each a set of
-// `Read(...)` rules of one kind (deny or allow), a real path, the platform's path style, and whether the set must
-// match the path, and prints what failed as JSON; it exits 1 if anything did.
+// test `crates/vacancy-core/tests/rule_matcher.rs` (ADR 0008). It reads a JSON file of rule sets (`sets`, each a
+// list of `Read(...)` rules) and checks, each naming a set by number, its kind (deny or allow), a real path, the
+// platform's path style, and whether the set must match the path, and prints what failed as JSON; it exits 1 if
+// anything did.
+//
+// Memory stays bounded however many checks there are (CI runs Node with its default heap): each set is sent once
+// and its checks run together. A pattern only that group uses is compiled for it and dropped after it; one that
+// several groups share is compiled once and kept, and its path cache (`ignore` keeps every path it was asked
+// about, and each parent of it, in each matcher) is emptied after each group. It prints its peak memory.
 //
 // The matcher is the `ignore` package: 7.0.5, which Claude Code 2.1.309 bundles (identified from the installed
 // binary's embedded code: `checkIgnore`, the `setupWindows` symbol, and 7.0.5's replacers), and 5.3.2, which the
@@ -76,7 +82,35 @@ function relative(path, root, windows) {
   return names.join('/');
 }
 
-const checks = JSON.parse(readFileSync(process.argv[2], 'utf8')).checks;
+const { sets, checks } = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+// The checks of each set, kind and style, in the order they first come: one group's rules are prepared once.
+const groups = new Map();
+for (const check of checks) {
+  const key = `${check.set}|${check.kind}|${check.style}`;
+  let group = groups.get(key);
+  if (!group) groups.set(key, (group = []));
+  group.push(check);
+}
+// Each group's rules as Claude Code prepares them (the same for both versions), and how many groups use each
+// pattern, by style.
+const uses = new Map();
+const plan = [...groups.values()].map((group) => {
+  const { style, kind } = group[0];
+  const windows = style === 'windows';
+  const rules = sets[group[0].set];
+  const prepared = [];
+  const errors = [];
+  for (const rule of rules) {
+    const p = prepare(rule, kind === 'allow', windows);
+    if (p.error) errors.push({ rule, error: p.error });
+    else prepared.push({ rule, ...p });
+  }
+  for (const pattern of new Set(prepared.map((p) => p.pattern))) {
+    const key = `${style}\0${pattern}`;
+    uses.set(key, (uses.get(key) ?? 0) + 1);
+  }
+  return { group, style, kind, windows, rules, prepared, errors };
+});
 const failures = [];
 const versions = [];
 for (const [want, pkg] of Object.entries(PACKAGES)) {
@@ -86,58 +120,69 @@ for (const [want, pkg] of Object.entries(PACKAGES)) {
     continue;
   }
   versions.push(want);
-  // One matcher per pattern, as an array and as text, made once: a browser profile's rules are hundreds of
-  // patterns, each checked against many paths. A matcher's answer for a path doesn't depend on what it answered
-  // before.
-  const made = { windows: new Map(), unix: new Map() };
-  const matcherOf = (style, pattern) => {
-    let m = made[style].get(pattern);
-    if (!m) {
-      const ignore = matchers[style].factory;
-      m = { inArray: ignore().add([pattern]), asText: ignore().add(pattern) };
-      made[style].set(pattern, m);
-    }
-    return m;
+  // One matcher per pattern, as an array and as text. A pattern several groups use is made once and kept (the
+  // always-hidden places' rules are in many sets); one only its own group uses (most of a profile's, whose rules
+  // start from its own path) is made for that group and dropped after it, so what is kept stays small. A matcher's
+  // answer for a path doesn't depend on what it answered before.
+  const kept = { windows: new Map(), unix: new Map() };
+  const make = (style, pattern) => {
+    const ignore = matchers[style].factory;
+    return { inArray: ignore().add([pattern]), asText: ignore().add(pattern) };
   };
-  for (const check of checks) {
-    const windows = check.style === 'windows';
-    const allow = check.kind === 'allow';
-    let matched = false;
-    for (const rule of check.rules) {
-      const prepared = prepare(rule, allow, windows);
-      if (prepared.error) {
-        failures.push({ version: want, rule, error: prepared.error });
-        continue;
+  for (const { group, style, kind, windows, rules, prepared, errors } of plan) {
+    for (const rule of errors) failures.push({ version: want, rule: rule.rule, error: rule.error });
+    const own = new Map();
+    const used = new Set();
+    const matcherOf = (pattern) => {
+      const shared = (uses.get(`${style}\0${pattern}`) ?? 0) > 1;
+      const made = shared ? kept[style] : own;
+      let m = made.get(pattern);
+      if (!m) made.set(pattern, (m = make(style, pattern)));
+      if (shared) used.add(m);
+      return m;
+    };
+    for (const check of group) {
+      let matched = false;
+      for (const { rule, root, pattern } of prepared) {
+        const path = relative(check.path, root, windows);
+        if (path === null || path === '') continue;
+        let inArray;
+        let asText;
+        try {
+          const m = matcherOf(pattern);
+          inArray = m.inArray.ignores(path);
+          asText = m.asText.ignores(path);
+        } catch (e) {
+          failures.push({ version: want, rule, path: check.path, error: String(e) });
+          continue;
+        }
+        if (inArray !== asText) {
+          failures.push({ version: want, rule, path: check.path, error: 'the pattern means another thing as text' });
+        }
+        if (inArray) matched = true;
       }
-      const path = relative(check.path, prepared.root, windows);
-      if (path === null || path === '') continue;
-      let inArray;
-      let asText;
-      try {
-        const m = matcherOf(check.style, prepared.pattern);
-        inArray = m.inArray.ignores(path);
-        asText = m.asText.ignores(path);
-      } catch (e) {
-        failures.push({ version: want, rule, path: check.path, error: String(e) });
-        continue;
+      if (matched !== check.expect) {
+        failures.push({
+          version: want,
+          kind,
+          style,
+          path: check.path,
+          why: check.why,
+          expected: check.expect,
+          rules: rules.length > 4 ? `${rules.length} rules` : rules,
+        });
       }
-      if (inArray !== asText) {
-        failures.push({ version: want, rule, path: check.path, error: 'the pattern means another thing as text' });
-      }
-      if (inArray) matched = true;
     }
-    if (matched !== check.expect) {
-      failures.push({
-        version: want,
-        kind: check.kind,
-        style: check.style,
-        path: check.path,
-        why: check.why,
-        expected: check.expect,
-        rules: check.rules.length > 4 ? `${check.rules.length} rules` : check.rules,
-      });
+    // The answers this group's paths left in the kept matchers are no use to the next group: forget them, keeping
+    // the compiled patterns. (Both versions keep them in `_ignoreCache` and `_testCache`, which `_initCache`
+    // empties, as their own `add` does.) The group's own matchers go with `own`.
+    for (const m of used) {
+      m.inArray._initCache();
+      m.asText._initCache();
     }
   }
 }
-process.stdout.write(JSON.stringify({ versions, checks: checks.length, failures }, null, 1));
+// Peak memory, for the test's log: the checks are many, and CI's heap is the default one.
+const peakRssMb = Math.round(process.resourceUsage().maxRSS / 1024);
+process.stdout.write(JSON.stringify({ versions, checks: checks.length, peakRssMb, failures }, null, 1));
 process.exit(failures.length ? 1 : 0);

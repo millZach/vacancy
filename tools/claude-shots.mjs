@@ -9,7 +9,8 @@
 // failed, slow with Cancel, cancelled, an error and a timeout in Claude's words, off again with Claude's items still
 // in the plan and the panel folded again, a pick set aside because the plan changed while Claude picked, and one
 // settled by a later edit, and privacy mode off with reads unavailable, or with a scan whose rules are too many for
-// Claude Code's settings, each saying why), a macOS pass (no Tidy up
+// Claude Code's settings, each saying why; the check of Claude Code before privacy mode off lets Claude read, running
+// and failed with Check again), a macOS pass (no Tidy up
 // layouts) and a 1024x700 pass.
 //
 //   npm run dev                       (the UI on the mock bridge, http://localhost:1420)
@@ -410,6 +411,42 @@ async function states() {
     check(await has(panel(page).getByRole('note').getByText('Claude can’t open files on this scan', { exact: false })), 'too big: the panel says why');
     check(await has(page.getByRole('button', { name: /^Claude on: show/ })), 'too big: the header no longer says Claude reads files');
     await shot(page, '39c-reads-too-big');
+    await page.close();
+  }
+  {
+    // Turning privacy mode off checks this Claude Code first (one small call, once per Claude Code): the privacy row
+    // says so while it runs, and Claude reads files once it has passed.
+    const page = await open('fixture=windows&claude=on&canary=slow&claudeMs=300');
+    await page.getByRole('button', { name: 'Build a plan' }).click();
+    await panel(page).getByRole('switch', { name: 'Privacy mode' }).click();
+    await page.getByRole('button', { name: 'Turn privacy mode off' }).click();
+    const checking = panel(page).getByText('Checking Claude Code…');
+    await checking.waitFor({ timeout: 5000 });
+    check(await has(panel(page).getByText('Off: Vacancy is checking Claude Code before Claude opens files', { exact: false })), 'canary: the privacy row says it is checking');
+    await settle(page, 400);
+    await shot(page, '39d-canary-checking');
+    await checking.waitFor({ state: 'detached', timeout: 10_000 });
+    check(await has(panel(page).getByText('Off: Claude can read files on the drive you scanned', { exact: false })), 'canary: passed, Claude reads files');
+    await page.close();
+  }
+  {
+    // A Claude Code that fails the check: privacy mode off can't let Claude open files, the privacy row says why with
+    // Check again, and answers are from names, sizes and dates.
+    const page = await open('fixture=windows&claude=on&privacy=off&canary=fail&claudeMs=300');
+    await page.getByRole('button', { name: 'Build a plan' }).click();
+    const note = panel(page).getByRole('note');
+    await note.getByRole('button', { name: 'Check again' }).waitFor({ timeout: 10_000 });
+    check(await has(note.getByText('couldn’t verify this version of Claude Code', { exact: false })), 'canary failed: the row says why');
+    check(await has(panel(page).getByText('Off, but Claude can’t open files for now', { exact: false })), 'canary failed: the privacy row says so');
+    const review = await job(page, 'Review my plan', 'reviewPlan');
+    check(await has(review.getByText('couldn’t verify this version of Claude Code', { exact: false })), 'canary failed: the answer says why');
+    check(!(await has(review.getByText('Claude opened', { exact: false }))), 'canary failed: Claude opened nothing');
+    check(await has(page.getByRole('button', { name: /^Claude on: show/ })), 'canary failed: the header doesn’t say Claude reads files');
+    await shot(page, '39e-canary-failed');
+    await note.getByRole('button', { name: 'Check again' }).click();
+    await panel(page).getByText('Checking Claude Code…').waitFor({ timeout: 5000 });
+    await panel(page).getByRole('note').getByRole('button', { name: 'Check again' }).waitFor({ timeout: 10_000 });
+    check(await has(panel(page).getByRole('note').getByText('couldn’t verify', { exact: false })), 'canary failed: Check again fails again');
     await page.close();
   }
 }

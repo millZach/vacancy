@@ -20,7 +20,9 @@
 //!   unavailable.
 //!
 //! Verified against Claude Code 2.1.309. When Claude Code updates its matcher, recheck the model in
-//! `tools/rule-matcher.mjs` (there is no runtime version check, by Zach's choice).
+//! `tools/rule-matcher.mjs`. (At runtime, `claude::canary` checks each Claude Code takes the settings at all; that
+//! check's own settings are among the checks here.) Mounted file systems are among them too: files under a disk
+//! image or a VHD mounted inside the scanned drive are denied, and files beside them stay allowed.
 //!
 //! Needs Node and `npm ci` (CI runs it before the Rust tests).
 
@@ -195,7 +197,14 @@ fn same_name(a: &str, b: &str) -> bool {
     a.to_lowercase() == b.to_lowercase() || a.to_uppercase() == b.to_uppercase()
 }
 
-struct Checks(Vec<Value>);
+/// The checks, each naming its set of rules by number: a browser profile's rules are hundreds, checked against
+/// many paths, so each set goes to the matcher once (`tools/rule-matcher.mjs` runs a set's checks together).
+#[derive(Default)]
+struct Checks {
+    checks: Vec<Value>,
+    sets: Vec<Vec<String>>,
+    numbers: std::collections::HashMap<Vec<String>, usize>,
+}
 
 impl Checks {
     fn add(
@@ -207,10 +216,18 @@ impl Checks {
         expect: bool,
         why: &str,
     ) {
-        self.0.push(json!({
+        let set = match self.numbers.get(rules) {
+            Some(n) => *n,
+            None => {
+                self.sets.push(rules.to_vec());
+                self.numbers.insert(rules.to_vec(), self.sets.len() - 1);
+                self.sets.len() - 1
+            }
+        };
+        self.checks.push(json!({
             "style": style_name(style),
             "kind": kind,
-            "rules": rules,
+            "set": set,
             "path": path,
             "expect": expect,
             "why": why,
@@ -1117,6 +1134,182 @@ fn drive_scope_checks(style: Style, checks: &mut Checks) -> usize {
     n
 }
 
+/// Every other file system mounted, wherever it is mounted (`runner::mount_rules_in`, with the scanned drive's own
+/// rules): files under a disk image mounted in the home of a scanned Mac `/` (by its own path and by the Data
+/// volume's), a VHD in an empty folder of a scanned `D:\`, a mount nested in one, and mounts with odd names are
+/// denied, while files beside them stay allowed.
+fn mount_scope_checks(style: Style, checks: &mut Checks) -> usize {
+    let mut n = 0;
+    let mut case = |root: &str, mounts: &[&str], deny: &[(&str, bool)]| {
+        let mounts: Vec<String> = mounts.iter().map(|s| (*s).to_owned()).collect();
+        let mut rules = runner::off_drive_rules_in(root, &[], style);
+        rules.extend(runner::mount_rules_in(root, &mounts, style).expect("every mount is spelled"));
+        for (p, expect) in deny {
+            checks.add(
+                style,
+                "deny",
+                &rules,
+                (*p).to_owned(),
+                *expect,
+                "every other mount, wherever it is",
+            );
+            n += 1;
+        }
+    };
+    match style {
+        Style::Windows => {
+            case(
+                r"D:\",
+                &[
+                    r"D:\",
+                    r"C:\",
+                    r"D:\Mount\Disk2\",
+                    r"D:\Mount\Disk2\Inner\",
+                    r"D:\Mount\[x] {1}!#\",
+                    r"D:\Mount\Zoë\",
+                ],
+                &[
+                    (
+                        r"D:\Mount\Disk2\Users\alex\AppData\Local\Google\Chrome\User Data\Default\Login Data",
+                        true,
+                    ),
+                    (r"D:\Mount\Disk2\BrowserData\Work\Sessions\Session_1", true),
+                    (r"D:\Mount\Disk2", true),
+                    (r"d:\mount\disk2\x", true),
+                    (r"D:\Mount\Disk2\Inner\x", true),
+                    (r"D:\Mount\[x] {1}!#\y", true),
+                    (r"D:\Mount\Zoë\y", true),
+                    (r"C:\x", true),
+                    (r"D:\Mount\Disk3\x", false),
+                    (r"D:\Mount\Disk2x\a", false),
+                    (r"D:\Mount\Disk\a", false),
+                    (r"D:\Mount\x\y", false),
+                    (r"D:\Mount\x.txt", false),
+                    (r"D:\Mount\Zp\y", false),
+                    (r"D:\Users\alex\notes.txt", false),
+                ],
+            );
+        }
+        Style::Unix => {
+            case(
+                "/",
+                &[
+                    "/",
+                    "/dev",
+                    "/System/Volumes/Data",
+                    "/Users/alex/Archive",
+                    "/System/Volumes/Data/Users/alex/Backups",
+                    "/Users/alex/Archive/Nested",
+                    "/Users/alex/[Old] {1}!#",
+                    "/Users/alex/a\nb",
+                ],
+                &[
+                    (
+                        "/Users/alex/Archive/Library/Application Support/Google/Chrome/Default/Cookies",
+                        true,
+                    ),
+                    (
+                        "/Users/alex/Archive/BrowserData/Work/Sessions/Session_1",
+                        true,
+                    ),
+                    ("/Users/alex/Archive", true),
+                    ("/users/alex/archive/x", true),
+                    ("/Users/alex/Archive/Nested/x", true),
+                    ("/Users/alex/Backups/x", true),
+                    ("/System/Volumes/Data/Users/alex/Backups/x", true),
+                    ("/Users/alex/[Old] {1}!#/x", true),
+                    ("/Users/alex/a\nb/x", true),
+                    ("/dev/disk0", true),
+                    ("/Users/alex/Archive2/x", false),
+                    ("/Users/alex/Archiv/x", false),
+                    ("/Users/alex/Backup/x", false),
+                    ("/Users/alex/O/x", false),
+                    ("/Users/alex/Old/x", false),
+                    ("/Users/alex/a/x", false),
+                    ("/Users/alex/Documents/notes.txt", false),
+                    ("/Applications/App.app/Contents/Info.plist", false),
+                ],
+            );
+            case(
+                "/Volumes/USB",
+                &[
+                    "/",
+                    "/Volumes/USB",
+                    "/Volumes/USB/Inner",
+                    "/System/Volumes/Data",
+                ],
+                &[
+                    ("/Volumes/USB/Inner/x", true),
+                    ("/Users/alex/x", true),
+                    ("/Volumes/USB/x", false),
+                    ("/Volumes/USB/Inner2/x", false),
+                    ("/Volumes/USB/Inne/x", false),
+                ],
+            );
+        }
+    }
+    n
+}
+
+/// The check of Claude Code (`claude::canary`), as the app makes it on this system: its settings deny the canary in
+/// its dummy profile, and the profile's other stores, while its control file stays readable, by the allow rule too.
+fn canary_checks(checks: &mut Checks) -> usize {
+    use vacancy_core::claude::canary::{self, Canary, Scope};
+    let style = Style::HOST;
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let base = support::real_path(dir.path()).join(canary::FOLDER);
+    let check = Canary::new(
+        &base,
+        Scope::Drive {
+            others: Vec::new(),
+            mounts: Vec::new(),
+        },
+    )
+    .unwrap();
+    let inv = runner::invocation(
+        Path::new("claude"),
+        check.call(),
+        check.access(),
+        &base.join("call-1.settings.json"),
+    );
+    let settings: Value = serde_json::from_str(&inv.settings.unwrap().1).unwrap();
+    let rules = |key: &str| -> Vec<String> {
+        serde_json::from_value(settings["permissions"][key].clone()).unwrap()
+    };
+    let (deny, allow) = (rules("deny"), rules("allow"));
+    let (control, hidden_file) = check.files();
+    let text = |p: &Path| p.to_str().unwrap().to_owned();
+    let profile = check.dir().join("BrowserData").join("Work");
+    let mut n = 0;
+    for (path, expect) in [
+        (text(hidden_file), true),
+        (text(&profile.join("History")), true),
+        (text(&profile.join("Preferences")), true),
+        (text(&profile.join("Sessions")), true),
+        (text(&profile.join("Cache").join("data_0")), false),
+        (text(control), false),
+    ] {
+        checks.add(
+            style,
+            "deny",
+            &deny,
+            path,
+            expect,
+            "the check's own settings",
+        );
+        n += 1;
+    }
+    checks.add(
+        style,
+        "allow",
+        &allow,
+        text(control),
+        true,
+        "the check's read scope",
+    );
+    n + 1
+}
+
 /// Allow rules exist only for roots they spell exactly, and match inside them only.
 fn allow_checks(style: Style, checks: &mut Checks) -> usize {
     let b = base(style);
@@ -1246,7 +1439,7 @@ fn host_checks(checks: &mut Checks) {
 
 #[test]
 fn claude_codes_matcher_gives_each_rule_exactly_its_meaning() {
-    let mut checks = Checks(Vec::new());
+    let mut checks = Checks::default();
     let mut spelled = 0;
     for style in [Style::Windows, Style::Unix] {
         moved_folder_checks(style, &mut checks);
@@ -1255,20 +1448,25 @@ fn claude_codes_matcher_gives_each_rule_exactly_its_meaning() {
         browser_wall_checks(style, &mut checks);
         shared_profile_checks(style, &mut checks);
         assert!(drive_scope_checks(style, &mut checks) > 20);
+        assert!(mount_scope_checks(style, &mut checks) > 10);
         spelled += allow_checks(style, &mut checks);
     }
     host_checks(&mut checks);
+    assert!(canary_checks(&mut checks) > 5);
     let scanned = scanned_profile_checks(&mut checks);
     assert!(scanned > 40, "the dummy profiles hide {scanned} places");
     assert!(spelled > 100, "most roots are spelled: {spelled}");
 
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir = tempfile::tempdir().unwrap();
-    let file = dir.path().join("checks.json");
-    let count = checks.0.len();
+    // `VACANCY_RULE_CHECKS` keeps the checks where it says, to run `tools/rule-matcher.mjs` on them by hand.
+    let file = std::env::var_os("VACANCY_RULE_CHECKS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dir.path().join("checks.json"));
+    let count = checks.checks.len();
     std::fs::write(
         &file,
-        serde_json::to_vec(&json!({ "checks": checks.0 })).unwrap(),
+        serde_json::to_vec(&json!({ "sets": checks.sets, "checks": checks.checks })).unwrap(),
     )
     .unwrap();
     let out = Command::new("node")
@@ -1315,7 +1513,10 @@ fn claude_codes_matcher_gives_each_rule_exactly_its_meaning() {
         "both matchers ran"
     );
     assert_eq!(report["checks"], count);
-    println!("{count} checks in ignore 7.0.5 and 5.3.2, {spelled} roots spelled exactly");
+    println!(
+        "{count} checks in ignore 7.0.5 and 5.3.2, {spelled} roots spelled exactly; the matcher peaked at {} MB",
+        report["peakRssMb"]
+    );
 }
 
 /// A Unix fixture root with a line break: no allow rule, so it can't match `tmp/fx/outside.txt` (the review's

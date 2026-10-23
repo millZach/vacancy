@@ -3,7 +3,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent
 import { createPortal } from 'react-dom';
 import type { ClaudeBasis, ClaudeDropped, ClaudeFailure, ClaudeFolderNote, ClaudeHidden, Proposal } from '../bridge';
 import { formatBytes } from '../format';
-import { failureText, isOn, readsFiles, useClaude, type Claude, type Phase } from './context';
+import { checkShown, failureText, isOn, readsFiles, useClaude, type Claude, type Phase } from './context';
 import './claude.css';
 
 /** Claude's mark, in its lilac. */
@@ -88,14 +88,19 @@ export function PrivacyRow({
   privacy,
   fixture,
   unavailable,
+  check = null,
 }: {
   claude: Claude;
   privacy: boolean;
   fixture: boolean;
   /** Why Claude can't open files though privacy mode is off (the core's `readsUnavailable`). */
   unavailable: string | null;
+  /** The check of Claude Code with privacy mode off: running, or failed with why ([`checkShown`]). */
+  check?: ReturnType<typeof checkShown>;
 }) {
-  const closed = !privacy && unavailable !== null;
+  const failed = !privacy && unavailable === null && check?.kind === 'failed' ? check.message : null;
+  const verifying = !privacy && unavailable === null && check?.kind === 'checking';
+  const closed = !privacy && (unavailable !== null || failed !== null);
   return (
     <>
     <div className="cl-provider cl-privacy-row">
@@ -109,9 +114,11 @@ export function PrivacyRow({
             ? 'On: names, sizes, counts and dates only'
             : closed
               ? 'Off, but Claude can’t open files for now: names, sizes, counts and dates only. Remembered.'
-              : fixture
-                ? 'Off: Claude can read files in the fixture folder, except hidden places. Remembered.'
-                : 'Off: Claude can read files on the drive you scanned, except hidden places. Remembered.'}
+              : verifying
+                ? 'Off: Vacancy is checking Claude Code before Claude opens files. Remembered.'
+                : fixture
+                  ? 'Off: Claude can read files in the fixture folder, except hidden places. Remembered.'
+                  : 'Off: Claude can read files on the drive you scanned, except hidden places. Remembered.'}
         </span>
       </div>
       <button
@@ -127,9 +134,25 @@ export function PrivacyRow({
         <i />
       </button>
     </div>
+    {verifying && (
+      <p className="cl-job is-slow cl-unavailable cl-checking" role="status">
+        <LoaderCircle size={13} className="tray-spin" aria-hidden /> <span>Checking Claude Code…</span>
+      </p>
+    )}
     {closed && (
       <p className="cl-job is-slow cl-unavailable" role="note">
-        <EyeOff size={13} aria-hidden /> <span>{unavailable}</span>
+        <EyeOff size={13} aria-hidden />{' '}
+        <span>
+          {unavailable ?? failed}
+          {failed !== null && (
+            <>
+              {' '}
+              <button type="button" className="link-button cl-check-again" onClick={claude.verify} disabled={claude.verifying}>
+                Check again
+              </button>
+            </>
+          )}
+        </span>
       </p>
     )}
     </>

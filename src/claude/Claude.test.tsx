@@ -13,7 +13,7 @@ import {
   type MockOptions,
   type RunListing,
 } from '../bridge';
-import { READS_TOO_BIG, READS_UNAVAILABLE } from '../bridge/mockClaude';
+import { CHECK_UNVERIFIED, READS_TOO_BIG, READS_UNAVAILABLE } from '../bridge/mockClaude';
 import { FIRST_QUESTION, PANEL_KEY } from './ClaudeProvider';
 import { pickOffer, type Conversation, type JobEntry } from './context';
 import { DrivesProvider } from '../drives/DrivesProvider';
@@ -290,6 +290,53 @@ describe('privacy mode', () => {
     expect(within(panel()).getByRole('note')).toHaveTextContent(READS_TOO_BIG);
     expect(within(panel()).getByText(/I can see the names, sizes, counts and dates from this scan/)).toBeInTheDocument();
     expect(within(header()).getByText('Claude on')).toBeInTheDocument();
+  });
+
+  it('turning privacy mode off checks Claude Code first, saying so, and then Claude reads files', async () => {
+    const bridge = windows({ claude: 'on', canary: 'ok' });
+    const check = vi.spyOn(bridge, 'claudeCheck');
+    await toMap(bridge);
+    await openPlan();
+    expect(check).not.toHaveBeenCalled();
+    await userEvent.click(within(panel()).getByRole('switch', { name: 'Privacy mode' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Turn privacy mode off' }));
+    expect(await within(panel()).findByText('Checking Claude Code…')).toBeInTheDocument();
+    expect(within(panel()).getByText(/Off: Vacancy is checking Claude Code before Claude opens files/)).toBeInTheDocument();
+    expect(check).toHaveBeenCalledWith(false);
+    expect(await within(panel()).findByText(/Off: Claude can read files on the drive you scanned/, undefined, { timeout: 4000 })).toBeInTheDocument();
+    expect(within(panel()).queryByText('Checking Claude Code…')).toBeNull();
+    expect(within(header()).getByText('Claude on · reads files')).toBeInTheDocument();
+    const review = await job('Review my plan', 'reviewPlan');
+    expect(within(review).getByText(/from the drive you scanned/)).toBeInTheDocument();
+    // Passed and kept: turning privacy mode on and off again doesn't check again.
+    await userEvent.click(within(panel()).getByRole('switch', { name: 'Privacy mode' }));
+    await waitFor(() => expect(within(panel()).getByRole('switch', { name: 'Privacy mode' })).toHaveAttribute('aria-checked', 'true'));
+    await userEvent.click(within(panel()).getByRole('switch', { name: 'Privacy mode' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Turn privacy mode off' }));
+    expect(await within(panel()).findByText(/Off: Claude can read files on the drive you scanned/)).toBeInTheDocument();
+    expect(check).toHaveBeenCalledTimes(1);
+  });
+
+  it('at start with privacy mode off, a Claude Code that fails the check keeps files closed, says why, and checks again', async () => {
+    const bridge = windows({ claude: 'on', privacy: 'off', canary: 'fail' });
+    const check = vi.spyOn(bridge, 'claudeCheck');
+    await toMap(bridge);
+    await openPlan();
+    expect(check).toHaveBeenCalledWith(false);
+    const note = await within(panel()).findByRole('note', undefined, { timeout: 4000 });
+    expect(note).toHaveTextContent(CHECK_UNVERIFIED);
+    expect(within(panel()).getByText(/Off, but Claude can’t open files for now/)).toBeInTheDocument();
+    expect(within(header()).getByText('Claude on')).toBeInTheDocument();
+    // Its answers come from names, sizes and dates, and say why.
+    const review = await job('Review my plan', 'reviewPlan');
+    expect(within(review).getByText(CHECK_UNVERIFIED)).toBeInTheDocument();
+    expect(within(review).queryByText(/Claude opened/)).toBeNull();
+    // Check again checks even though a result is kept.
+    await userEvent.click(within(note).getByRole('button', { name: 'Check again' }));
+    expect(check).toHaveBeenLastCalledWith(true);
+    expect(await within(panel()).findByText('Checking Claude Code…')).toBeInTheDocument();
+    expect(await within(panel()).findByRole('button', { name: 'Check again' }, { timeout: 4000 })).toBeEnabled();
+    expect(within(panel()).getByRole('note')).toHaveTextContent(CHECK_UNVERIFIED);
   });
 
   it('every answer says what it was based on; changing the mode ends the conversation, and says so', async () => {

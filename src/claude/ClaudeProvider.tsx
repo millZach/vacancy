@@ -85,6 +85,7 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   const [settingError, setSettingError] = useState<string | null>(null);
   const [turningOn, setTurningOn] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [verifying, setVerifying] = useState(false);
   const [panel, setPanel] = useState(readPanel);
   const [privacyAsk, setPrivacyAsk] = useState(false);
   const [privacyChanging, setPrivacyChanging] = useState(false);
@@ -124,16 +125,50 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   const setting = (p: Promise<ClaudeStatus>) =>
     p.then(ready, (error: unknown) => setSettingError(errorMessage(error)));
 
+  /**
+   * Checks this Claude Code before privacy mode off lets Claude open files ("Checking Claude Code…"), when the check
+   * is due or `again` (Check again). The newest check's answer wins.
+   */
+  const verifyToken = useRef(0);
+  const verify = useCallback(
+    (again: boolean) => {
+      const token = ++verifyToken.current;
+      setVerifying(true);
+      bridge.claudeCheck(again).then(
+        (s) => {
+          if (token !== verifyToken.current) return;
+          setVerifying(false);
+          setStatus({ phase: 'ready', status: s });
+        },
+        (error: unknown) => {
+          if (token !== verifyToken.current) return;
+          setVerifying(false);
+          setSettingError(errorMessage(error));
+        },
+      );
+    },
+    [bridge],
+  );
+  /** With Claude on and privacy mode off, the check is due for this Claude Code: it runs now. */
+  const checkIfDue = (s: ClaudeStatus) => {
+    if (s.state === 'on' && !s.privacy && s.check.kind === 'unchecked') verify(false);
+  };
+
   useEffect(() => {
     let live = true;
     bridge.claudeStatus().then(
-      (s) => live && setStatus({ phase: 'ready', status: s }),
+      (s) => {
+        if (!live) return;
+        setStatus({ phase: 'ready', status: s });
+        // At start with Claude on and privacy mode off, a Claude Code not checked yet (or changed since) is checked.
+        if (s.state === 'on' && !s.privacy && s.check.kind === 'unchecked') verify(false);
+      },
       (error: unknown) => live && setStatus({ phase: 'error', message: errorMessage(error) }),
     );
     return () => {
       live = false;
     };
-  }, [bridge]);
+  }, [bridge, verify]);
 
   const edit = useCallback((w: Where, change: (c: Conversation) => Conversation) => {
     setConvos((all) => ({ ...all, [keyOf(w)]: change(all[keyOf(w)] ?? EMPTY) }));
@@ -494,10 +529,25 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     if (statusNow?.privacy !== on && endAll()) setEnded(on);
     changing.current = true;
     setPrivacyChanging(true);
-    void setting(bridge.claudeSetPrivacy(on)).finally(() => {
-      changing.current = false;
-      setPrivacyChanging(false);
-    });
+    if (on) {
+      // A check still running answers for privacy mode off: it no longer decides what the row shows.
+      verifyToken.current++;
+      setVerifying(false);
+    }
+    void bridge
+      .claudeSetPrivacy(on)
+      .then(
+        (s) => {
+          ready(s);
+          // Privacy mode off: Claude Code is checked first, if it hasn't passed already.
+          checkIfDue(s);
+        },
+        (error: unknown) => setSettingError(errorMessage(error)),
+      )
+      .finally(() => {
+        changing.current = false;
+        setPrivacyChanging(false);
+      });
   };
 
   // Folded while Claude is off (the map gets the room); open once it's turned on. A choice the person made wins.
@@ -508,6 +558,8 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     settingError,
     turningOn,
     checking,
+    verifying,
+    verify: () => verify(true),
     folded,
     setFolded: (f) => {
       const v = f ? 'folded' : 'open';
@@ -526,6 +578,7 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
           if (token !== turnOnToken.current) return;
           setTurningOn(false);
           ready(s);
+          checkIfDue(s);
         },
         (error: unknown) => {
           if (token !== turnOnToken.current) return;
@@ -543,6 +596,8 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       endAll();
       setEnded(null);
       setPrivacyAsk(false);
+      verifyToken.current++;
+      setVerifying(false);
       void setting(bridge.claudeSetEnabled(false));
     },
     recheck,

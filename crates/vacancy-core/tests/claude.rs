@@ -865,17 +865,19 @@ fn status_reads_off_until_turned_on_and_asks_sign_in_only_when_on() {
 fn claude_reads_only_the_fixture_or_the_scanned_drive() {
     let case = case();
     let drives: Vec<String> = vec!["C:\\".into(), "D:\\".into(), "E:\\".into()];
-    let fixture = claude::access(&case.env, "D:\\", &drives);
+    let fixture = claude::access(&case.env, "D:\\", &drives, &[]);
     assert_eq!(fixture, Access::Read(vec![case.root.clone()]));
     assert_eq!(fixture.roots(), Some(vec![case.root.clone()]));
     let mut real = case.env.clone();
     real.confined_to = None;
-    let drive = claude::access(&real, "D:\\", &drives);
+    let mounts = vec![PathBuf::from("D:\\"), PathBuf::from("D:\\Mount\\Disk2\\")];
+    let drive = claude::access(&real, "D:\\", &drives, &mounts);
     assert_eq!(
         drive,
         Access::Drive(claude::runner::Drive {
             root: PathBuf::from("D:\\"),
             others: vec![PathBuf::from("C:\\"), PathBuf::from("E:\\")],
+            mounts,
         })
     );
     assert_eq!(drive.roots(), Some(vec![PathBuf::from("D:\\")]));
@@ -892,7 +894,7 @@ fn many_profiles_share_their_roots_rules_or_fail_closed() {
     let mut env = case.env.clone();
     env.confined_to = None;
     let mount = if cfg!(windows) { r"D:\" } else { "/" };
-    let wanted = claude::access(&env, mount, &[]);
+    let wanted = claude::access(&env, mount, &[], &[]);
     let profiles = case.root.join("Many").join("User Data");
     support::write_file(&profiles.join("Local State"), 16);
     for i in 1..=84 {

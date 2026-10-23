@@ -22,7 +22,7 @@ import { RiskChip, SourceTag } from '../plan/bits';
 import { activeMoves, kindFolders } from '../tidy/model';
 import { Basis, Dropped, HiddenFold, JobLine, Mark, PrivacyNotice, PrivacyRow } from './bits';
 import { FIRST_QUESTION } from './ClaudeProvider';
-import { chatStarting, jobRunning, pickOffer, readsFiles, scanUnavailable, tileAt, useClaude, type ChatEntry, type Claude, type Conversation, type JobEntry, type JobKind, type Scope } from './context';
+import { chatStarting, checkShown, jobRunning, pickOffer, readsFiles, scanUnavailable, tileAt, useClaude, type ChatEntry, type Claude, type Conversation, type JobEntry, type JobKind, type Scope } from './context';
 import './claude.css';
 
 interface Props {
@@ -214,7 +214,13 @@ function PanelOn(p: OnProps) {
   return (
     <>
       <div className="cp-status">
-        <PrivacyRow claude={claude} privacy={status.privacy} fixture={status.fixture} unavailable={unavailable} />
+        <PrivacyRow
+          claude={claude}
+          privacy={status.privacy}
+          fixture={status.fixture}
+          unavailable={unavailable}
+          check={checkShown(status, claude.verifying)}
+        />
         <button type="button" className="link-button cp-off" onClick={claude.turnOff}>
           Turn off Claude
         </button>

@@ -14,7 +14,9 @@
 // slow after 1.5 s), `error` (a rate limit) or `timeout`; `&privacy=off` starts with privacy mode off; and
 // `&claudeMs=3000` makes answers take three seconds (default 0.9); `&reads=unavailable` says privacy mode off can't
 // let Claude open files, so calls run as if it were on, and `&reads=toobig` says the same of the scan only (its rules
-// are too many for Claude Code's settings), in each answer. The mock never calls Claude.
+// are too many for Claude Code's settings), in each answer; `&canary=ok|slow|fail` makes the check of Claude Code
+// before privacy mode off lets Claude read due, then passes, passes after six seconds, or fails (unset: it passed
+// before). The mock never calls Claude.
 import { isTauri } from '@tauri-apps/api/core';
 import { fixtures, isFixtureName } from './fixtures';
 import { createMockBridge } from './mock';
@@ -31,6 +33,7 @@ export type * from './types';
 const ACCESS: readonly FullDiskAccess[] = ['granted', 'missing', 'unknown', 'notApplicable'];
 const ADVISOR_PREVIEW = ['notChecked', 'error'] as const;
 const FAST = ['ok', 'declined', 'failed', 'unreadable'] as const;
+const CANARY = ['ok', 'slow', 'fail'] as const;
 
 /** The bridge for wherever the UI is running. */
 export function defaultBridge(search = window.location.search): Bridge {
@@ -52,6 +55,7 @@ export function defaultBridge(search = window.location.search): Bridge {
   const privacy = q.get('privacy');
   const claudeMs = q.get('claudeMs');
   const reads = q.get('reads');
+  const canary = CANARY.find((c) => c === q.get('canary'));
   return createMockBridge(fixtures[isFixtureName(name) ? name : 'windows'], {
     ...(delay > 0 ? { delayMs: delay } : {}),
     ...(fail !== null ? { fail } : {}),
@@ -70,5 +74,6 @@ export function defaultBridge(search = window.location.search): Bridge {
     ...(privacy === 'on' || privacy === 'off' ? { privacy } : {}),
     ...(claudeMs !== null && Number.isFinite(Number(claudeMs)) ? { claudeMs: Number(claudeMs) } : {}),
     ...(reads === 'unavailable' || reads === 'toobig' ? { reads } : {}),
+    ...(canary ? { canary } : {}),
   });
 }
