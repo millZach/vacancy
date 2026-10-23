@@ -233,12 +233,15 @@ export function JobLine({
   working,
   onCancel,
   onRetry,
+  retryDisabled = false,
 }: {
   phase: Phase | null;
   failure: ClaudeFailure | null;
   working: string;
   onCancel: () => void;
   onRetry: () => void;
+  /** Try again waits: another request of its kind is running. */
+  retryDisabled?: boolean;
 }) {
   if (phase === 'working' || phase === 'slow')
     return (
@@ -266,7 +269,7 @@ export function JobLine({
           {failureText(failure)}
           {failure.kind === 'error' && <q className="cl-said">{failure.message}</q>}
         </span>
-        <button type="button" className="link-button" onClick={onRetry}>
+        <button type="button" className="link-button" onClick={onRetry} disabled={retryDisabled}>
           Try again
         </button>
       </div>

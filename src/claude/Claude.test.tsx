@@ -15,6 +15,7 @@ import {
 } from '../bridge';
 import { READS_UNAVAILABLE } from '../bridge/mockClaude';
 import { FIRST_QUESTION, PANEL_KEY } from './ClaudeProvider';
+import { pickOffer, type Conversation, type JobEntry } from './context';
 import { DrivesProvider } from '../drives/DrivesProvider';
 import { HistoryMenu } from '../history/HistoryMenu';
 import { ConfirmDialog } from '../run/ConfirmDialog';
@@ -553,6 +554,69 @@ describe('the jobs', () => {
     expect(checked('Old installers in Downloads')).toBe(false);
     const b = [...panel().querySelectorAll<HTMLElement>('.cp-entry[data-job="pickPlan"]')].at(-1)!;
     expect(within(b).getByRole('button', { name: 'Keep mine' })).toBeInTheDocument();
+  });
+
+  it('one Let Claude pick runs at a time, from the chip and from an older card’s Try again', async () => {
+    const bridge = windows({ claude: 'on' });
+    const realStart = bridge.claudeStart.bind(bridge);
+    // Pick A fails, so its card offers Try again.
+    const start = vi.spyOn(bridge, 'claudeStart').mockImplementationOnce(() => Promise.reject(new Error('Claude Code is busy.')));
+    await toMap(bridge);
+    await openPlan();
+    const chip = within(panel()).getByRole('button', { name: 'Let Claude pick' });
+    await userEvent.click(chip);
+    const a = await waitFor(() => {
+      const e = panel().querySelector<HTMLElement>('.cp-entry[data-job="pickPlan"]');
+      expect(e && within(e).queryByRole('alert')).toBeTruthy();
+      return e!;
+    });
+    const again = within(a).getByRole('button', { name: 'Try again' });
+    // Pick B's Done is held back while B runs.
+    const held: ClaudeEvent[] = [];
+    let deliver: (e: ClaudeEvent) => void = () => {};
+    start.mockImplementation((m, s, j, onEvent) => {
+      deliver = onEvent;
+      return realStart(m, s, j, (e) => (e.kind === 'done' ? held.push(e) : onEvent(e)));
+    });
+    // The chip and A's Try again, pressed in one batch (no render between them to disable either): one pick goes.
+    act(() => {
+      chip.click();
+      again.click();
+    });
+    await waitFor(() => expect(held).toHaveLength(1));
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(panel().querySelectorAll('.cp-entry[data-job="pickPlan"]')).toHaveLength(2);
+    // While B runs, both wait.
+    expect(chip).toBeDisabled();
+    expect(again).toBeDisabled();
+    await userEvent.click(again);
+    expect(start).toHaveBeenCalledTimes(2);
+
+    // B answers and changes the ticks: its card offers Keep mine, and both come back.
+    act(() => deliver(held[0]!));
+    const b = [...panel().querySelectorAll<HTMLElement>('.cp-entry[data-job="pickPlan"]')].at(-1)!;
+    expect(await within(b).findByRole('button', { name: 'Keep mine' })).toBeInTheDocument();
+    expect(checked('Old installers in Downloads')).toBe(false);
+    expect(chip).toBeEnabled();
+    expect(again).toBeEnabled();
+    await userEvent.click(within(b).getByRole('button', { name: 'Keep mine' }));
+    expect(await within(b).findByText(/You kept your plan/)).toBeInTheDocument();
+    expect(within(b).queryByText(/meanwhile/)).toBeNull();
+    expect(checked('Old installers in Downloads')).toBe(true);
+  });
+
+  it('the card that offers Keep mine is the pick answered last, the same one Keep mine checks', () => {
+    const card = (id: string, after: string[], version: number): JobEntry => ({
+      kind: 'job', id, job: 'pickPlan', phase: 'done', answer: null, failure: null, privacy: true, kept: [],
+      pick: { before: ['x', 'y'], added: [], choice: 'open', version, after, busy: false, error: null },
+    });
+    // B was asked first and C second. C answered without changing the ticks (version 3), then B answered and
+    // unticked y (version 4): B is the newest answered pick, though C is lower in the log.
+    const b = card('B', ['x'], 4);
+    const c = card('C', ['x', 'y'], 3);
+    const conversation: Conversation = { entries: [b, c], about: null, layouts: {}, pick: 'B' };
+    expect(pickOffer(conversation, b, ['x'], 4)).toBe('open');
+    expect(pickOffer(conversation, c, ['x'], 4)).toBe('replaced');
   });
 
   it('never takes Claude’s items out of a scan that replaced the one it picked on', async () => {

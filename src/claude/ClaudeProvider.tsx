@@ -51,7 +51,7 @@ function keepPanel(v: 'open' | 'folded') {
   }
 }
 
-const EMPTY: Conversation = { entries: [], about: null, layouts: {} };
+const EMPTY: Conversation = { entries: [], about: null, layouts: {}, pick: null };
 
 const keyOf = (w: Where) => `${w.mountPoint}#${w.run}`;
 const sameAbout = (a: ClaudeAbout, b: ClaudeAbout) =>
@@ -59,13 +59,14 @@ const sameAbout = (a: ClaudeAbout, b: ClaudeAbout) =>
 const sameSet = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((id) => b.includes(id));
 
 /**
- * One attempt at a request: its own token (a retry is a new attempt), its request id once the core gives it, and
- * whether Cancel came before the id did.
+ * One attempt at a request: its own token (a retry is a new attempt), its request id once the core gives it,
+ * whether Cancel came before the id did, and whether it is a Let Claude pick (one runs at a time).
  */
 interface Attempt {
   token: number;
   id: string | null;
   cancelled: boolean;
+  pick: boolean;
 }
 
 let seq = 0;
@@ -110,6 +111,7 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   /**
    * Each drive scan's newest answered Let Claude pick, by `drive#run`, kept the moment an answer is handled (the
    * conversations in state come a render later, and their mirror an effect after that). Only it may put a plan back.
+   * The same answer sets `Conversation.pick`, which decides the card that offers Keep mine, so both name one pick.
    */
   const newestPick = useRef(new Map<string, string>());
   const turnOnToken = useRef(0);
@@ -163,8 +165,8 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
    * Starts attempt `token` of a request: keeps its id for Cancel once it comes, or cancels it then if Cancel (or a
    * newer attempt) came first.
    */
-  const track = (rkey: string, token: number, begin: () => Promise<string>, failed: (message: string) => void) => {
-    requests.current.set(rkey, { token, id: null, cancelled: false });
+  const track = (rkey: string, token: number, begin: () => Promise<string>, failed: (message: string) => void, pick = false) => {
+    requests.current.set(rkey, { token, id: null, cancelled: false, pick });
     begin().then(
       (requestId) => {
         const r = requests.current.get(rkey);
@@ -208,9 +210,18 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     return scan?.phase === 'done' && scan.run === w.run ? scan : null;
   };
 
+  /**
+   * A Let Claude pick runs on the drive scan `w`, known at once (state comes a render later). One runs at a time, from
+   * the chip or any card's Try again, so its answers come in the order they were asked.
+   */
+  const picking = (w: Where) => {
+    for (const [rkey, r] of requests.current) if (r.pick && !r.cancelled && rkey.startsWith(`${keyOf(w)}/`)) return true;
+    return false;
+  };
+
   const start = (scope: Scope, job: JobKind) => {
     const scan = scanOf(scope);
-    if (!statusNow || changing.current || !scan) return;
+    if (!statusNow || changing.current || !scan || (job === 'pickPlan' && picking(scope))) return;
     setEnded(null);
     const id = `job-${++seq}`;
     const token = ++seq;
@@ -254,6 +265,7 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       token,
       () => bridge.claudeStart(scope.mountPoint, scan.scan, arg, onEvent),
       (message) => editEntry<JobEntry>(scope, id, (e) => ({ ...e, phase: 'failed', failure: { kind: 'error', message } })),
+      job === 'pickPlan',
     );
   };
 
@@ -266,8 +278,9 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   const picked = (scope: Scope, id: string, sent: number, answer: Extract<ClaudeEvent, { kind: 'done' }>['answer']) => {
     if (answer.result.kind !== 'pick') return;
     // This answer's card is the newest pick from now on, at once: a Keep mine about an older one, coming back in
-    // the same batch, sees it.
+    // the same batch, sees it. The same answer decides the card that offers Keep mine.
     newestPick.current.set(keyOf(scope), id);
+    edit(scope, (c) => ({ ...c, pick: id }));
     const r = answer.result;
     const d = drivesRef.current;
     const added = r.changes.filter((c) => c.change === 'add').map((c) => c.id);

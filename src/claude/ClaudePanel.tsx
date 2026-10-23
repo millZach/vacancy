@@ -22,7 +22,7 @@ import { RiskChip, SourceTag } from '../plan/bits';
 import { activeMoves, kindFolders } from '../tidy/model';
 import { Basis, Dropped, HiddenFold, JobLine, Mark, PrivacyNotice, PrivacyRow } from './bits';
 import { FIRST_QUESTION } from './ClaudeProvider';
-import { pickOffer, readsFiles, tileAt, useClaude, type ChatEntry, type Claude, type Conversation, type JobEntry, type JobKind, type Scope } from './context';
+import { jobRunning, pickOffer, readsFiles, tileAt, useClaude, type ChatEntry, type Claude, type Conversation, type JobEntry, type JobKind, type Scope } from './context';
 import './claude.css';
 
 interface Props {
@@ -203,9 +203,8 @@ function PanelOn(p: OnProps) {
     el?.scrollTo?.({ top: el.scrollHeight, behavior: 'smooth' });
   }, [c.entries.length, last?.phase, turns]);
   const about = c.entries.find((e): e is ChatEntry => e.kind === 'chat' && e.id === c.about) ?? null;
-  const running = (job: JobKind) => c.entries.some((e) => e.kind === 'job' && e.job === job && (e.phase === 'working' || e.phase === 'slow'));
   const chip = (job: JobKind) => (
-    <button type="button" className="cl-chip" onClick={() => claude.start(scope, job)} disabled={running(job) || claude.privacyChanging}>
+    <button type="button" className="cl-chip" onClick={() => claude.start(scope, job)} disabled={jobRunning(c, job) || claude.privacyChanging}>
       {ASKED[job]}
     </button>
   );
@@ -324,6 +323,7 @@ function JobItem({ e, ...p }: OnProps & { e: JobEntry }) {
         working={WORKING[e.job]}
         onCancel={() => claude.cancel(scope, e.id)}
         onRetry={() => claude.start(scope, e.job)}
+        retryDisabled={jobRunning(p.c, e.job) || claude.privacyChanging}
       />
       {e.phase === 'done' && a && (
         <div className="cp-msg is-claude">
@@ -422,7 +422,12 @@ function PickReply({ e, ...p }: OnProps & { e: JobEntry }) {
             <TriangleAlert size={13} aria-hidden /> <span>{pick.error} My items stay in the tray, unticked.</span>
           </p>
         )}
-        <button type="button" className="link-button cl-again" onClick={() => p.claude.start(p.scope, 'pickPlan')}>
+        <button
+          type="button"
+          className="link-button cl-again"
+          onClick={() => p.claude.start(p.scope, 'pickPlan')}
+          disabled={jobRunning(p.c, 'pickPlan') || p.claude.privacyChanging}
+        >
           Let Claude pick again
         </button>
       </>

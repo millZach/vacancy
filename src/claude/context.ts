@@ -38,15 +38,15 @@ export interface PickCard {
 }
 
 /**
- * Whether a pick's card may still offer Keep mine and Use Claude's plan: `open` only for the newest pick, while the
- * plan is still as its answer left it; `replaced` by a newer pick; `changed` since (an edit, or anything else);
- * `null` once settled (kept, used or stale).
+ * Whether a pick's card may still offer Keep mine and Use Claude's plan: `open` only for the newest answered pick
+ * (`Conversation.pick`, the same one Keep mine checks before it puts the plan back), while the plan is still as its
+ * answer left it; `replaced` by a pick answered after it; `changed` since (an edit, or anything else); `null` once
+ * settled (kept, used or stale).
  */
 export function pickOffer(c: Conversation, e: JobEntry, plan: readonly string[], planVersion: number): 'open' | 'changed' | 'replaced' | null {
   const pick = e.pick;
   if (!pick || pick.choice !== 'open') return null;
-  const newest = [...c.entries].reverse().find((x): x is JobEntry => x.kind === 'job' && x.job === 'pickPlan' && x.pick !== null);
-  if (newest?.id !== e.id) return 'replaced';
+  if (c.pick !== e.id) return 'replaced';
   const same = plan.length === pick.after.length && plan.every((id) => pick.after.includes(id));
   return planVersion === pick.version && same ? 'open' : 'changed';
 }
@@ -100,6 +100,11 @@ export interface ChatEntry {
 
 export type Entry = JobEntry | ChatEntry;
 
+/** A job of this kind is running in the conversation: its chip and every Try again of that kind wait for it. */
+export function jobRunning(c: Conversation, job: JobKind): boolean {
+  return c.entries.some((e) => e.kind === 'job' && e.job === job && (e.phase === 'working' || e.phase === 'slow'));
+}
+
 /** Both layouts of a sort Claude suggested one for. */
 export interface Layouts {
   builtin: TidyProposal;
@@ -116,6 +121,11 @@ export interface Conversation {
   about: string | null;
   /** Each sort's layouts, once Claude has suggested its own, by sort id. */
   layouts: Record<string, Layouts>;
+  /**
+   * The newest answered Let Claude pick, by entry id, in the order the answers came (set-aside ones included). Its
+   * card alone offers Keep mine, and only its Keep mine may put the plan back. One pick runs at a time.
+   */
+  pick: string | null;
 }
 
 /** Which drive scan: its drive, and which of its scans. */
