@@ -58,6 +58,28 @@ import type { TidyProposal } from '../bindings/TidyProposal';
 import type { TidyStay } from '../bindings/TidyStay';
 import type { TidySubfolder } from '../bindings/TidySubfolder';
 import type { Undone } from '../bindings/Undone';
+import type { ClaudeAbout } from '../bindings/ClaudeAbout';
+import type { ClaudeAnswer } from '../bindings/ClaudeAnswer';
+import type { ClaudeBasis } from '../bindings/ClaudeBasis';
+import type { ClaudeChange } from '../bindings/ClaudeChange';
+import type { ClaudeChangeKind } from '../bindings/ClaudeChangeKind';
+import type { ClaudeCheck } from '../bindings/ClaudeCheck';
+import type { ClaudeDropped } from '../bindings/ClaudeDropped';
+import type { ClaudeEvent } from '../bindings/ClaudeEvent';
+import type { ClaudeFailure } from '../bindings/ClaudeFailure';
+import type { ClaudeFine } from '../bindings/ClaudeFine';
+import type { ClaudeFlag } from '../bindings/ClaudeFlag';
+import type { ClaudeFolderNote } from '../bindings/ClaudeFolderNote';
+import type { ClaudeHidden } from '../bindings/ClaudeHidden';
+import type { ClaudeHiddenGroup } from '../bindings/ClaudeHiddenGroup';
+import type { ClaudeJob } from '../bindings/ClaudeJob';
+import type { ClaudeJobKind } from '../bindings/ClaudeJobKind';
+import type { ClaudeChatStarted } from '../bindings/ClaudeChatStarted';
+import type { ClaudeRefreshed } from '../bindings/ClaudeRefreshed';
+import type { ClaudeResult } from '../bindings/ClaudeResult';
+import type { ClaudeState } from '../bindings/ClaudeState';
+import type { ClaudeStatus } from '../bindings/ClaudeStatus';
+import type { TidyLayout } from '../bindings/TidyLayout';
 
 export type {
   AdvisorStatus,
@@ -119,6 +141,28 @@ export type {
   TidyStay,
   TidySubfolder,
   Undone,
+  ClaudeAbout,
+  ClaudeAnswer,
+  ClaudeBasis,
+  ClaudeChange,
+  ClaudeChangeKind,
+  ClaudeDropped,
+  ClaudeEvent,
+  ClaudeFailure,
+  ClaudeFine,
+  ClaudeFlag,
+  ClaudeFolderNote,
+  ClaudeHidden,
+  ClaudeHiddenGroup,
+  ClaudeJob,
+  ClaudeJobKind,
+  ClaudeChatStarted,
+  ClaudeRefreshed,
+  ClaudeResult,
+  ClaudeCheck,
+  ClaudeState,
+  ClaudeStatus,
+  TidyLayout,
 };
 
 /** Which desktop the UI is running on. It decides the window chrome (macOS draws traffic lights over the header). */
@@ -209,4 +253,60 @@ export interface Bridge {
   openHint(mountPoint: string, proposalId: string): Promise<void>;
   /** Opens a compiled vendor reference, including from history with no current scan. */
   openGuide(guide: GuideId): Promise<void>;
+
+  // Live Claude (ADR 0008), through the user's own Claude Code. Claude proposes; it never executes. Everything it adds
+  // is a proposal with `source: 'claude'`, unticked, risk Review, that passed the Guard; `dropped` names what didn't.
+
+  /**
+   * Claude's status: `notFound` (no Claude Code on this computer), `off` (the default: nothing is sent), `signedOut`
+   * (on, but Claude Code isn't signed in) or `on`; privacy mode; whether this is fixture mode (reads confined to the
+   * fixture); and what always stays hidden, for the privacy screens. Looks for Claude Code again each time.
+   */
+  claudeStatus(): Promise<ClaudeStatus>;
+  /** Turns Claude on (after the privacy notice) or off. Off stops running requests; Claude's items stay in the plan. */
+  claudeSetEnabled(on: boolean): Promise<ClaudeStatus>;
+  /** Turns privacy mode on or off (confirm before turning it off). Remembered, also while Claude is off. */
+  claudeSetPrivacy(on: boolean): Promise<ClaudeStatus>;
+  /**
+   * Checks this Claude Code before privacy mode off lets Claude open files (`check` in the status): one small real
+   * call that reads a file Vacancy made and is refused one Vacancy hides. Kept per Claude Code (its path, size,
+   * modified time and version), so it runs when the check is due, or always with `again` (Check again). Only with
+   * Claude on and privacy mode off. Until it passes, every call runs as if privacy mode were on.
+   */
+  claudeCheck(again: boolean): Promise<ClaudeStatus>;
+  // Every command below that touches a drive's scan names it: `scan` is the id its map came with (`ScanOutcome`'s
+  // `scan`). Once the drive has a newer scan (or its plan ran, or it went away) the command is refused and changes
+  // nothing: an item id like `claude-d17` means another item in another scan.
+
+  /**
+   * Starts a job on the drive's scan `scan` and resolves with its request id at once. `onEvent` then hears `working`,
+   * `slow` (still running after 20 s), and `done` with the checked answer or `failed` with why (`notFound`,
+   * `signedOut`, `timedOut` after 180 s, `cancelled`, `chatEnded`, or `error` with Claude's text, such as a rate
+   * limit). A `done` answer that changed the map carries `refreshed`: the overview, proposals and Tidy up sorts to
+   * show from now on.
+   */
+  claudeStart(mountPoint: string, scan: number, job: ClaudeJob, onEvent: (event: ClaudeEvent) => void): Promise<string>;
+  /**
+   * Asks the person's question `text` about one proposal or folder, in the chat `conversation`, or with `null` in a
+   * new chat (begun in the privacy mode now). The core keeps every chat and sends its turns so far itself; the UI
+   * sends only the new question. Resolves with the request id and the chat's id. A chat that a privacy change (or
+   * Claude turned off) ended answers `failed` with `chatEnded`, having sent nothing: ask again in a new chat.
+   */
+  claudeChat(
+    mountPoint: string,
+    scan: number,
+    conversation: string | null,
+    about: ClaudeAbout,
+    text: string,
+    onEvent: (event: ClaudeEvent) => void,
+  ): Promise<ClaudeChatStarted>;
+  /** Stops a running request (its Claude Code is killed); it ends `failed` with `cancelled`. */
+  claudeCancel(requestId: string): Promise<void>;
+  /**
+   * Picks the layout a Tidy up sort (`tidy-downloads`...) uses from now on: `builtin`, or `claude` once Claude has
+   * suggested one (a `tidyLayout` answer). Resolves with the map, proposals and sorts again. Windows only.
+   */
+  claudeChooseLayout(mountPoint: string, scan: number, tidyId: string, layout: TidyLayout): Promise<ClaudeRefreshed>;
+  /** Takes Claude's items `ids` back out of the drive's scan `scan` (Keep mine). Rejects for a rule's item. */
+  claudeRemoveItems(mountPoint: string, scan: number, ids: string[]): Promise<ClaudeRefreshed>;
 }

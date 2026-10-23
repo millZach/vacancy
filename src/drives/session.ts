@@ -1,5 +1,6 @@
 import type {
   CategoryTotal,
+  ClaudeRefreshed,
   DuplicateProgress,
   Duplicates,
   DuplicatesOutcome,
@@ -53,6 +54,14 @@ export type DriveScan =
       phase: 'done';
       /** Which scan this is (see `scanStarted`): the duplicate search of an earlier scan never lands on it. */
       run: number;
+      /** The core's id for this scan (`ScanOutcome`'s `scan`), which every Claude command about it names. */
+      scan: number;
+      /**
+       * The revision of the map shown (the core's, one per complete map it gives out for this scan: the scan's own is
+       * 0, then the duplicate search's and Claude's, counted together). A map with a revision no higher, arriving
+       * late, is ignored, whichever kind it is.
+       */
+      mapRevision: number;
       overview: Overview;
       /** The cleanups proposed for this drive, biggest first. */
       proposals: Proposal[];
@@ -63,6 +72,11 @@ export type DriveScan =
        * sorts always start out of it.
        */
       plan: string[];
+      /**
+       * Goes up by one each time what is in the plan changes, however it changes: Claude's panel tells an answer about
+       * the plan as it was sent from one about the plan as it is now.
+       */
+      planVersion: number;
       /** When it finished, in ms since the epoch. */
       at: number;
       /** The plan this scan ran, if it ran one. A drive keeps it, and its summary, until it is scanned again. */
@@ -122,11 +136,26 @@ export type Action =
   | { type: 'plan'; mountPoint: string; id: string; on: boolean }
   /** How far the duplicate search of the scan `run` has got. */
   | { type: 'dupsProgress'; mountPoint: string; run: number; progress: DuplicateProgress }
-  /** The duplicate search of the scan `run` ended: the map and proposals again, with what it found. */
+  /**
+   * The duplicate search of the scan `run` ended: the map and proposals again, with what it found. The search is
+   * done either way; its map is shown only if nothing newer (a higher `revision`, Claude's) is shown already.
+   */
   | { type: 'dupsEnded'; mountPoint: string; run: number; outcome: DuplicatesOutcome }
   | { type: 'dupsFailed'; mountPoint: string; run: number; message: string }
   /** Unticks a duplicate group (every copy stays), or ticks it again. */
   | { type: 'skipGroup'; mountPoint: string; id: string; skipped: boolean }
+  /**
+   * Claude's answer about the scan `run` changed the map (its own items, unticked, or a layout): the map, proposals
+   * and sorts to show from now on, unless a newer one (a higher `revision`) is already shown. The plan keeps what is
+   * still there.
+   */
+  | { type: 'claudeApplied'; mountPoint: string; run: number; refreshed: ClaudeRefreshed }
+  /**
+   * The plan of the scan `run` as a whole (Let Claude pick, or Keep mine putting the plan back). With `from`, only
+   * while the plan is still at that version: an edit made meanwhile is never overwritten. With `expect` too, only
+   * while the plan holds exactly those ids (Keep mine: as its pick's answer left it).
+   */
+  | { type: 'setPlan'; mountPoint: string; run: number; ids: string[]; from?: number; expect?: string[] }
   /** The user confirmed the plan and it started: drive switching and scanning wait until it ends. */
   | { type: 'runStarted'; mountPoint: string; plan: PlanSummary }
   /** What the run did since the last batch, in order. */
@@ -215,6 +244,19 @@ function goTo(s: Session, mountPoint: string, screen: Screen): Session {
   return { ...s, scans, current: mountPoint, screen, gone: null };
 }
 
+type DoneScan = Extract<DriveScan, { phase: 'done' }>;
+
+/** Whether two plans hold the same ids. */
+function sameIds(a: readonly string[], b: readonly string[]): boolean {
+  const set = new Set(b);
+  return new Set(a).size === set.size && a.every((id) => set.has(id));
+}
+
+/** `scan` with the plan `plan`: its version goes up by one when what is in it changes, and stays when it doesn't. */
+function withPlan(scan: DoneScan, plan: string[]): DoneScan {
+  return sameIds(plan, scan.plan) ? scan : { ...scan, plan, planVersion: scan.planVersion + 1 };
+}
+
 /** Applies `change` to the plan run of a drive whose scan is done. `change` returns the run as it was to do nothing. */
 function onPlanRun(s: Session, mountPoint: string, change: (run: PlanRun | null) => PlanRun | null): Session {
   const scan = scanOf(s, mountPoint);
@@ -234,6 +276,22 @@ function onSearch(
   const scan = scanOf(s, mountPoint);
   if (scan.phase !== 'done' || scan.run !== run || scan.duplicates.phase !== 'checking') return s;
   return { ...s, scans: { ...s.scans, [mountPoint]: change(scan) } };
+}
+
+/**
+ * Applies `change` to the drive's finished scan `run` while its plan hasn't run. A later scan, a scan whose plan ran,
+ * or none, ignores it.
+ */
+function onScan(
+  s: Session,
+  mountPoint: string,
+  run: number,
+  change: (scan: Extract<DriveScan, { phase: 'done' }>) => Extract<DriveScan, { phase: 'done' }>,
+): Session {
+  const scan = scanOf(s, mountPoint);
+  if (scan.phase !== 'done' || scan.run !== run || ranPlan(scan)) return s;
+  const next = change(scan);
+  return next === scan ? s : { ...s, scans: { ...s.scans, [mountPoint]: next } };
 }
 
 /** Applies `change` to the drive's scan only if it is the scan `run` (a later scan, or none, ignores it). */
@@ -278,10 +336,13 @@ export function reduce(s: Session, a: Action): Session {
           ? {
               phase: 'done',
               run: a.run,
+              scan: a.outcome.scan,
+              mapRevision: a.outcome.revision,
               overview: a.outcome.overview,
               proposals: a.outcome.proposals,
               tidy: a.outcome.tidy,
               plan: a.outcome.proposals.filter((p) => p.defaultOn).map((p) => p.id),
+              planVersion: 0,
               at: a.at,
               planRun: null,
               duplicates: { phase: 'checking', progress: null },
@@ -305,7 +366,7 @@ export function reduce(s: Session, a: Action): Session {
       if (scan.phase !== 'done' || !known || ranPlan(scan)) return s;
       if (scan.plan.includes(a.id) === a.on) return s;
       const plan = a.on ? [...scan.plan, a.id] : scan.plan.filter((id) => id !== a.id);
-      return { ...s, scans: { ...s.scans, [a.mountPoint]: { ...scan, plan } } };
+      return { ...s, scans: { ...s.scans, [a.mountPoint]: withPlan(scan, plan) } };
     }
     case 'dupsProgress':
       return onSearch(s, a.mountPoint, a.run, (scan) => ({
@@ -316,15 +377,18 @@ export function reduce(s: Session, a: Action): Session {
       return onSearch(s, a.mountPoint, a.run, (scan) => {
         // Once its plan has run, a scan's map stays the one the run started from.
         if (a.outcome.status === 'cancelled' || ranPlan(scan)) return { ...scan, duplicates: { phase: 'stopped' } };
+        const duplicates = { phase: 'done' as const, found: a.outcome.duplicates };
+        // A newer map (Claude's, made after the search had added its proposal) is kept: it has the duplicates too.
+        if (a.outcome.revision <= scan.mapRevision) return { ...scan, duplicates };
         const ids = new Set([...a.outcome.proposals.map((p) => p.id), ...a.outcome.tidy.map((t) => t.id)]);
         return {
-          ...scan,
+          ...withPlan(scan, scan.plan.filter((id) => ids.has(id))),
           overview: a.outcome.overview,
           proposals: a.outcome.proposals,
           // The sorts again, with the extra copies marked as deleted by duplicates (delete wins over sort).
           tidy: a.outcome.tidy,
-          plan: scan.plan.filter((id) => ids.has(id)),
-          duplicates: { phase: 'done', found: a.outcome.duplicates },
+          mapRevision: a.outcome.revision,
+          duplicates,
         };
       });
     case 'dupsFailed':
@@ -338,6 +402,25 @@ export function reduce(s: Session, a: Action): Session {
       const skippedGroups = a.skipped ? [...scan.skippedGroups, a.id] : scan.skippedGroups.filter((g) => g !== a.id);
       return { ...s, scans: { ...s.scans, [a.mountPoint]: { ...scan, skippedGroups } } };
     }
+    case 'claudeApplied':
+      return onScan(s, a.mountPoint, a.run, (scan) => {
+        if (a.refreshed.revision <= scan.mapRevision) return scan;
+        const ids = new Set([...a.refreshed.proposals.map((p) => p.id), ...a.refreshed.tidy.map((t) => t.id)]);
+        return {
+          ...withPlan(scan, scan.plan.filter((id) => ids.has(id))),
+          overview: a.refreshed.overview,
+          proposals: a.refreshed.proposals,
+          tidy: a.refreshed.tidy,
+          mapRevision: a.refreshed.revision,
+        };
+      });
+    case 'setPlan':
+      return onScan(s, a.mountPoint, a.run, (scan) => {
+        if (a.from !== undefined && a.from !== scan.planVersion) return scan;
+        if (a.expect !== undefined && !sameIds(a.expect, scan.plan)) return scan;
+        const known = (id: string) => scan.proposals.some((p) => p.id === id) || scan.tidy.some((t) => t.id === id);
+        return withPlan(scan, [...new Set(a.ids)].filter(known));
+      });
     case 'runStarted': {
       if (s.locked || a.plan.mountPoint !== a.mountPoint) return s;
       const next = onPlanRun(s, a.mountPoint, (run) =>

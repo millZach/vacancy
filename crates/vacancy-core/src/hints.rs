@@ -487,7 +487,7 @@ impl Hint {
             place_count: 0,
             risk: crate::Risk::Review,
             source: crate::ProposalSource::Rule,
-            ai_note: None,
+            claude_note: None,
             action: crate::ProposalAction::Hint,
             hint_action: Some(self.action.clone()),
             regenerable: false,

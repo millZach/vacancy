@@ -72,7 +72,8 @@ interface RowProps {
 function TidyRow({ tidy: t, plan, on, open, hot, onToggle, onOpen, onHot }: RowProps) {
   const moves = activeMoves(t, plan).length;
   const going = goingInPlan(t, plan).length;
-  const cls = ['tray-row', 'tidy-row', on && 'is-on', (hot || open) && 'is-hot'].filter(Boolean).join(' ');
+  const claude = t.layout === 'claude';
+  const cls = ['tray-row', 'tidy-row', on && 'is-on', (hot || open) && 'is-hot', claude && 'is-ai'].filter(Boolean).join(' ');
   return (
     <div className={cls} onMouseEnter={() => onHot(true)} onMouseLeave={() => onHot(false)} onFocus={() => onHot(true)} onBlur={() => onHot(false)}>
       <Checkbox on={on} onChange={onToggle} label={`Include Sort ${t.name}`} />
@@ -82,13 +83,14 @@ function TidyRow({ tidy: t, plan, on, open, hot, onToggle, onOpen, onHot }: RowP
           <ChevronRight size={13} aria-hidden />
         </button>
         <p className="tray-row-sum">
-          {formatCount(moves)} of {formatCount(t.loose)} loose {t.loose === 1 ? 'file' : 'files'}, sorted by kind and year.
+          {formatCount(moves)} of {formatCount(t.loose)} loose {t.loose === 1 ? 'file' : 'files'},{' '}
+          {claude ? 'sorted into Claude’s folders.' : 'sorted by kind and year.'}
           {going > 0 && ` ${formatCount(going)} ${going === 1 ? 'goes' : 'go'} in this plan’s deletes instead.`}
           {t.capped && (t.later > 0 ? ` ${formatCount(t.later)} more wait for a later run.` : ' Any more wait for a later run.')}
         </p>
         <MiniBeforeAfter tidy={t} plan={plan} onOpen={onOpen} />
         <div className="tray-row-meta">
-          <SourceTag source="rule" agent={null} />
+          <SourceTag source={claude ? 'claude' : 'rule'} agent={null} />
           <span className="source">
             <Undo2 size={11} aria-hidden /> Undo any time
           </span>

@@ -161,12 +161,12 @@ fn fixture_advice_is_review_off_and_rejects_unknown_outside_root_and_path_tricks
         assert_eq!(result.rejected.overlapping, 1);
         assert_eq!(result.explanations[0].provider, AdvisorProvider::Fixture);
         let p = &proposals.list()[0];
-        assert_eq!(p.source, ProposalSource::Ai);
+        assert_eq!(p.source, ProposalSource::Claude);
         assert_eq!(p.risk, Risk::Review);
         assert!(!p.default_on);
         assert!(!p.regenerable);
         assert!(
-            p.ai_note
+            p.claude_note
                 .as_ref()
                 .unwrap()
                 .starts_with("Suggested by Fixture advisor:")

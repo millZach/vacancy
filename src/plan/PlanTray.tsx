@@ -1,4 +1,5 @@
-import { ChevronDown, ChevronRight, LoaderCircle, PanelRightClose, Signpost } from 'lucide-react';
+import { ChevronDown, ChevronRight, LoaderCircle, MessageCircle, PanelRightClose, Signpost } from 'lucide-react';
+import { claudeNoteOf } from '../claude/context';
 import { useId, useState } from 'react';
 import type { Proposal, TidyProposal } from '../bridge';
 import { formatBytes, formatCount } from '../format';
@@ -41,6 +42,8 @@ interface Props {
   duplicates?: GroupChoice | null;
   /** Opens the duplicates panel in place of the tray. */
   onOpenDuplicates?: () => void;
+  /** "Ask Claude" about a proposal, in the Claude panel, while Claude is on. */
+  onAsk?: ((p: Proposal) => void) | undefined;
 }
 
 /**
@@ -66,6 +69,7 @@ export function PlanTray({
   error,
   duplicates,
   onOpenDuplicates,
+  onAsk,
 }: Props) {
   const deletes = proposals.filter((p) => p.action === 'delete');
   const hints = proposals.filter((p) => p.action === 'hint');
@@ -118,6 +122,7 @@ export function PlanTray({
               hot={hot === tileOf(p.id)}
               onToggle={() => onToggle(p.id)}
               onHot={onHot}
+              onAsk={onAsk}
             />
             ),
           )}
@@ -129,7 +134,7 @@ export function PlanTray({
             <p className="tray-group-note">Vacancy can’t do these itself. Tick one to get a reminder when the run finishes. They don’t count toward the total.</p>
             {hints.map((p) => (
               <ProposalRow key={p.id} proposal={p} mountPoint={mountPoint} agent={agent} on={plan.includes(p.id)} hot={false}
-                onToggle={() => onToggle(p.id)} onHot={onHot} />
+                onToggle={() => onToggle(p.id)} onHot={onHot} onAsk={onAsk} />
             ))}
           </section>
         )}
@@ -198,6 +203,7 @@ interface RowProps {
   hot: boolean;
   onToggle: () => void;
   onHot: (tile: string | null) => void;
+  onAsk?: ((p: Proposal) => void) | undefined;
 }
 
 interface DuplicatesRowProps {
@@ -252,14 +258,17 @@ function DuplicatesRow({ proposal: p, choice, on, hot, onToggle, onHot, onOpen }
 }
 
 /** One proposal: tick box, title (which opens the why and sample paths), summary, risk, source and size. */
-function ProposalRow({ proposal: p, mountPoint, agent, on, hot, onToggle, onHot }: RowProps) {
+function ProposalRow({ proposal: p, mountPoint, agent, on, hot, onToggle, onHot, onAsk }: RowProps) {
   const [open, setOpen] = useState(false);
   const more = useId();
   const hint = p.action === 'hint';
   const tile = hint ? null : tileOf(p.id);
-  const cls = ['tray-row', on && 'is-on', hot && 'is-hot'].filter(Boolean).join(' ');
+  const claude = p.source === 'claude';
+  const note = claude ? claudeNoteOf(p.claudeNote) : null;
+  const cls = ['tray-row', on && 'is-on', hot && 'is-hot', claude && 'is-ai'].filter(Boolean).join(' ');
   return (
     <div
+      data-row={p.id}
       className={cls}
       onMouseEnter={() => onHot(tile)}
       onMouseLeave={() => onHot(null)}
@@ -278,14 +287,20 @@ function ProposalRow({ proposal: p, mountPoint, agent, on, hot, onToggle, onHot 
           <span>{p.title}</span>
           <ChevronDown size={13} className={open ? 'is-open' : undefined} aria-hidden />
         </button>
-        <p className="tray-row-sum">{p.summary}</p>
+        {/* Claude's own item says in its note why it suggests it; its source tag says whose it is. */}
+        {note ? <p className="tray-row-sum cl-note">{note}</p> : <p className="tray-row-sum">{p.summary}</p>}
         <div className="tray-row-meta">
           {hint ? <span className="source"><Signpost size={11} aria-hidden /> You do this one</span> : <RiskChip risk={p.risk} />}
           <SourceTag source={p.source} agent={agent} />
+          {onAsk && (
+            <button type="button" className="link-button cl-ask" onClick={() => onAsk(p)}>
+              <MessageCircle size={11} aria-hidden /> Ask Claude
+            </button>
+          )}
         </div>
         {open && (
           <div className="tray-row-more" id={more}>
-            {hint ? <AdviceText why={p.why} action={p.hintAction} mountPoint={mountPoint} proposalId={p.id} /> : <p>{p.why}</p>}
+            {hint ? <AdviceText why={p.why} action={p.hintAction} mountPoint={mountPoint} proposalId={p.id} /> : !note && <p>{p.why}</p>}
             {hint && p.hintAction?.kind === 'steamUninstall' && <HintActionButton mountPoint={mountPoint} proposalId={p.id} />}
             {p.regenerable && !hint && <p className="tray-regen">Comes back on its own if you need it.</p>}
             <ul className="tray-paths" aria-label="Sample paths">

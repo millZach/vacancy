@@ -37,6 +37,24 @@
     display: none;
   }
 }
+/* Narrower still (the Claude panel and the plan tray both open): the drive's name keeps its room, the duplicate
+   search keeps only its figure, and the key keeps only what glows; then the key gives way. */
+@container (max-width: 640px) {
+  .atlas-toolbar .crumbs {
+    flex: none;
+    max-width: 40%;
+  }
+  .atlas-toolbar .crumb-blurb,
+  .atlas-toolbar .dup-pill-finding,
+  .atlas-toolbar .legend .key:not(:first-child) {
+    display: none;
+  }
+}
+@container (max-width: 470px) {
+  .atlas-toolbar .legend {
+    display: none;
+  }
+}
 .dup-pill b {
   color: var(--color-text);
   font-variant-numeric: tabular-nums;

@@ -33,7 +33,8 @@ export function DuplicatesPill({ search, groups, open, onToggle }: PillProps) {
         aria-valuenow={pct}
       >
         <LoaderCircle size={12} className="dup-pill-spin" aria-hidden />
-        Finding duplicates <b>{pct}%</b>
+        <span className="dup-pill-finding">Finding duplicates </span>
+        <b>{pct}%</b>
         <span className="dup-pill-bar" aria-hidden>
           <i style={{ width: `${pct}%` }} />
         </span>

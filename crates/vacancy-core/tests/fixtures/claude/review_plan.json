@@ -1,0 +1,43 @@
+{
+  "is_error": false,
+  "models": [
+    "claude-haiku-5-5"
+  ],
+  "permission_denials": [],
+  "result": "{\"summary\":\"Most of this plan is low risk: caches, temp files and crash reports can all be recreated or aren't needed. The one item to check first is the old installers in Downloads, since you can't get them back if you need them offline.\",\"flags\":[{\"id\":\"w-installers\",\"reason\":\"These setup files can't be downloaded again if the original website goes away or you need them offline. Open the list and remove any installer you might want to keep.\",\"risk\":\"review\"}],\"fine\":[{\"id\":\"w-dumps\",\"note\":\"Crash reports are only useful for sending to a developer right after a crash, so deleting them is harmless.\"},{\"id\":\"w-browser\",\"note\":\"Browser caches are saved web pages that Chrome rebuilds as you browse; your sign-ins, history and bookmarks stay.\"},{\"id\":\"w-node\",\"note\":\"Project dependencies come back with one npm install, and this project hasn't been touched in 90+ days.\"},{\"id\":\"w-pkgcache\",\"note\":\"Package manager download caches are re-downloaded when needed, and installed tools keep working.\"},{\"id\":\"w-temp\",\"note\":\"Temp files are meant to be thrown away, and the scan skips anything changed recently or in use.\"}],\"opened\":[]}",
+  "structured_output": {
+    "fine": [
+      {
+        "id": "w-dumps",
+        "note": "Crash reports are only useful for sending to a developer right after a crash, so deleting them is harmless."
+      },
+      {
+        "id": "w-browser",
+        "note": "Browser caches are saved web pages that Chrome rebuilds as you browse; your sign-ins, history and bookmarks stay."
+      },
+      {
+        "id": "w-node",
+        "note": "Project dependencies come back with one npm install, and this project hasn't been touched in 90+ days."
+      },
+      {
+        "id": "w-pkgcache",
+        "note": "Package manager download caches are re-downloaded when needed, and installed tools keep working."
+      },
+      {
+        "id": "w-temp",
+        "note": "Temp files are meant to be thrown away, and the scan skips anything changed recently or in use."
+      }
+    ],
+    "flags": [
+      {
+        "id": "w-installers",
+        "reason": "These setup files can't be downloaded again if the original website goes away or you need them offline. Open the list and remove any installer you might want to keep.",
+        "risk": "review"
+      }
+    ],
+    "opened": [],
+    "summary": "Most of this plan is low risk: caches, temp files and crash reports can all be recreated or aren't needed. The one item to check first is the old installers in Downloads, since you can't get them back if you need them offline."
+  },
+  "subtype": "success",
+  "type": "result"
+}

@@ -374,3 +374,179 @@ pub mod win {
         );
     }
 }
+
+/// Made-up browser profiles for the tests of ADR 0008's browser wall, from dummy files only (never a real
+/// browser's): a Chromium user data folder of its own (`--user-data-dir`, with a `Local State`) holding a profile
+/// named `Work`, `Default` in the browser's own root under `env`'s home, Opera's root that is its own profile, a
+/// Firefox profile kept in a folder of its own, and a game's settings folder with a `Preferences` file and nothing
+/// else a browser keeps.
+pub struct DummyBrowsers {
+    /// Everything that must stay hidden: files and folders in the profiles and roots that aren't caches.
+    pub hidden: Vec<PathBuf>,
+    /// The cache folders and files in them, which must stay readable.
+    pub caches: Vec<PathBuf>,
+    /// The profiles and roots themselves.
+    pub profiles: Vec<PathBuf>,
+    /// The game's settings folder and its files, which are no profile.
+    pub ordinary: Vec<PathBuf>,
+}
+
+/// The browser roots under `env`'s home: Chrome's own (in Windows' `%LOCALAPPDATA%`, or a Mac's `Application
+/// Support`) and Opera's, which is its own profile.
+pub fn browser_roots(env: &vacancy_core::Env) -> (PathBuf, PathBuf) {
+    let sub = |base: &Path, rel: &str| rel.split('/').fold(base.to_path_buf(), |p, s| p.join(s));
+    match env.platform {
+        vacancy_core::Platform::Windows => (
+            sub(&env.local_app_data, "Google/Chrome/User Data"),
+            sub(&env.app_data, "Opera Software/Opera Stable"),
+        ),
+        vacancy_core::Platform::MacOs => {
+            let support = sub(&env.home, "Library/Application Support");
+            (
+                sub(&support, "Google/Chrome"),
+                sub(&support, "com.operasoftware.Opera"),
+            )
+        }
+    }
+}
+
+/// What a Chromium profile keeps beside its markers that the by-name rules don't all name (the review of #29's
+/// list), and a folder made after any scan would be.
+const CHROMIUM_HIDDEN: &[&str] = &[
+    "Preferences",
+    "History",
+    "Sessions/Session_123",
+    "Shortcuts",
+    "Favicons",
+    "DIPS",
+    "File System/000/t/00/00000000",
+    "WebStorage/1/IndexedDB/x.sqlite3",
+    "databases/Databases.db",
+    "Sync Data/LevelDB/000003.log",
+    "Storage/ext/nkbihfbeogaeaoehlefnkodbefgpgknn/def/Local Storage/x.log",
+    "Service Worker/CacheStorage/abc/index",
+    "Service Worker/ScriptCache/x",
+    "Network Persistent State",
+    "TransportSecurity",
+    "Made After/x.txt",
+];
+
+const CHROMIUM_CACHES: &[&str] = &[
+    "Cache/Cache_Data/f_000001",
+    "Code Cache/js/index",
+    "GPUCache/data_0",
+    "DawnCache/data_0",
+    "GraphiteDawnCache/data_0",
+];
+
+fn sub(base: &Path, rel: &str) -> PathBuf {
+    rel.split('/').fold(base.to_path_buf(), |p, s| p.join(s))
+}
+
+impl DummyBrowsers {
+    fn put(&mut self, at: PathBuf, hidden: bool, len: u64) {
+        write_file(&at, len);
+        if hidden {
+            self.hidden.push(at);
+        } else {
+            self.caches.push(at);
+        }
+    }
+
+    fn chromium(&mut self, profile: &Path, len: u64) {
+        self.profiles.push(profile.to_path_buf());
+        for f in CHROMIUM_HIDDEN {
+            self.put(sub(profile, f), true, len);
+        }
+        for f in CHROMIUM_CACHES {
+            self.put(sub(profile, f), false, len);
+        }
+        for folder in [
+            "Sessions",
+            "File System",
+            "WebStorage",
+            "databases",
+            "Sync Data",
+            "Storage",
+            "Service Worker",
+        ] {
+            self.hidden.push(profile.join(folder));
+        }
+        for folder in [
+            "Cache",
+            "Code Cache",
+            "GPUCache",
+            "DawnCache",
+            "GraphiteDawnCache",
+        ] {
+            self.caches.push(profile.join(folder));
+        }
+    }
+
+    /// The hidden places under `base`, which Claude may be asked about.
+    pub fn hidden_under(&self, base: &Path) -> Vec<PathBuf> {
+        self.hidden
+            .iter()
+            .filter(|p| p.starts_with(base))
+            .cloned()
+            .collect()
+    }
+}
+
+/// Builds [`DummyBrowsers`] under `base` and `env`'s home, each file `len` bytes.
+pub fn dummy_browsers(base: &Path, env: &vacancy_core::Env, len: u64) -> DummyBrowsers {
+    let mut d = DummyBrowsers {
+        hidden: Vec::new(),
+        caches: Vec::new(),
+        profiles: Vec::new(),
+        ordinary: Vec::new(),
+    };
+    // A user data folder of its own, with the profile `Work`.
+    let data = base.join("BrowserData");
+    d.profiles.push(data.clone());
+    d.put(data.join("Local State"), true, len);
+    d.put(data.join("First Run"), true, len);
+    d.put(sub(&data, "Crashpad/reports/x.dmp"), true, len);
+    d.put(sub(&data, "ShaderCache/data_0"), false, len);
+    d.put(sub(&data, "GrShaderCache/data_0"), false, len);
+    d.chromium(&data.join("Work"), len);
+    // The browser's own root, with `Default`: by its markers, and by its name in a root.
+    let (own, opera) = browser_roots(env);
+    d.profiles.push(own.clone());
+    d.put(own.join("Local State"), true, len);
+    d.put(sub(&own, "ShaderCache/data_1"), false, len);
+    d.chromium(&own.join("Default"), len);
+    // Opera's root, which is its own profile.
+    d.put(opera.join("Local State"), true, len);
+    d.chromium(&opera, len);
+    // A Firefox profile kept in a folder of its own.
+    let firefox = sub(base, "FirefoxData/abc.custom");
+    d.profiles.push(firefox.clone());
+    for f in [
+        "prefs.js",
+        "times.json",
+        "extensions.json",
+        "xulstore.json",
+        "addonStartup.json.lz4",
+        "storage/default/https+++mail.example.com/ls/data.sqlite",
+        "datareporting/state.json",
+    ] {
+        d.put(sub(&firefox, f), true, len);
+    }
+    for f in [
+        "cache2/entries/ABC",
+        "startupCache/scriptCache.bin",
+        "thumbnails/x.png",
+    ] {
+        d.put(sub(&firefox, f), false, len);
+    }
+    // A game's settings: a `Preferences` file, and nothing else a browser keeps.
+    let game = base.join("Game Settings");
+    for f in ["Preferences", "savegame.dat"] {
+        let at = game.join(f);
+        write_file(&at, len);
+        d.ordinary.push(at);
+    }
+    d.ordinary.push(game);
+    d
+}

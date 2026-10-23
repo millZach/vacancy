@@ -18,7 +18,8 @@
   --dot-rgb: 196, 205, 219; /* the dot field's resting dots, as channels */
   --color-neon-ink: #ffe4f3; /* text lit by neon */
   --color-on-neon: #2a0619; /* text on a neon fill */
-  --color-ai: #cfc4e6; /* AI agent accents */
+  --color-ai: #cfc4e6; /* Claude's accents */
+  --ai-rgb: 207, 196, 230; /* --color-ai as channels, for rgba() */
   --color-safe: #7cc9a6;
   --color-review: #e6b85c;
   --color-careful: #f08a6c;
@@ -118,8 +119,7 @@
   --shadow-dialog: 0 30px 90px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(0, 0, 0, 0.4);
   --radius-dialog: 13px;
   --text-dialog: 22px; /* its question */
-  --text-advisor-dialog: 33px; /* approved focused advisor status dialog */
-  --text-advisor-mark: 18px;
+  --text-advisor-mark: 18px; /* the Claude Code mark in the Claude panel */
   --text-dialog-body: 13.5px;
 
   /* ---------- the run ---------- */

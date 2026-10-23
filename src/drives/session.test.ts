@@ -20,7 +20,7 @@ function mapOf(volume: VolumeInfo): Overview {
 }
 
 /** A finished scan of `volume`: its map and the fixture's proposals. */
-const done = (volume: VolumeInfo) => ({ status: 'done' as const, overview: mapOf(volume), proposals: fixtures.windows.proposals, tidy: [] });
+const done = (volume: VolumeInfo) => ({ status: 'done' as const, scan: 1, revision: 0, overview: mapOf(volume), proposals: fixtures.windows.proposals, tidy: [] });
 
 const run = (s: Session, ...actions: Action[]) => actions.reduce(reduce, s);
 const listed = (drives: VolumeInfo[] = [C, D, E]): Action => ({ type: 'listed', drives });
@@ -317,6 +317,7 @@ describe('each drive’s run and summary', () => {
 describe('the duplicate search after a scan', () => {
   const found = {
     status: 'done' as const,
+    revision: 1,
     overview: { ...mapOf(C), freeBytes: 1 },
     proposals: [
       ...fixtures.windows.proposals,
@@ -383,6 +384,56 @@ describe('the duplicate search after a scan', () => {
     expect(e.phase === 'done' && e.plan.includes(tidy[0]!.id)).toBe(true);
   });
 
+  /** Claude's answer, with its own item, made after the search had added its proposal: the newer map. */
+  const claudeItem = { ...fixtures.windows.proposals[0]!, id: 'claude-x', source: 'claude' as const, defaultOn: false };
+  const withClaude = (revision: number, proposals = found.proposals) => ({
+    revision,
+    overview: mapOf(C),
+    proposals: [...proposals, claudeItem],
+    tidy: [],
+    tidyOthers: [],
+  });
+  const idsOf = (s: Session) => {
+    const scan = scanOf(s, C.mountPoint);
+    return scan.phase === 'done' ? scan.proposals.map((p) => p.id) : [];
+  };
+
+  it('never lets a late duplicate map take out a newer Claude item, or its tick, and still ends the search', () => {
+    const s0 = run(start, ...scanned(C, 1));
+    // Claude's map (revision 2, made after the search's at 1) arrives first; the person ticks Claude's item.
+    const claude = run(s0, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed: withClaude(2) });
+    const ticked = run(claude, { type: 'plan', mountPoint: C.mountPoint, id: 'claude-x', on: true });
+    // Then the search's own map, older, arrives.
+    const ended = run(ticked, { type: 'dupsEnded', mountPoint: C.mountPoint, run: 1, outcome: found });
+    const e = scanOf(ended, C.mountPoint);
+    expect(idsOf(ended)).toContain('claude-x');
+    expect(idsOf(ended)).toContain('duplicates');
+    expect(e.phase === 'done' && e.plan).toContain('claude-x');
+    expect(e.phase === 'done' && e.mapRevision).toBe(2);
+    // The search is done all the same: the duplicates panel gets its groups.
+    expect(e.phase === 'done' && e.duplicates).toEqual({ phase: 'done', found: found.duplicates });
+  });
+
+  it('never lets an older Claude map take out the duplicate proposal once the search is done', () => {
+    const s0 = run(start, ...scanned(C, 1));
+    // The search's map (revision 2) arrives first...
+    const ended = run(s0, { type: 'dupsEnded', mountPoint: C.mountPoint, run: 1, outcome: { ...found, revision: 2 } });
+    expect(idsOf(ended)).toContain('duplicates');
+    // ...then Claude's, made before the search added its proposal (revision 1): ignored.
+    const late = run(ended, {
+      type: 'claudeApplied',
+      mountPoint: C.mountPoint,
+      run: 1,
+      refreshed: withClaude(1, fixtures.windows.proposals),
+    });
+    expect(late).toBe(ended);
+    const l = scanOf(late, C.mountPoint);
+    expect(l.phase === 'done' && l.duplicates.phase).toBe('done');
+    // A Claude map made after it (revision 3) has the duplicate proposal and its own item.
+    const newer = run(late, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed: withClaude(3) });
+    expect(idsOf(newer)).toEqual(expect.arrayContaining(['duplicates', 'claude-x']));
+  });
+
   it('keeps the groups the user unticks, and lets them be ticked again', () => {
     const s = run(start, ...scanned(C, 1));
     const off = run(s, { type: 'skipGroup', mountPoint: C.mountPoint, id: 'g3', skipped: true });
@@ -392,5 +443,85 @@ describe('the duplicate search after a scan', () => {
     const on = run(off, { type: 'skipGroup', mountPoint: C.mountPoint, id: 'g3', skipped: false });
     const n = scanOf(on, C.mountPoint);
     expect(n.phase === 'done' && n.skippedGroups).toEqual([]);
+  });
+});
+
+describe('Claude’s answers on a drive’s scan', () => {
+  const planOf = (s: Session) => {
+    const scan = scanOf(s, C.mountPoint);
+    return scan.phase === 'done' ? scan.plan : null;
+  };
+  const claudeItem = { ...fixtures.windows.proposals[0]!, id: 'claude-x', source: 'claude' as const, defaultOn: false };
+  const refreshed = {
+    revision: 1,
+    overview: mapOf(C),
+    proposals: [...fixtures.windows.proposals.filter((p) => p.id !== 'w-temp'), claudeItem],
+    tidy: [],
+    tidyOthers: [],
+  };
+
+  it('shows the proposals Claude’s answer sent, unticked, and the plan keeps what is still there', () => {
+    const before = run(start, ...scanned(C, 1));
+    const s = run(before, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed });
+    const scan = scanOf(s, C.mountPoint);
+    expect(scan.phase === 'done' && scan.proposals.some((p) => p.id === 'claude-x')).toBe(true);
+    expect(planOf(s)).not.toContain('claude-x');
+    expect(planOf(s)).toEqual(planOf(before)!.filter((id) => id !== 'w-temp'));
+  });
+
+  it('sets the whole plan (Let Claude pick, Keep mine), leaving out what the scan doesn’t have', () => {
+    const s = run(start, ...scanned(C, 1), { type: 'setPlan', mountPoint: C.mountPoint, run: 1, ids: ['w-node', 'w-node', 'nope'] });
+    expect(planOf(s)).toEqual(['w-node']);
+  });
+
+  it('counts each change of what is in the plan, however it changes, and nothing else', () => {
+    const versionOf = (s: ReturnType<typeof run>) => {
+      const scan = scanOf(s, C.mountPoint);
+      return scan.phase === 'done' ? scan.planVersion : null;
+    };
+    const s0 = run(start, ...scanned(C, 1));
+    expect(versionOf(s0)).toBe(0);
+    const s1 = run(s0, { type: 'plan', mountPoint: C.mountPoint, id: 'w-node', on: false });
+    expect(versionOf(s1)).toBe(1);
+    // Ticking what is ticked changes nothing; neither does a whole plan with the same items in another order.
+    expect(run(s1, { type: 'plan', mountPoint: C.mountPoint, id: 'w-temp', on: true })).toBe(s1);
+    const same = run(s1, { type: 'setPlan', mountPoint: C.mountPoint, run: 1, ids: [...planOf(s1)!].reverse() });
+    expect(versionOf(same)).toBe(1);
+    const s2 = run(s1, { type: 'setPlan', mountPoint: C.mountPoint, run: 1, ids: ['w-node'] });
+    expect(versionOf(s2)).toBe(2);
+    // Claude's items arriving unticked change the map, not the plan; a plan item they drop does.
+    const added = { ...refreshed, proposals: [...fixtures.windows.proposals, claudeItem] };
+    expect(versionOf(run(s2, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed: added }))).toBe(2);
+    expect(versionOf(run(s1, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed }))).toBe(2);
+  });
+
+  it('sets a whole plan from a version only while the plan is still at it: an edit made meanwhile stays', () => {
+    const s0 = run(start, ...scanned(C, 1));
+    const picked = run(s0, { type: 'setPlan', mountPoint: C.mountPoint, run: 1, ids: ['w-node'], from: 0 });
+    expect(planOf(picked)).toEqual(['w-node']);
+    const edited = run(s0, { type: 'plan', mountPoint: C.mountPoint, id: 'w-temp', on: false });
+    expect(run(edited, { type: 'setPlan', mountPoint: C.mountPoint, run: 1, ids: ['w-node'], from: 0 })).toBe(edited);
+  });
+
+  it('never puts back an older map: a slow reply with a lower revision than the one shown is ignored', () => {
+    const s0 = run(start, ...scanned(C, 1));
+    const newer = { ...refreshed, revision: 3 };
+    const shown = run(s0, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed: newer });
+    const doneScan = scanOf(shown, C.mountPoint);
+    expect(doneScan.phase === 'done' && doneScan.mapRevision).toBe(3);
+    // Keep mine's reply, made before the newer answer, arrives late without Claude's item: nothing changes.
+    const older = { ...refreshed, revision: 2, proposals: fixtures.windows.proposals };
+    expect(run(shown, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed: older })).toBe(shown);
+    expect(run(shown, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed: newer })).toBe(shown);
+    const latest = run(shown, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed: { ...older, revision: 4 } });
+    expect(latest).not.toBe(shown);
+  });
+
+  it('ignores an answer about an earlier scan, or one that comes after the plan ran', () => {
+    const later = run(start, ...scanned(C, 1), ...scanned(C, 2));
+    expect(run(later, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed })).toBe(later);
+    expect(run(later, { type: 'setPlan', mountPoint: C.mountPoint, run: 1, ids: [] })).toBe(later);
+    const ran = run(later, { type: 'runStarted', mountPoint: C.mountPoint, plan: { ...samplePlan, mountPoint: C.mountPoint } });
+    expect(run(ran, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 2, refreshed })).toBe(ran);
   });
 });

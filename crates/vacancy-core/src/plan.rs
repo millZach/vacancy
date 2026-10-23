@@ -30,7 +30,7 @@ use crate::fsid::{Identity, Walker};
 use crate::guard::{Denied, Guard};
 use crate::map::{Overview, ScannedVolume};
 use crate::report::{LeftForYou, Skip, SkipKind, StepKind};
-use crate::rules::{ProposalAction, loose};
+use crate::rules::{ProposalAction, ProposalSource, loose};
 use crate::scan::CancelToken;
 use crate::snapshot::{DirId, Snapshot, file_digest_key};
 use crate::tidy::Approved;
@@ -124,6 +124,8 @@ pub struct PlanStep {
     /// Files it moves, for a move step.
     #[ts(type = "number")]
     pub moves: u64,
+    /// Who proposed it: a built-in rule, or Claude (its own item, or for a sort, Claude's layout).
+    pub source: ProposalSource,
 }
 
 /// Why a selection couldn't become a plan.
@@ -230,6 +232,8 @@ pub(crate) struct Step {
     pub(crate) why: String,
     pub(crate) category: CategoryId,
     pub(crate) regenerable: bool,
+    /// Who proposed it.
+    pub(crate) source: ProposalSource,
     /// Its rule may take a folder that holds a macOS app bundle (Xcode's DerivedData).
     pub(crate) takes_built_apps: bool,
     pub(crate) actions: Vec<Action>,
@@ -278,6 +282,7 @@ impl Plan {
                 places: s.actions.len() as u64,
                 kind: StepKind::Delete,
                 moves: 0,
+                source: s.source,
             })
             .collect();
         steps.extend(self.tidy.iter().map(|t| PlanStep {
@@ -289,6 +294,7 @@ impl Plan {
             places: 0,
             kind: StepKind::Move,
             moves: t.moves,
+            source: t.source(),
         }));
         PlanSummary {
             id: self.id.clone(),
@@ -455,6 +461,7 @@ pub fn plan_with(
             why: p.why.clone(),
             category: p.category,
             regenerable: p.regenerable,
+            source: p.source,
             takes_built_apps: proposals.takes_built_apps(i),
             actions: Vec::new(),
             refused: Vec::new(),

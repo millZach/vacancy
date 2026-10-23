@@ -8,6 +8,11 @@ import type { TidyProposal } from "./TidyProposal";
  */
 export type ScanOutcome = { "status": "done", 
 /**
+ * Which scan this is, unique in the app's run: every command that changes Claude's part of a scan names
+ * it, and is refused once the drive has a newer scan.
+ */
+scan: number, 
+/**
  * The map.
  */
 overview: Overview, 
@@ -18,4 +23,8 @@ proposals: Array<Proposal>,
 /**
  * The folders Tidy up can sort (Windows; none on macOS, nor on a drive without the known folders).
  */
-tidy: Array<TidyProposal>, } | { "status": "cancelled" };
+tidy: Array<TidyProposal>, 
+/**
+ * This map's revision ([`ScannedVolume::next_revision`]): 0, the scan's own.
+ */
+revision: number, } | { "status": "cancelled" };

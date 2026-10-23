@@ -457,6 +457,15 @@ impl<'a> Collector<'a> {
         }
         match e.kind {
             EntryKind::File => {
+                // A marker is the folder's own, whichever of a file's hard-linked names the walk met first: a
+                // backup profile whose `Preferences` is a hard link to another profile's is still a profile.
+                // Hard links are merged for the byte totals only.
+                let len = e.name.len();
+                if Markers::may_mark(len)
+                    && let Some(name) = e.name.to_str()
+                {
+                    listing.markers = listing.markers.with(Markers::for_file(name));
+                }
                 if let Some(key) = e.link_key
                     && !self.links.first_sighting(key)
                 {
@@ -472,12 +481,6 @@ impl<'a> Collector<'a> {
                     || is_steam_manifest(e.name)
                 {
                     listing.push_kept(e.name, e.allocated, used, e.identity, e.logical);
-                }
-                let len = e.name.len();
-                if Markers::may_mark(len)
-                    && let Some(name) = e.name.to_str()
-                {
-                    listing.markers = listing.markers.with(Markers::for_file(name));
                 }
             }
             EntryKind::Dir | EntryKind::CloudDir => {
@@ -842,5 +845,54 @@ mod tests {
             "stopped part way: {}",
             listing.own_files
         );
+    }
+
+    /// Two browser profiles whose `Preferences` and `History` are one pair of hard-linked files (a backup made with
+    /// hard links): each folder gets its markers, whichever is listed first. Only the bytes are merged.
+    #[test]
+    fn hard_linked_markers_mark_every_folder_in_either_order() {
+        let file = |name: &'static str, key: u64| Entry {
+            name: std::ffi::OsStr::new(name),
+            kind: EntryKind::File,
+            allocated: 4096,
+            logical: 4000,
+            modified: 0,
+            accessed: 0,
+            link_key: Some(LinkKey::Index(key)),
+            identity: Some(u128::from(key)),
+            key: u128::from(key),
+        };
+        let profile = [file("Preferences", 40), file("History", 41)];
+        for first_is_a in [true, false] {
+            let links = LinkSet::new();
+            let cancel = CancelToken::new();
+            let mut a = Listing::default();
+            let mut b = Listing::default();
+            let order: [&mut Listing; 2] = if first_is_a {
+                [&mut a, &mut b]
+            } else {
+                [&mut b, &mut a]
+            };
+            for listing in order {
+                let mut collector = Collector::new(listing, &links, u64::MAX, i64::MAX, &cancel);
+                for e in &profile {
+                    collector.add(e);
+                }
+            }
+            for (name, listing) in [("a", &a), ("b", &b)] {
+                assert!(
+                    listing.markers.contains(Markers::PREFERENCES)
+                        && listing.markers.contains(Markers::CHROMIUM_STORE),
+                    "{name} is a profile (a listed first: {first_is_a})"
+                );
+            }
+            let (seen, linked) = if first_is_a { (&a, &b) } else { (&b, &a) };
+            assert_eq!((seen.own_files, seen.hard_links), (2, 0));
+            assert_eq!(
+                (linked.own_files, linked.own_bytes, linked.hard_links),
+                (0, 0, 2),
+                "the second names take no bytes"
+            );
+        }
     }
 }

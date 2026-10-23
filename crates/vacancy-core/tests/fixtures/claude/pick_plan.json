@@ -1,0 +1,22 @@
+{
+  "is_error": false,
+  "models": [
+    "claude-haiku-5-5"
+  ],
+  "permission_denials": [],
+  "result": "{\"summary\":\"The five safe items add up to about 2.3 MB and can be removed without losing anything you'd miss. I left out the old installers and the unknown folders, since those need your decision.\",\"tick\":[],\"untick\":[{\"id\":\"w-installers\",\"why\":\"Marked review. These are installer files in Downloads that you may want to keep as offline copies. Untick unless you're sure you don't need them.\"}],\"add\":[],\"opened\":[]}",
+  "structured_output": {
+    "add": [],
+    "opened": [],
+    "summary": "The five safe items add up to about 2.3 MB and can be removed without losing anything you'd miss. I left out the old installers and the unknown folders, since those need your decision.",
+    "tick": [],
+    "untick": [
+      {
+        "id": "w-installers",
+        "why": "Marked review. These are installer files in Downloads that you may want to keep as offline copies. Untick unless you're sure you don't need them."
+      }
+    ]
+  },
+  "subtype": "success",
+  "type": "result"
+}

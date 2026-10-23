@@ -2,7 +2,9 @@ import { Copy } from 'lucide-react';
 import { useEffect, useId, useRef, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import type { PlanSummary, Platform, Skip } from '../bridge';
+import { Mark } from '../claude/bits';
 import { formatBytes, formatCount } from '../format';
+import { listOf } from '../tidy/model';
 import './run.css';
 
 interface Props {
@@ -10,6 +12,8 @@ interface Props {
   plan: PlanSummary;
   /** Which bin deleted files skip: the Recycle Bin or the Trash. */
   platform: Platform;
+  /** Claude's notes on its own items and layouts in the plan, by step id. */
+  notes?: Record<string, string>;
   onCancel: () => void;
   onGo: () => void;
 }
@@ -23,7 +27,7 @@ const CHANGED: ReadonlySet<Skip['kind']> = new Set(['changed', 'gone', 'link', '
  * that changed since the scan are said quietly. "Go back" has
  * the focus; Escape and the scrim go back too.
  */
-export function ConfirmDialog({ plan, platform, onCancel, onGo }: Props) {
+export function ConfirmDialog({ plan, platform, notes = {}, onCancel, onGo }: Props) {
   const title = useId();
   const box = useRef<HTMLDivElement>(null);
   const bin = platform === 'macos' ? 'Trash' : 'Recycle Bin';
@@ -33,6 +37,9 @@ export function ConfirmDialog({ plan, platform, onCancel, onGo }: Props) {
   const n = plan.refused.length;
   const allChanged = plan.refused.every((r) => CHANGED.has(r.kind));
   const dups = plan.duplicates && plan.duplicates.copies > 0 ? plan.duplicates : null;
+  // What Claude suggested (ADR 0008): its own items, and sorts into its layout. They went through the same checks.
+  const claudeItems = plan.steps.filter((s) => s.source === 'claude' && s.kind === 'delete');
+  const claudeSorts = plan.steps.filter((s) => s.source === 'claude' && s.kind === 'move');
 
   // Escape goes back, before anything else hears it (the map would zoom out).
   useEffect(() => {
@@ -142,6 +149,39 @@ export function ConfirmDialog({ plan, platform, onCancel, onGo }: Props) {
               ? `changed since the scan and will be left alone.`
               : `changed since the scan or can’t be touched, and will be left alone.`}
           </p>
+        )}
+        {(claudeItems.length > 0 || claudeSorts.length > 0) && (
+          <div className="cl-confirm" role="group" aria-label="Suggested by Claude">
+            {claudeItems.length > 0 && (
+              <>
+                <p>
+                  <Mark size={12} />
+                  <span>
+                    <b>
+                      {claudeItems.length === 1 ? '1 item was suggested by Claude.' : `${formatCount(claudeItems.length)} items were suggested by Claude.`}
+                    </b>{' '}
+                    {claudeItems.length === 1 ? 'It' : 'They'} passed the Guard and you ticked {claudeItems.length === 1 ? 'it' : 'them'}.
+                  </span>
+                </p>
+                <ul>
+                  {claudeItems.map((s) => (
+                    <li key={s.id}>
+                      <b>{s.title}</b> ({formatBytes(s.bytes)}){notes[s.id] ? `: ${notes[s.id]}` : ''}
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            {claudeSorts.length > 0 && (
+              <p>
+                <Mark size={12} />
+                <span>
+                  {listOf(claudeSorts.map((s) => s.title.replace(/^Sort /, '')))} {claudeSorts.length === 1 ? 'is' : 'are'} sorted into
+                  Claude’s folders. Moves are journaled, so Undo still works.
+                </span>
+              </p>
+            )}
+          </div>
         )}
         <div className="dialog-actions">
           {/* Focus starts on the safe answer. */}

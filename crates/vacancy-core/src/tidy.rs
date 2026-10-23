@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::categorize::{CategoryId, Env, ItemRef, Platform};
@@ -35,7 +35,7 @@ use crate::reorg::{
     ValidatedPlan,
 };
 use crate::report::{Reorganized, RunReport, Skip, SkipKind, Undone};
-use crate::rules::{ProposalAction, Proposals};
+use crate::rules::{ProposalAction, ProposalSource, Proposals};
 use crate::scan::CancelToken;
 use crate::snapshot::{DirId, Snapshot};
 
@@ -82,6 +82,17 @@ impl TidyKind {
             TidyKind::Images | TidyKind::Videos | TidyKind::Audio | TidyKind::Documents
         )
     }
+}
+
+/// Whose sorting a Tidy up proposal is: the built-in rules' (by kind and year), or Claude's (ADR 0008), an
+/// alternative the user picks per folder. Both go through the same checks and the same journaled, undoable moves.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum TidyLayout {
+    #[default]
+    Builtin,
+    Claude,
 }
 
 /// One file a sort moves, as the review shows it. Display text only.
@@ -162,6 +173,10 @@ pub struct TidyProposal {
     /// Files listed after the cap, counted in the same listing pass, waiting for a later run.
     #[ts(type = "number")]
     pub later: u64,
+    /// Whose sorting this is.
+    pub layout: TidyLayout,
+    /// What Claude said about its layout; `None` for the built-in rules.
+    pub note: Option<String>,
 }
 
 /// A drive's Tidy up proposals, with what is needed to plan them: each folder's inventory and drafts. Empty on
@@ -171,7 +186,8 @@ pub struct Tidy {
     folders: Vec<FolderSort>,
 }
 
-/// One folder's sort: the inventory taken for it, its drafts, and the proposal shown.
+/// One folder's sort: the inventory taken for it, the layout a plan uses (its drafts, and the proposal shown), and
+/// the other layout, once Claude has suggested one.
 #[derive(Debug)]
 struct FolderSort {
     /// The folder in the scan, when the scan has it.
@@ -179,6 +195,30 @@ struct FolderSort {
     inventory: Inventory,
     drafts: Vec<Drafted>,
     proposal: TidyProposal,
+    /// The layout not in use: Claude's while the built-in one is, and the other way round.
+    other: Option<Layout>,
+}
+
+/// A layout of a folder's sort: its drafts, pinned to the review's names, and what the review shows.
+#[derive(Debug)]
+struct Layout {
+    drafts: Vec<Drafted>,
+    proposal: TidyProposal,
+}
+
+/// One loose file Claude placed in its layout: its name, and the folders (below the folder being sorted) it goes in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Placed {
+    pub name: String,
+    pub folders: Vec<String>,
+}
+
+/// Claude's layout of a folder, as checked: the proposal (layout [`TidyLayout::Claude`]) and what was left out of
+/// it, by file name, with why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Suggested {
+    pub proposal: TidyProposal,
+    pub dropped: Vec<(String, String)>,
 }
 
 /// A draft (its reviewed destination pinned), with every delete proposal target that takes its file.
@@ -229,39 +269,262 @@ impl Tidy {
             })
             .collect();
         for sort in &mut self.folders {
-            let keys: HashMap<String, u128> = sort
-                .inventory
+            let FolderSort {
+                dir,
+                inventory,
+                drafts,
+                proposal,
+                other,
+            } = sort;
+            let keys: HashMap<String, u128> = inventory
                 .entries()
                 .iter()
                 .map(|e| (e.id.clone(), e.file_id))
                 .collect();
-            let mut names: HashMap<String, Vec<String>> = HashMap::new();
-            for d in &mut sort.drafts {
-                d.covers.retain(|(by, _)| by != id);
-                let key = keys.get(&d.draft.entry_id).copied();
-                for (dir, file_key, target) in &taken {
-                    if Some(*dir) == sort.dir && Some(*file_key) == key {
-                        d.covers.push((id.to_owned(), *target));
-                    }
-                }
-                let mut by: Vec<String> = d.covers.iter().map(|(p, _)| p.clone()).collect();
-                by.sort();
-                by.dedup();
-                names.insert(d.draft.entry_id.clone(), by);
-            }
             // The review names moves by file name; the drafts by inventory entry.
-            let by_name: HashMap<&str, &str> = sort
-                .inventory
+            let by_name: HashMap<&str, &str> = inventory
                 .entries()
                 .iter()
                 .map(|e| (e.name.as_str(), e.id.as_str()))
                 .collect();
-            for mv in &mut sort.proposal.moves {
-                if let Some(by) = by_name.get(mv.name.as_str()).and_then(|e| names.get(*e)) {
-                    mv.deleted_by = by.clone();
+            let cover = |drafts: &mut [Drafted], proposal: &mut TidyProposal| {
+                let mut names: HashMap<String, Vec<String>> = HashMap::new();
+                for d in drafts.iter_mut() {
+                    d.covers.retain(|(by, _)| by != id);
+                    let key = keys.get(&d.draft.entry_id).copied();
+                    for (at, file_key, target) in &taken {
+                        if Some(*at) == *dir && Some(*file_key) == key {
+                            d.covers.push((id.to_owned(), *target));
+                        }
+                    }
+                    let mut by: Vec<String> = d.covers.iter().map(|(p, _)| p.clone()).collect();
+                    by.sort();
+                    by.dedup();
+                    names.insert(d.draft.entry_id.clone(), by);
                 }
+                for mv in &mut proposal.moves {
+                    if let Some(by) = by_name.get(mv.name.as_str()).and_then(|e| names.get(*e)) {
+                        mv.deleted_by = by.clone();
+                    }
+                }
+            };
+            cover(drafts, proposal);
+            if let Some(layout) = other {
+                cover(&mut layout.drafts, &mut layout.proposal);
             }
         }
+    }
+
+    /// The layouts not in use, once Claude has suggested one: Claude's while the built-in one is in use, and the
+    /// built-in one while Claude's is.
+    pub fn others(&self) -> Vec<TidyProposal> {
+        self.folders
+            .iter()
+            .filter_map(|f| f.other.as_ref().map(|o| o.proposal.clone()))
+            .collect()
+    }
+
+    /// Uses `layout` for the sort `id` from now on: a plan sorts with it. Says why not when there is no such sort,
+    /// or Claude hasn't suggested a layout for it.
+    pub fn choose(&mut self, id: &str, layout: TidyLayout) -> Result<(), String> {
+        let sort = self
+            .folders
+            .iter_mut()
+            .find(|f| f.proposal.id == id)
+            .ok_or_else(|| format!("There is no Tidy up {id} in this scan."))?;
+        if sort.proposal.layout == layout {
+            return Ok(());
+        }
+        let Some(other) = sort.other.take() else {
+            return Err(format!(
+                "Claude hasn't suggested a layout for {} yet.",
+                sort.proposal.name
+            ));
+        };
+        let drafts = std::mem::replace(&mut sort.drafts, other.drafts);
+        let proposal = std::mem::replace(&mut sort.proposal, other.proposal);
+        sort.other = Some(Layout { drafts, proposal });
+        Ok(())
+    }
+
+    /// The loose files of the sort `id` Claude may place: the files the built-in rules would move (and that made
+    /// it into their review), by name, with their size, the year they were last modified and their kind. Files the
+    /// rules leave where they are (shortcuts, settings, unfinished downloads, hidden files) stay put in every layout.
+    pub fn movable(&self, id: &str) -> Vec<(String, u64, i32, TidyKind)> {
+        let Some(sort) = self.folders.iter().find(|f| f.proposal.id == id) else {
+            return Vec::new();
+        };
+        let base = builtin(sort);
+        let by_id: HashMap<&str, &InventoryEntry> = sort
+            .inventory
+            .entries()
+            .iter()
+            .map(|e| (e.id.as_str(), e))
+            .collect();
+        base.0
+            .iter()
+            .filter_map(|d| by_id.get(d.draft.entry_id.as_str()))
+            .map(|e| {
+                let kind = match sort_name(&e.name) {
+                    Sorted::Into(kind) => kind,
+                    Sorted::Stays(_) => TidyKind::Later,
+                };
+                (
+                    e.name.clone(),
+                    e.allocated_bytes,
+                    year_of(e.modified_ns),
+                    kind,
+                )
+            })
+            .collect()
+    }
+
+    /// Checks Claude's layout `placed` for the sort `id` and keeps it as that folder's Claude layout, beside the
+    /// built-in one (which stays in use until [`Tidy::choose`] picks Claude's). Claude may only place a file the
+    /// built-in rules would move, into one or two folders with names Windows allows; `hidden` names a file that
+    /// always stays hidden from Claude. Everything else is left out with why. The moves are then validated like
+    /// the rules' own: same volume, nothing overwritten, a numbered name where one is taken, pinned for the run,
+    /// the same 512-file cap, and delete wins over sort.
+    pub fn suggest(
+        &mut self,
+        id: &str,
+        note: &str,
+        placed: &[Placed],
+        hidden: &dyn Fn(&str) -> bool,
+        cancel: &CancelToken,
+    ) -> Result<Suggested, String> {
+        let sort = self
+            .folders
+            .iter_mut()
+            .find(|f| f.proposal.id == id)
+            .ok_or_else(|| format!("There is no Tidy up {id} in this scan."))?;
+        let (base_drafts, base) = builtin(sort);
+        let entries: HashMap<&str, &InventoryEntry> = sort
+            .inventory
+            .entries()
+            .iter()
+            .map(|e| (e.id.as_str(), e))
+            .collect();
+        let movable: HashMap<&str, &Drafted> = base_drafts
+            .iter()
+            .filter_map(|d| {
+                entries
+                    .get(d.draft.entry_id.as_str())
+                    .map(|e| (e.name.as_str(), d))
+            })
+            .collect();
+        let stays: HashMap<&str, &str> = base
+            .stays
+            .iter()
+            .map(|s| (s.name.as_str(), s.reason.as_str()))
+            .collect();
+        let mut dropped: Vec<(String, String)> = Vec::new();
+        let mut drafts: Vec<Drafted> = Vec::new();
+        let mut kinds: HashMap<String, TidyKind> = HashMap::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for p in placed {
+            if cancel.is_cancelled() {
+                return Err("Cancelled.".into());
+            }
+            let Some(d) = movable.get(p.name.as_str()) else {
+                let why = match stays.get(p.name.as_str()) {
+                    Some(reason) => format!("Vacancy's rules keep it where it is: {reason}"),
+                    None => format!("It isn't a loose file at the top of {}.", base.name),
+                };
+                dropped.push((p.name.clone(), why));
+                continue;
+            };
+            if hidden(&p.name) {
+                dropped.push((
+                    p.name.clone(),
+                    "It is one of the places that always stay hidden from Claude.".into(),
+                ));
+                continue;
+            }
+            if !seen.insert(p.name.to_lowercase()) {
+                dropped.push((p.name.clone(), "Claude placed it twice.".into()));
+                continue;
+            }
+            if p.folders.is_empty()
+                || p.folders.len() > 2
+                || !p.folders.iter().all(|f| folder_name_ok(f))
+            {
+                dropped.push((
+                    p.name.clone(),
+                    format!(
+                        "Its folder \"{}\" isn't a name Windows allows, one or two folders deep.",
+                        p.folders.join("\\")
+                    ),
+                ));
+                continue;
+            }
+            if let Some(kind) =
+                entries
+                    .get(d.draft.entry_id.as_str())
+                    .map(|e| match sort_name(&e.name) {
+                        Sorted::Into(kind) => kind,
+                        Sorted::Stays(_) => TidyKind::Later,
+                    })
+            {
+                kinds.insert(d.draft.entry_id.clone(), kind);
+            }
+            drafts.push(Drafted {
+                draft: Draft {
+                    entry_id: d.draft.entry_id.clone(),
+                    destination: sort.proposal.folder,
+                    directories: p.folders.clone(),
+                    filename: None,
+                },
+                covers: d.covers.clone(),
+            });
+        }
+        let placed_ids: HashSet<&str> = drafts.iter().map(|d| d.draft.entry_id.as_str()).collect();
+        let mut claude_stays: Vec<TidyStay> =
+            base.stays.iter().filter(|s| !s.dropped).cloned().collect();
+        for d in base_drafts {
+            if !placed_ids.contains(d.draft.entry_id.as_str())
+                && let Some(e) = entries.get(d.draft.entry_id.as_str())
+            {
+                claude_stays.push(TidyStay {
+                    name: e.name.clone(),
+                    reason: "Claude's layout leaves it where it is.".into(),
+                    dropped: false,
+                });
+            }
+        }
+        if drafts.is_empty() {
+            return Err(format!(
+                "Claude's layout for {} placed none of its loose files Vacancy could move.",
+                base.name
+            ));
+        }
+        let reviewed = review(&sort.inventory, drafts, &kinds, cancel).ok_or_else(|| {
+            format!(
+                "Claude's layout for {} can't be checked now: the folder changed. Scan again.",
+                base.name
+            )
+        })?;
+        claude_stays.extend(reviewed.dropped);
+        claude_stays.sort_by_key(|s| s.name.to_lowercase());
+        let proposal = TidyProposal {
+            moves: reviewed.moves,
+            stays: claude_stays,
+            existing: reviewed.existing,
+            layout: TidyLayout::Claude,
+            note: Some(note.to_owned()),
+            ..base.clone()
+        };
+        let layout = Layout {
+            drafts: reviewed.drafts,
+            proposal: proposal.clone(),
+        };
+        if sort.proposal.layout == TidyLayout::Claude {
+            sort.drafts = layout.drafts;
+            sort.proposal = layout.proposal;
+        } else {
+            sort.other = Some(layout);
+        }
+        Ok(Suggested { proposal, dropped })
     }
 
     /// Validates the sort `id` again, now, for a plan whose delete targets still in it are `surviving`: the files
@@ -321,6 +584,7 @@ impl Tidy {
                 into.sort_by_key(|b| std::cmp::Reverse(b.1));
                 Ok(Approved {
                     id: sort.proposal.id.clone(),
+                    layout: sort.proposal.layout,
                     folder: sort.proposal.folder,
                     name: sort.proposal.name.clone(),
                     path: sort.proposal.path.clone(),
@@ -343,6 +607,8 @@ impl Tidy {
 #[derive(Clone, Debug)]
 pub(crate) struct Approved {
     pub(crate) id: String,
+    /// Whose layout it sorts into.
+    pub(crate) layout: TidyLayout,
     pub(crate) folder: Folder,
     pub(crate) name: String,
     pub(crate) path: String,
@@ -360,6 +626,14 @@ impl Approved {
     /// The step's title: "Sort Downloads".
     pub(crate) fn title(&self) -> String {
         format!("Sort {}", self.name)
+    }
+
+    /// Who proposed the sort: the built-in rules, or Claude for its layout.
+    pub(crate) fn source(&self) -> ProposalSource {
+        match self.layout {
+            TidyLayout::Builtin => ProposalSource::Rule,
+            TidyLayout::Claude => ProposalSource::Claude,
+        }
     }
 
     /// The map category its folder is in.
@@ -669,10 +943,110 @@ fn sort_folder(
     if drafts.is_empty() {
         return None;
     }
+    let loose = entries.len() as u64;
+    let reviewed = review(&inventory, drafts, &kinds, cancel)?;
+    stays.extend(reviewed.dropped);
+    let subfolders = dir
+        .map(|d| {
+            let mut subs: Vec<TidySubfolder> = snap
+                .children(d)
+                .map(|c| TidySubfolder {
+                    name: snap.name(c).to_string_lossy().into_owned(),
+                    files: snap.tree(c).files,
+                })
+                .collect();
+            subs.sort_by_key(|a| a.name.to_lowercase());
+            subs
+        })
+        .unwrap_or_default();
+    Some(FolderSort {
+        dir,
+        proposal: TidyProposal {
+            id: format!("{PREFIX}{}", folder_id(at)),
+            folder: at,
+            name: folder_name(at).to_owned(),
+            path,
+            loose,
+            moves: reviewed.moves,
+            stays,
+            subfolders,
+            existing: reviewed.existing,
+            limit: LIMIT as u64,
+            capped: inventory.truncated(),
+            later: inventory.later(),
+            layout: TidyLayout::Builtin,
+            note: None,
+        },
+        inventory,
+        drafts: reviewed.drafts,
+        other: None,
+    })
+}
+
+/// The built-in layout of a sort, whichever is in use: its drafts and proposal.
+fn builtin(sort: &FolderSort) -> (&[Drafted], &TidyProposal) {
+    match &sort.other {
+        Some(o) if sort.proposal.layout != TidyLayout::Builtin => (&o.drafts, &o.proposal),
+        _ => (&sort.drafts, &sort.proposal),
+    }
+}
+
+/// The rules' verdict on a name (here, beside [`Tidy::movable`]'s local `sort`).
+fn sort_name(name: &str) -> Sorted {
+    sort(name)
+}
+
+/// A folder name Claude may give: one Windows allows, short, and not one Windows keeps for devices. The engine
+/// checks every name again when it validates the moves.
+fn folder_name_ok(name: &str) -> bool {
+    let chars = name.chars().count();
+    if chars == 0
+        || chars > 64
+        || name.trim() != name
+        || name.ends_with('.')
+        || name == "."
+        || name == ".."
+        || name.contains('~')
+        || name.chars().any(|c| {
+            c.is_control() || matches!(c, '"' | '*' | '/' | ':' | '<' | '>' | '?' | '\\' | '|')
+        })
+    {
+        return false;
+    }
+    let stem = name.split('.').next().unwrap_or("").to_uppercase();
+    let device = matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ["COM", "LPT"].iter().any(|p| {
+        stem.strip_prefix(p)
+            .is_some_and(|n| n.len() == 1 && n.chars().all(|c| c.is_ascii_digit() && c != '0'))
+    });
+    !device
+}
+
+/// A layout's drafts validated together, now: what the review shows, the drafts the engine dropped (said as
+/// stays), and each draft it kept pinned to its reviewed destination: the run uses exactly what the drawer showed,
+/// or leaves the file where it is.
+struct Reviewed {
+    drafts: Vec<Drafted>,
+    moves: Vec<TidyMove>,
+    dropped: Vec<TidyStay>,
+    existing: Vec<String>,
+}
+
+fn review(
+    inventory: &Inventory,
+    drafts: Vec<Drafted>,
+    kinds: &HashMap<String, TidyKind>,
+    cancel: &CancelToken,
+) -> Option<Reviewed> {
     let all: Vec<Draft> = drafts.iter().map(|d| d.draft.clone()).collect();
     let plan = inventory.validate(&all, cancel).ok()?;
-    let by_id: HashMap<&str, &InventoryEntry> =
-        entries.iter().map(|e| (e.id.as_str(), *e)).collect();
+    let by_id: HashMap<&str, &InventoryEntry> = inventory
+        .entries()
+        .iter()
+        .map(|e| (e.id.as_str(), e))
+        .collect();
     let covers: HashMap<&str, &[Cover]> = drafts
         .iter()
         .map(|d| (d.draft.entry_id.as_str(), d.covers.as_slice()))
@@ -699,6 +1073,7 @@ fn sort_folder(
             })
         })
         .collect::<Vec<_>>();
+    let mut stays = Vec::new();
     for d in plan.dropped() {
         if let Some(e) = by_id.get(d.entry_id.as_str()) {
             stays.push(TidyStay {
@@ -739,37 +1114,11 @@ fn sort_folder(
         .map(|d| d.names.join("\\"))
         .collect();
     existing.sort();
-    let subfolders = dir
-        .map(|d| {
-            let mut subs: Vec<TidySubfolder> = snap
-                .children(d)
-                .map(|c| TidySubfolder {
-                    name: snap.name(c).to_string_lossy().into_owned(),
-                    files: snap.tree(c).files,
-                })
-                .collect();
-            subs.sort_by_key(|a| a.name.to_lowercase());
-            subs
-        })
-        .unwrap_or_default();
-    Some(FolderSort {
-        dir,
-        proposal: TidyProposal {
-            id: format!("{PREFIX}{}", folder_id(at)),
-            folder: at,
-            name: folder_name(at).to_owned(),
-            path,
-            loose: entries.len() as u64,
-            moves,
-            stays,
-            subfolders,
-            existing,
-            limit: LIMIT as u64,
-            capped: inventory.truncated(),
-            later: inventory.later(),
-        },
-        inventory,
+    Some(Reviewed {
         drafts,
+        moves,
+        dropped: stays,
+        existing,
     })
 }
 

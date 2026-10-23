@@ -20,5 +20,8 @@ export default defineConfig({
     setupFiles: ['src/test/setup.ts'],
     css: false,
     restoreMocks: true,
+    // Whole-app flows (scan, plan, run, summary, history) take about a second here but over five on CI's
+    // Windows runners, past Vitest's default limit.
+    testTimeout: 20_000,
   },
 });

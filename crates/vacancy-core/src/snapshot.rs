@@ -108,6 +108,16 @@ impl Markers {
     pub const DROPBOX_ROOT: Self = Self(1 << 10);
     /// A file named `Preferences`: Chromium and Electron keep one in every browser profile.
     pub const PREFERENCES: Self = Self(1 << 11);
+    /// One of the stores a Chromium profile keeps (`History`, `Login Data`, `Cookies`, `Web Data`, `Bookmarks` or
+    /// `Secure Preferences`): with [`Markers::PREFERENCES`], the folder is a browser profile (ADR 0008).
+    pub const CHROMIUM_STORE: Self = Self(1 << 12);
+    /// `Local State`: the top of a Chromium browser's user data folder, where its profiles are.
+    pub const LOCAL_STATE: Self = Self(1 << 13);
+    /// `prefs.js`: Firefox keeps one in every profile.
+    pub const FIREFOX_PREFS: Self = Self(1 << 14);
+    /// One of the files a Firefox profile keeps (`times.json`, `places.sqlite`, `key4.db`, `cookies.sqlite` or
+    /// `compatibility.ini`): with [`Markers::FIREFOX_PREFS`], the folder is a Firefox profile.
+    pub const FIREFOX_STORE: Self = Self(1 << 15);
 
     /// Whether every marker in `other` is present.
     pub fn contains(self, other: Self) -> bool {
@@ -139,6 +149,13 @@ impl Markers {
             "cachedir.tag" | ".rustc_info.json" => Self::CARGO_TARGET,
             ".dropbox" => Self::DROPBOX_ROOT,
             "preferences" => Self::PREFERENCES,
+            "history" | "login data" | "cookies" | "web data" | "bookmarks"
+            | "secure preferences" => Self::CHROMIUM_STORE,
+            "local state" => Self::LOCAL_STATE,
+            "prefs.js" => Self::FIREFOX_PREFS,
+            "times.json" | "places.sqlite" | "key4.db" | "cookies.sqlite" | "compatibility.ini" => {
+                Self::FIREFOX_STORE
+            }
             _ => Self::default(),
         }
     }

@@ -488,3 +488,48 @@ fn frames_out_of_place_are_refused() {
         .unwrap();
     });
 }
+
+/// A backup of a browser profile made with hard links: `Preferences` and `History` are the same two records in
+/// `a` and `b`. Both folders get the markers, whichever is listed first; the bytes count once.
+#[test]
+fn hard_linked_markers_mark_both_folders_in_either_order() {
+    let a = units("a");
+    let b = units("b");
+    let prefs = units("Preferences");
+    let history = units("History");
+    for a_first in [true, false] {
+        let bytes = stream(|enc| {
+            enc.dir(ROOT).unwrap();
+            enc.entry(&entry(20, &a, ENTRY_DIR | ENTRY_ENTER, 0))
+                .unwrap();
+            enc.entry(&entry(22, &b, ENTRY_DIR | ENTRY_ENTER, 0))
+                .unwrap();
+            enc.dir_end(ROOT, 2).unwrap();
+            let order = if a_first { [20, 22] } else { [22, 20] };
+            for dir in order {
+                enc.dir(dir).unwrap();
+                enc.entry(&entry(30, &prefs, 0, 4096)).unwrap();
+                enc.entry(&entry(31, &history, 0, 4096)).unwrap();
+                enc.dir_end(dir, 2).unwrap();
+            }
+            enc.records(0).unwrap();
+            enc.end(&End {
+                dirs: 3,
+                entries: 6,
+                locked: 0,
+            })
+            .unwrap();
+        });
+        let snap = read(&bytes, &big()).expect("reads");
+        assert_eq!(snap.stats().hard_links_merged, 2, "a first: {a_first}");
+        assert_eq!(snap.tree(snap.roots()[0].dir).bytes, 2 * 4096);
+        for name in ["a", "b"] {
+            let m = snap.markers(find(&snap, name));
+            assert!(
+                m.contains(crate::snapshot::Markers::PREFERENCES)
+                    && m.contains(crate::snapshot::Markers::CHROMIUM_STORE),
+                "{name} is a profile (a first: {a_first})"
+            );
+        }
+    }
+}

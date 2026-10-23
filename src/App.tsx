@@ -2,20 +2,29 @@ import { useCallback, useState } from 'react';
 import { useBridge, type RunReport } from './bridge';
 import { Atlas } from './atlas/Atlas';
 import { DrivesPending } from './atlas/DrivesPending';
+import { ClaudeNote, ClaudeTrigger, PrivacyConfirm } from './claude/bits';
+import { ClaudeProvider } from './claude/ClaudeProvider';
+import { scanUnavailable, useClaude } from './claude/context';
 import { useDrives } from './drives/context';
 import { DriveMenu } from './drives/DriveMenu';
 import { reclaimableOf, reportOf } from './drives/session';
 import { HistoryMenu } from './history/HistoryMenu';
 import { Shell } from './shell/Shell';
 import { Finish } from './wrapped/Finish';
-import { AdvisorDialog, AdvisorNote, AdvisorTrigger } from './advisor/Advisor';
-import { useAdvisorStatus } from './advisor/useAdvisorStatus';
 
 export function App() {
+  const drives = useDrives();
+  return (
+    <ClaudeProvider drives={drives.status === 'ready' ? drives : null}>
+      <Screens />
+    </ClaudeProvider>
+  );
+}
+
+function Screens() {
   const bridge = useBridge();
   const drives = useDrives();
-  const advisor = useAdvisorStatus();
-  const [advisorOpen, setAdvisorOpen] = useState(false);
+  const claude = useClaude();
   const ready = drives.status === 'ready' ? drives : null;
   // The plan tray beside the map. Each drive keeps its own plan; the tray shows the plan of the drive on screen,
   // and closes when another drive comes on screen.
@@ -48,13 +57,20 @@ export function App() {
     },
     [bridge, reportUpdated],
   );
+  // Claude's panel is beside the map while the plan can still change; the header's control unfolds it.
+  const where = onMap && planning && scan.phase === 'done' ? { mountPoint: scan.overview.volume.mountPoint, run: scan.run } : null;
+  const entries = where && claude ? claude.conversation(where).entries : [];
+  const busy = entries.some((e) => e.phase === 'working' || e.phase === 'slow');
+  const last = entries.at(-1);
+  const failed = last?.phase === 'failed' && last.failure?.kind !== 'cancelled';
+  const closed = where && claude ? scanUnavailable(claude.conversation(where)) !== null : false;
 
   return (
     <>
       <Shell
         platform={bridge.platform}
         drive={ready && <DriveMenu drives={ready} />}
-        advisor={<AdvisorTrigger open={advisorOpen} onOpen={() => setAdvisorOpen(true)} />}
+        advisor={<ClaudeTrigger busy={busy} failed={failed} closed={closed} onOpen={where && claude ? () => claude.setFolded(false) : null} />}
         reclaimable={onMap && scan && planning ? reclaimableOf(scan) : null}
         lit={(!!report && report.freedBytes > 0) || (!!past && past.freedBytes > 0)}
         history={ready && <HistoryMenu locked={ready.locked} onOpen={setPast} {...(bridge.platform === 'windows' ? { onUndo: undoTidy } : {})} />}
@@ -77,9 +93,9 @@ export function App() {
         ) : ready ? (
           <Atlas
             drives={ready}
-            agent={null}
-            advisorNote={<AdvisorNote state={advisor.state} onOpen={() => setAdvisorOpen(true)} />}
-            advisorOpen={advisorOpen}
+            agent="Claude"
+            advisorNote={<ClaudeNote />}
+            advisorOpen={!!claude?.privacyAsk}
             planOpen={planOpen}
             onPlanOpen={setPlanOpen}
             onUndo={undoTidy}
@@ -88,7 +104,7 @@ export function App() {
           <DrivesPending error={drives.status === 'error' ? drives.message : null} />
         )}
       </Shell>
-      {advisorOpen && <AdvisorDialog state={advisor.state} onRetry={advisor.retry} onClose={() => setAdvisorOpen(false)} />}
+      {claude?.privacyAsk && <PrivacyConfirm claude={claude} />}
     </>
   );
 }

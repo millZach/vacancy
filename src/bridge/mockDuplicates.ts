@@ -233,7 +233,7 @@ export function mockDuplicates(platform: Platform, overview: Overview, home: str
     placeCount: extras.length,
     risk: 'review',
     source: 'rule',
-    aiNote: null,
+    claudeNote: null,
     action: 'delete',
     regenerable: false,
     samplePaths: [...extras].sort((a, b) => b.e.bytes - a.e.bytes).slice(0, 5).map((x) => x.e.path),

@@ -105,6 +105,12 @@
   cursor: pointer;
 }
 
+/* Waiting for something else to finish, such as Try again while another pick runs. */
+.link-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* A small call to action, in the header. */
 .cta--sm {
   padding: 6px 12px 5px;

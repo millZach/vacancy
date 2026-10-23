@@ -39,6 +39,9 @@ import { DuplicatesPanel } from '../plan/DuplicatesPanel';
 import { PlanTray } from '../plan/PlanTray';
 import { tileOf } from '../plan/totals';
 import { ConfirmDialog } from '../run/ConfirmDialog';
+import { TipSection } from '../claude/bits';
+import { ClaudePanel } from '../claude/ClaudePanel';
+import { claudeNoteOf, explainedFolders, isOn, liveFlags, useClaude, type Scope } from '../claude/context';
 import type { StepView } from '../run/progress';
 import { RunPanel, type ShownRun } from '../run/RunPanel';
 import { fallbackLabel, isAsking, scanProgress } from '../scan/fast';
@@ -132,6 +135,26 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
   const [planError, setPlanError] = useState<string | null>(null);
   // The Tidy up proposal whose drawer is open over the map, while planning.
   const [drawerId, setDrawerId] = useState<string | null>(null);
+  // Claude (ADR 0008): its panel beside the map, the folders it explained (a ✳ on their tiles and a "Claude says" in
+  // their hover cards, a click asks about them) and the plan items its review flags.
+  const claude = useClaude();
+  const claudeOn = isOn(claude);
+  const scope: Scope | null =
+    overview && state.phase === 'done'
+      ? { mountPoint: overview.volume.mountPoint, run: state.run, plan, planVersion: state.planVersion, tidyIds: state.tidy.map((t) => t.id) }
+      : null;
+  const talk = claude && scope ? claude.conversation(scope) : null;
+  const flagged = new Set(talk && claudeOn ? liveFlags(talk, plan).map((f) => f.id) : []);
+  const explained = useMemo(
+    () => new Map(talk && claudeOn ? explainedFolders(talk).map((f) => [f.path.toLowerCase(), f]) : []),
+    [talk, claudeOn],
+  );
+  const explainedOf = (leaf: Leaf) => (leaf.proposal === null && leaf.path ? (explained.get(leaf.path.toLowerCase()) ?? null) : null);
+  const askAbout = (leaf: Leaf) => {
+    if (!claude || !scope) return;
+    claude.setFolded(false);
+    claude.ask(scope, { kind: 'folder', path: leaf.path }, leaf.name);
+  };
   // Which scan's map this is. The duplicate search redraws the map when it is done; that is still the same map, and
   // nothing the user was doing on it is lost.
   const mapKey = overview && state.phase === 'done' ? `${overview.volume.mountPoint}#${state.run}` : null;
@@ -257,6 +280,8 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
   const goneTiles = useMemo(() => new Set(lit?.extras.map((e) => e.tile) ?? []), [lit]);
   const onLeaf = (leaf: Leaf) => {
     if (run) return;
+    // A folder Claude explained: the click asks Claude about it in the panel (zoom from the region's header).
+    if (explainedOf(leaf)) return askAbout(leaf);
     if (leaf.proposal === DUPLICATES && planning && groups.length > 0) return openDuplicates(leaf.id);
     if (leaf.proposal !== null) {
       // With the tray open a reclaimable tile goes in or out of the plan; zoomed in, it goes in and opens the tray.
@@ -276,7 +301,7 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
   };
   // Reclaimable tiles always react; other tiles zoom in at the top and open folders below. A run holds the map still.
   const clickable = (leaf: Leaf) =>
-    !run && (leaf.proposal !== null || (levels.length === 0 ? leaf.kind !== 'free' : leaf.browsable));
+    !run && (leaf.proposal !== null || !!explainedOf(leaf) || (levels.length === 0 ? leaf.kind !== 'free' : leaf.browsable));
   const drawer = planning && levels.length === 0 ? (tidy.find((t) => t.id === drawerId) ?? null) : null;
   const drawerTile = drawer && overview ? folderTileOf(overview, drawer) : null;
   /** A tile the picked duplicate group links: where its kept copy lives, or where its extra copies go from. */
@@ -293,7 +318,20 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
     if (leaf.kind === 'locked') return lockedLook(leaf, rect, levels.length > 0);
     if (leaf.id === drawerTile) return { cls: 'is-tidy-hot', state: 'loose files Vacancy can sort' };
     const linked = linkLook(leaf, rect);
-    if (leaf.proposal === null) return linked ?? {};
+    if (leaf.proposal === null) {
+      if (!run && explainedOf(leaf))
+        return {
+          ...linked,
+          cls: ['is-explained', linked?.cls].filter(Boolean).join(' '),
+          badge: linked?.badge ?? (
+            <span className="ai-pin" aria-hidden>
+              ✳
+            </span>
+          ),
+          state: 'Claude explained this folder',
+        };
+      return linked ?? {};
+    }
     if (run) return runLook(runSteps.get(leaf.proposal), runFreed?.get(leaf.id));
     // A proposal drawn as several tiles lights whole when its row in the tray is under the pointer.
     const together = hot !== null && hot !== leaf.id && hot === tileOf(leaf.proposal) ? ' is-hot' : '';
@@ -303,11 +341,20 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
       : on
         ? { cls: 'is-reclaim is-selected', badge: <Pin on />, state: 'reclaimable, in the plan', pressed: true }
         : { cls: 'is-available', badge: <Pin on={false} />, state: 'reclaimable, not in the plan', pressed: false };
-    const cls = [base.cls, together.trim(), linked?.cls].filter(Boolean).join(' ');
+    const cls = [base.cls, together.trim(), linked?.cls, flagged.has(leaf.proposal) && 'is-flagged'].filter(Boolean).join(' ');
     return { ...base, ...linked, cls, badge: linked?.badge ?? base.badge };
   };
   const leafStatus = (leaf: Leaf): ReactNode => {
     const p = leaf.proposal === null ? undefined : byId.get(leaf.proposal);
+    const note = !run ? explainedOf(leaf) : null;
+    if (note)
+      return (
+        <TipSection
+          note={note}
+          suggested={proposals.filter((x) => note.suggested.includes(x.id))}
+          act="Click to ask Claude about it in the panel."
+        />
+      );
     if (!p) return null;
     if (run) return runStatus(runSteps.get(leaf.proposal ?? ''), runFreed?.get(leaf.id));
     if (p.id === DUPLICATES)
@@ -342,7 +389,7 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
           <RiskChip risk={p.risk} />
           <SourceTag source={p.source} agent={agent} />
         </div>
-        <p className="map-tip-sum">{p.summary}</p>
+        <p className="map-tip-sum">{claudeNoteOf(p.claudeNote) ?? p.summary}</p>
         <p className="map-tip-act">{act}</p>
       </>
     );
@@ -386,6 +433,16 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
     drives.runPlan(made);
   };
   const freedSoFar = run?.view.freedBytes ?? 0;
+  /** Claude's notes on its items and layouts, for the confirm dialog. */
+  const claudeNotes = useMemo(() => {
+    const notes: Record<string, string> = {};
+    for (const p of proposals) {
+      const n = claudeNoteOf(p.claudeNote);
+      if (p.source === 'claude' && n) notes[p.id] = n;
+    }
+    for (const t of tidy) if (t.layout === 'claude' && t.note) notes[t.id] = t.note;
+    return notes;
+  }, [proposals, tidy]);
 
   const startScan = (button: HTMLButtonElement, options?: { fast: boolean }) => {
     const b = button.getBoundingClientRect();
@@ -399,8 +456,43 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
       ? level.folder.item.bytes
       : (focus && top?.regionById.get(focus)?.bytes) || (overview?.volume.totalBytes ?? 0);
 
+  /** From the Claude panel: a proposal in the tray (opened, its row in view) and its tile lit. */
+  const showItem = (id: string) => {
+    if (levels.length > 0) navigate([]);
+    onPlanOpen(true);
+    setDupPanel(false);
+    setHot(tileOf(id));
+    requestAnimationFrame(() =>
+      [...document.querySelectorAll<HTMLElement>('[data-row]')]
+        .find((el) => el.dataset.row === id)
+        ?.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' }),
+    );
+  };
+  const showTile = (tile: string) => {
+    if (levels.length > 0) navigate([]);
+    setHot(tile);
+  };
+  const panel = overview && scope && !summary && !run && (
+    <ClaudePanel
+      scope={scope}
+      proposals={proposals}
+      tidy={state.phase === 'done' ? state.tidy : []}
+      overview={overview}
+      onShow={showItem}
+      onShowTile={showTile}
+      onOpenTidy={(id) => {
+        if (levels.length > 0) navigate([]);
+        onPlanOpen(true);
+        setDupPanel(false);
+        setDrawerId(id);
+      }}
+      onUntick={(id) => setInPlan(id, false)}
+    />
+  );
+
   return (
     <>
+      {panel}
       {/* Kept while the finish is up (hidden), so the map's size is still followed when it comes back. */}
       <main className={overview ? 'atlas is-map' : 'atlas is-scan'} hidden={!!summary}>
         {!overview && (
@@ -544,7 +636,7 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
         </div>
         {drawer && (
           <TidyDrawer
-            key={drawer.id}
+            key={`${drawer.id}:${drawer.layout}`}
             tidy={drawer}
             plan={plan}
             proposals={proposals}
@@ -590,6 +682,14 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
           agent={agent}
           hot={hot}
           onHot={setHot}
+          {...(claude && claudeOn && scope
+            ? {
+                onAsk: (p: { id: string; title: string }) => {
+                  claude.setFolded(false);
+                  claude.ask(scope, { kind: 'proposal', id: p.id }, p.title);
+                },
+              }
+            : {})}
           onToggle={(id) => setInPlan(id, !plan.includes(id))}
           onClose={() => onPlanOpen(false)}
           onFree={free}
@@ -627,6 +727,7 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
         <ConfirmDialog
           plan={confirm}
           platform={bridge.platform}
+          notes={claudeNotes}
           onCancel={() => setConfirm(null)}
           onGo={() => runConfirmed(confirm)}
         />

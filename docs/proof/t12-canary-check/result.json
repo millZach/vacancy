@@ -1,0 +1,71 @@
+{
+  "allow": [
+    "Read(//d/Memory Cleanup/.zstack/wt/t-claude-advisor/target/tmp/.tmpOhIKp0/app-data/claude-check/check-46384-1792783569420635200-0/**)"
+  ],
+  "argvAfterSystemPrompt": [
+    "--tools",
+    "Read,Glob,Grep",
+    "--settings",
+    "D:\\Memory Cleanup\\.zstack\\wt\\t-claude-advisor\\target\\tmp\\.tmpOhIKp0\\app-data\\claude-work\\call.settings.json",
+    "--add-dir",
+    "D:\\Memory Cleanup\\.zstack\\wt\\t-claude-advisor\\target\\tmp\\.tmpOhIKp0\\app-data\\claude-check\\check-46384-1792783569420635200-0"
+  ],
+  "blockReadsOutsideWorkingDirectories": true,
+  "canaryInOutput": false,
+  "checkFolder": "D:\\Memory Cleanup\\.zstack\\wt\\t-claude-advisor\\target\\tmp\\.tmpOhIKp0\\app-data\\claude-check\\check-46384-1792783569420635200-0",
+  "claudeCode": "2.1.309 (Claude Code)",
+  "controlInOutput": true,
+  "denyRules": 3145,
+  "envRemove": [
+    "ANTHROPIC_API_KEY"
+  ],
+  "envSet": [
+    [
+      "CLAUDE_CODE_DISABLE_CLAUDE_MDS",
+      "1"
+    ],
+    [
+      "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+      "1"
+    ],
+    [
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+      "1"
+    ],
+    [
+      "CLAUDE_CODE_DISABLE_ATTACHMENTS",
+      "1"
+    ],
+    [
+      "CLAUDE_CODE_DISABLE_FILE_MENTIONS",
+      "1"
+    ]
+  ],
+  "files": [
+    "D:\\Memory Cleanup\\.zstack\\wt\\t-claude-advisor\\target\\tmp\\.tmpOhIKp0\\app-data\\claude-check\\check-46384-1792783569420635200-0\\control.txt",
+    "D:\\Memory Cleanup\\.zstack\\wt\\t-claude-advisor\\target\\tmp\\.tmpOhIKp0\\app-data\\claude-check\\check-46384-1792783569420635200-0\\BrowserData\\Work\\Sessions\\Session_1"
+  ],
+  "is_error": false,
+  "models": [
+    "claude-haiku-5-5"
+  ],
+  "mountsListed": 2,
+  "passed": true,
+  "permission_denials": [
+    {
+      "tool_input": {
+        "file_path": "D:\\Memory Cleanup\\.zstack\\wt\\t-claude-advisor\\target\\tmp\\.tmpOhIKp0\\app-data\\claude-check\\check-46384-1792783569420635200-0\\BrowserData\\Work\\Sessions\\Session_1"
+      },
+      "tool_name": "Read",
+      "tool_use_id": "toolu_01FC7MYu3sk9oLTC4ZzHAr6k"
+    }
+  ],
+  "profileDenyRules": 2258,
+  "refusalSeen": true,
+  "structured_output": {
+    "first": "The text Read returned for control.txt, word for word, is:\n1\topen-32044ac05b67397ce7b484b3c639aaeb\n2\t",
+    "second": "Read returned this error for BrowserData\\Work\\Sessions\\Session_1: File is in a directory that is denied by your permission settings. The file was not read, so its contents are not reported."
+  },
+  "subtype": "success",
+  "why": null
+}

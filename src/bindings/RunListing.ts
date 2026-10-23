@@ -24,4 +24,8 @@ cancelled: boolean,
 /**
  * The folders it reorganized, with whether each can still be undone.
  */
-tidy: Array<TidyListing>, };
+tidy: Array<TidyListing>, 
+/**
+ * Steps Claude proposed (its own items, and sorts into Claude's layout), so Past runs can mark the run.
+ */
+claudeSteps: number, };

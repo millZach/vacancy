@@ -142,8 +142,9 @@ fn unlabelled(path: PathBuf) -> Place {
 
 /// Folder names Electron apps, browsers and games use for caches they rebuild.
 /// Folder names Chromium, Electron and WebView2 use for the caches they rebuild. `Cache` only counts with
-/// Chromium's layout around it (see `Find::Named`).
-const APP_CACHES: &[&str] = &[
+/// Chromium's layout around it (see `Find::Named`). In a browser profile these stay readable to Claude, while
+/// the rest of the profile is hidden (`claude::browsers`), so the two lists are one.
+pub(crate) const APP_CACHES: &[&str] = &[
     "Cache",
     "Code Cache",
     "GPUCache",

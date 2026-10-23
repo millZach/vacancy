@@ -43,6 +43,7 @@ export function TidyDrawer({ tidy: t, plan, proposals, onToggle, onClose }: Prop
   const samples = sampleMoves(moves);
   const stays = staysByReason(t.stays);
   const deleters = deletersIn(t, plan).map((id) => proposals.find((p) => p.id === id)?.title ?? id);
+  const claude = t.layout === 'claude';
 
   // Escape closes the drawer before the map hears it (it would zoom out).
   useEffect(() => {
@@ -68,9 +69,20 @@ export function TidyDrawer({ tidy: t, plan, proposals, onToggle, onClose }: Prop
         </button>
       </header>
       <div className="rd-body">
-        <p className="rd-rule">
-          <FolderTree size={14} aria-hidden /> Built-in rule: sorted by kind and year.
-        </p>
+        {claude ? (
+          <p className="rd-rule cl-rule">
+            <span className="cl-mark" aria-hidden>
+              ✳
+            </span>
+            <span>
+              <b>Claude’s layout:</b> {t.note ?? 'sorted by what the files are for, from their names.'}
+            </span>
+          </p>
+        ) : (
+          <p className="rd-rule">
+            <FolderTree size={14} aria-hidden /> Built-in rule: sorted by kind and year.
+          </p>
+        )}
         <div className="trees">
           <section aria-label="Before">
             <h3>Before</h3>
@@ -78,7 +90,9 @@ export function TidyDrawer({ tidy: t, plan, proposals, onToggle, onClose }: Prop
           </section>
           <ArrowRight size={16} className="trees-arrow" aria-hidden />
           <section aria-label="After">
-            <h3>After</h3>
+            <h3>
+              After{claude && <span className="cl-after"> · Claude’s</span>}
+            </h3>
             <Tree node={afterTree(t, plan)} />
           </section>
         </div>
@@ -133,7 +147,14 @@ export function TidyDrawer({ tidy: t, plan, proposals, onToggle, onClose }: Prop
           </>
         )}
         <ul className="facts">
-          <li>Built-in rule: sorted by kind and year. No AI, offline.</li>
+          {claude ? (
+            <>
+              <li>Claude named the folders. Vacancy checked them and makes the moves, under the same rules as its own.</li>
+              <li>Folder names are pinned when you review: a name taken by the run is left out, never renumbered.</li>
+            </>
+          ) : (
+            <li>Built-in rule: sorted by kind and year. No AI, offline.</li>
+          )}
           <li>Only loose files at the top of {t.name}. Subfolders stay as they are.</li>
           <li>Moves only. Nothing is deleted, so this frees 0 B.</li>
           <li>Stays on this drive. Files in your Delete list aren’t moved.</li>

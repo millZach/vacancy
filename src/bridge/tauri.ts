@@ -2,6 +2,10 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import type {
   AdvisorStatus,
   Bridge,
+  ClaudeChatStarted,
+  ClaudeEvent,
+  ClaudeRefreshed,
+  ClaudeStatus,
   DuplicateProgress,
   DuplicatesOutcome,
   FullDiskAccess,
@@ -52,6 +56,24 @@ export function createTauriBridge(): Bridge {
     undoTidy: (runId, tidyId) => invoke<RunReport>('undo_tidy', { runId, tidyId }),
     openHint: (mountPoint, proposalId) => invoke<undefined>('open_hint', { mountPoint, proposalId }),
     openGuide: (guide) => invoke<undefined>('open_guide', { guide }),
+    claudeStatus: () => invoke<ClaudeStatus>('claude_status'),
+    claudeSetEnabled: (on) => invoke<ClaudeStatus>('claude_set_enabled', { on }),
+    claudeSetPrivacy: (on) => invoke<ClaudeStatus>('claude_set_privacy', { on }),
+    claudeCheck: (again) => invoke<ClaudeStatus>('claude_check', { again }),
+    claudeStart: (mountPoint, scan, job, onEvent) => {
+      const onEventChannel = new Channel<ClaudeEvent>();
+      onEventChannel.onmessage = onEvent;
+      return invoke<string>('claude_start', { mountPoint, scan, job, onEvent: onEventChannel });
+    },
+    claudeChat: (mountPoint, scan, conversation, about, text, onEvent) => {
+      const onEventChannel = new Channel<ClaudeEvent>();
+      onEventChannel.onmessage = onEvent;
+      return invoke<ClaudeChatStarted>('claude_chat', { mountPoint, scan, conversation, about, text, onEvent: onEventChannel });
+    },
+    claudeCancel: (requestId) => invoke<undefined>('claude_cancel', { requestId }),
+    claudeChooseLayout: (mountPoint, scan, tidyId, layout) =>
+      invoke<ClaudeRefreshed>('claude_choose_layout', { mountPoint, scan, tidyId, layout }),
+    claudeRemoveItems: (mountPoint, scan, ids) => invoke<ClaudeRefreshed>('claude_remove_items', { mountPoint, scan, ids }),
   };
 }
 

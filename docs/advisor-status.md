@@ -7,3 +7,5 @@ The C choice settles placement and interaction. Production rows report the read-
 On 2026-10-17, Zach chose to **defer CLI AI** rather than relax the privacy promise. Claude Code and Codex remain unavailable: Vacancy cannot enforce the strict names/sizes/counts/dates-only boundary with these CLIs. File contents must never be sent. A future integration may propose items for review, never execute them. There are no live CLI calls, credential/settings reads, provider enable preference or API-key integration.
 
 Zach also chose **advice-only OS tools**. Guidance may explain how to use an OS-managed cleanup tool; Vacancy does not run that tool or alter its configuration. Folder reorganization, journaled moves and Undo remain future work.
+
+**Superseded on 2026-10-22 by ADR 0008:** Zach turned live AI on: Claude Code only, off until turned on, with a privacy mode (on by default). The status dialog becomes the turn-on step of the Claude side panel.

@@ -19,7 +19,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 use unicode_normalization::UnicodeNormalization;
 
@@ -33,6 +33,7 @@ use crate::text::group_digits;
 mod catalog;
 mod running;
 
+pub(crate) use catalog::APP_CACHES;
 use catalog::{Find, Proof, Rule};
 
 /// How careful to be with a proposal.
@@ -48,15 +49,18 @@ pub enum Risk {
     Careful,
 }
 
-/// Where a proposal came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, TS)]
+/// Where a proposal came from. A plan's steps and a run's report keep it, so the confirm dialog, the summary and
+/// Past runs can mark Claude's items.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub enum ProposalSource {
-    /// A built-in rule.
+    /// A built-in rule (and every step of a report kept before Claude could suggest anything).
+    #[default]
     Rule,
-    /// The user's AI agent (ticket 07).
-    Ai,
+    /// Suggested by Claude, through the user's own Claude Code (ADR 0008). It passed the Guard like a rule's
+    /// target and started unticked, with risk Review.
+    Claude,
 }
 
 /// What carrying out a proposal does.
@@ -114,8 +118,8 @@ pub struct Proposal {
     pub risk: Risk,
     /// Who proposed it.
     pub source: ProposalSource,
-    /// What the AI agent said, for AI proposals.
-    pub ai_note: Option<String>,
+    /// What Claude said about it, for Claude's proposals ("Suggested by Claude: ...").
+    pub claude_note: Option<String>,
     /// What carrying it out does.
     pub action: ProposalAction,
     /// Trusted built-in advice action. AI proposals never supply this; commands look it up by proposal id.
@@ -1411,7 +1415,7 @@ fn proposal(snap: &Snapshot, rule: &Rule, found: &Found) -> Proposal {
         place_count: n,
         risk: rule.risk,
         source: ProposalSource::Rule,
-        ai_note: None,
+        claude_note: None,
         hint_action: None,
         action: match rule.action {
             ActionKind::DeleteContents | ActionKind::DeleteDirectory => ProposalAction::Delete,

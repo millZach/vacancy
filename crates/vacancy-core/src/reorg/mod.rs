@@ -1,5 +1,7 @@
 //! The Windows journal/Undo backend. The app's Tidy up (see [`crate::tidy`]) drafts its moves from built-in
-//! sorting rules; no provider or AI output reaches it. Non-Windows entry points are `Unsupported`.
+//! sorting rules, or from Claude's layout once [`crate::tidy::Tidy::suggest`] has checked it: Claude only names
+//! a loose file the built-in rules would move and the folders to put it in, and every draft is validated here like
+//! the rules' own. Non-Windows entry points are `Unsupported`.
 #[cfg(windows)]
 mod journal;
 #[cfg(windows)]
