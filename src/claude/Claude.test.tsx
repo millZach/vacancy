@@ -373,6 +373,47 @@ describe('privacy mode', () => {
     expect(within(panel()).getByRole('button', { name: 'Check again' })).toBeInTheDocument();
   });
 
+  it('after a failed call with privacy mode off, reads the status again, even when the row said Claude reads files', async () => {
+    // The core refused the launch (Claude Code changed since it was checked, say): the status it gives now says so.
+    const bridge = windows({ claude: 'error', privacy: 'off' });
+    await toMap(bridge);
+    await openPlan();
+    expect(within(panel()).getByText(/Off: Claude can read files on the drive you scanned/)).toBeInTheDocument();
+    const real = bridge.claudeStatus.bind(bridge);
+    const status = vi
+      .spyOn(bridge, 'claudeStatus')
+      .mockImplementationOnce(async () => ({ ...(await real()), check: { kind: 'failed', message: CHECK_UNVERIFIED } }));
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Review my plan' }));
+    expect(await within(panel()).findByRole('alert')).toHaveTextContent('Claude Code stopped with an error.');
+    await waitFor(() => expect(status).toHaveBeenCalled());
+    expect(await within(panel()).findByRole('note')).toHaveTextContent(CHECK_UNVERIFIED);
+    expect(within(panel()).getByRole('button', { name: 'Check again' })).toBeInTheDocument();
+    expect(within(panel()).queryByText(/Off: Claude can read files/)).toBeNull();
+  });
+
+  it('a status read begun with privacy mode off is dropped once privacy mode goes on', async () => {
+    const bridge = windows({ claude: 'error', privacy: 'off' });
+    await toMap(bridge);
+    await openPlan();
+    const stale = await bridge.claudeStatus();
+    expect(stale.privacy).toBe(false);
+    let answer: (s: typeof stale) => void = () => {};
+    const status = vi.spyOn(bridge, 'claudeStatus').mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Review my plan' }));
+    expect(await within(panel()).findByRole('alert')).toHaveTextContent('Claude Code stopped with an error.');
+    await waitFor(() => expect(status).toHaveBeenCalled());
+    // The person turns privacy mode on while that read is still out.
+    await userEvent.click(within(panel()).getByRole('switch', { name: 'Privacy mode' }));
+    await waitFor(() => expect(within(panel()).getByRole('switch', { name: 'Privacy mode' })).toHaveAttribute('aria-checked', 'true'));
+    await act(async () => {
+      answer(stale);
+      await Promise.resolve();
+    });
+    expect(within(panel()).getByRole('switch', { name: 'Privacy mode' })).toHaveAttribute('aria-checked', 'true');
+    expect(within(panel()).getByText('On: names, sizes, counts and dates only')).toBeInTheDocument();
+    expect(within(header()).queryByText('Claude on · reads files')).toBeNull();
+  });
+
   it('every answer says what it was based on; changing the mode ends the conversation, and says so', async () => {
     await toMap(windows({ claude: 'on' }));
     await openPlan();

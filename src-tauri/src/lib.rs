@@ -598,7 +598,8 @@ impl Drop for Checking<'_> {
 /// and which Claude Code it was about (a call it lets read starts exactly that one, if it is still the same file).
 ///
 /// The result just found is this process's from then on ([`Session::claude_verdict`]), even if the file it is kept
-/// in can't be written: then that file is removed too, so a restart never trusts an older result over it.
+/// in can't be written: then the kept one is revoked ([`claude::canary::keep`]), so a restart never trusts an older
+/// result over it.
 fn claude_verify(
     app: &AppHandle,
     exe: &Path,
@@ -666,9 +667,9 @@ fn claude_verify(
             why: verdict.why.clone(),
         };
         *lock(&session.claude_verdict) = Some(record.clone());
-        if canary::save(home, &record).is_err() {
-            let _ = std::fs::remove_file(canary::path(home));
-        }
+        // Kept so that no older result is trusted again, even after a restart (`canary::keep` revokes the kept one
+        // when it can't replace it). If nothing could be written, the memory above stands for this run.
+        let _ = canary::keep(home, &record);
     }
     let check = match verdict.why {
         None => Check::Passed,

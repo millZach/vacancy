@@ -503,6 +503,153 @@ fn a_kept_result_holds_for_one_executable_only() {
     assert!(silent.contains("which version"), "{silent}");
 }
 
+fn record(identity: &Identity, passed: bool) -> Record {
+    Record {
+        identity: identity.clone(),
+        passed,
+        why: (!passed).then(|| "It leaked.".to_owned()),
+    }
+}
+
+fn some_identity() -> Identity {
+    Identity {
+        path: "claude".into(),
+        size: 1,
+        modified: Some(1),
+        sha256: "00".into(),
+        version: "2.1.309 (Claude Code)".into(),
+    }
+}
+
+/// A newer result is kept so that no older one is trusted again after a restart, even when the kept file is
+/// read-only: Vacancy takes the flag off and replaces it.
+#[test]
+fn a_newer_failure_replaces_a_read_only_pass() {
+    let (_dir, home) = home();
+    let id = some_identity();
+    canary::save(&home, &record(&id, true)).unwrap();
+    let file = canary::path(&home);
+    let mut permissions = std::fs::metadata(&file).unwrap().permissions();
+    permissions.set_readonly(true);
+    std::fs::set_permissions(&file, permissions).unwrap();
+    canary::keep(&home, &record(&id, false)).unwrap();
+    // What a restart reads: never the old pass.
+    assert_ne!(
+        canary::state(canary::load(&home).as_ref(), &id),
+        Check::Passed
+    );
+    // A later pass is kept again, and trusted.
+    canary::keep(&home, &record(&id, true)).unwrap();
+    assert_eq!(
+        canary::state(canary::load(&home).as_ref(), &id),
+        Check::Passed
+    );
+    assert!(!home.join(canary::REVOKED).exists());
+}
+
+/// When the kept file can neither be replaced nor removed (here a folder stands in its place), it is revoked: a
+/// restart trusts no result until a newer one is kept, which takes the revocation away.
+#[test]
+fn a_kept_result_that_cant_be_replaced_is_revoked() {
+    let (_dir, home) = home();
+    let id = some_identity();
+    let file = canary::path(&home);
+    std::fs::create_dir_all(file.join("in the way")).unwrap();
+    canary::keep(&home, &record(&id, false)).unwrap();
+    assert!(home.join(canary::REVOKED).exists());
+    assert_eq!(canary::load(&home), None);
+    std::fs::remove_dir_all(&file).unwrap();
+    // The old pass, written back by something else, still isn't trusted while revoked.
+    canary::save(&home, &record(&id, true)).unwrap();
+    assert_eq!(canary::load(&home), None);
+    canary::keep(&home, &record(&id, true)).unwrap();
+    assert_eq!(
+        canary::state(canary::load(&home).as_ref(), &id),
+        Check::Passed
+    );
+}
+
+/// Windows: a kept pass held open by another program (so it can't be replaced or removed) is revoked too.
+#[cfg(windows)]
+#[test]
+fn a_locked_pass_is_revoked() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let (_dir, home) = home();
+    let id = some_identity();
+    canary::save(&home, &record(&id, true)).unwrap();
+    // Shared for reading only: no rename over it, no delete.
+    let held = std::fs::File::options()
+        .read(true)
+        .share_mode(1)
+        .open(canary::path(&home))
+        .unwrap();
+    canary::keep(&home, &record(&id, false)).unwrap();
+    assert!(home.join(canary::REVOKED).exists());
+    assert_eq!(canary::load(&home), None, "a restart trusts no pass");
+    drop(held);
+    canary::keep(&home, &record(&id, true)).unwrap();
+    assert_eq!(
+        canary::state(canary::load(&home).as_ref(), &id),
+        Check::Passed
+    );
+}
+
+/// What Claude Code resolves to must be a regular file, and on Windows an `.exe`: a link named `claude.exe` that
+/// leads to a `.bat` would run through `cmd.exe`.
+#[test]
+fn only_a_real_executable_is_resolved() {
+    let (dir, _home) = home();
+    let folder = dir.path().join("claude-folder.exe");
+    std::fs::create_dir(&folder).unwrap();
+    assert!(canary::resolve(&folder).is_err(), "a folder");
+    if cfg!(windows) {
+        let bat = dir.path().join("claude.bat");
+        std::fs::write(&bat, b"@echo off\r\n").unwrap();
+        assert!(canary::resolve(&bat).is_err(), "a .bat");
+        let link = dir.path().join("claude.exe");
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&bat, &link);
+        #[cfg(not(windows))]
+        let made: std::io::Result<()> = Ok(());
+        match made {
+            Ok(()) => {
+                let why = canary::resolve(&link).unwrap_err().to_string();
+                assert!(why.contains("isn't an .exe"), "{why}");
+                assert!(Identity::of(&link, None, |_| Ok("x".into())).is_err());
+            }
+            Err(e) => assert!(!support::in_ci(), "CI can make symlinks: {e}"),
+        }
+    }
+    let real = dir.path().join("real.exe");
+    std::fs::write(&real, b"x").unwrap();
+    assert!(canary::resolve(&real).is_ok());
+}
+
+/// Windows: a `\\?\` path whose plain form names another place (`Tools.` is `Tools` once Windows normalizes it) is
+/// refused, never quietly started from the other place.
+#[cfg(windows)]
+#[test]
+fn a_verbatim_path_that_means_another_place_plainly_is_refused() {
+    let (dir, _home) = home();
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let dotted = PathBuf::from(format!("{}\\Tools.", base.display()));
+    std::fs::create_dir(&dotted).unwrap();
+    std::fs::write(dotted.join("claude.exe"), b"the one that was asked for").unwrap();
+    // The place its plain spelling names.
+    let plain = PathBuf::from(format!("{}\\Tools", base.display()));
+    std::fs::create_dir(&plain).unwrap();
+    std::fs::write(plain.join("claude.exe"), b"another one").unwrap();
+    let why = canary::resolve(&dotted.join("claude.exe"))
+        .unwrap_err()
+        .to_string();
+    assert!(why.contains("names another place"), "{why}");
+    // An ordinary path still resolves, without the prefix.
+    let ok = canary::resolve(&plain.join("claude.exe")).unwrap();
+    assert!(!ok.to_string_lossy().starts_with(r"\\?\"), "{ok:?}");
+    // Only a verbatim path reaches the dotted folder again.
+    std::fs::remove_dir_all(&dotted).unwrap();
+}
+
 /// An opt-in check (never in CI) with the real Claude Code, exactly as the app makes it: privacy mode off's settings
 /// and flags, reading a fresh folder Vacancy owns. `VACANCY_LIVE_CANARY=1` runs it (once, with
 /// `ANTHROPIC_MODEL=haiku` set for that run only); `VACANCY_PROBE_OUT` is where to keep what came back (no session

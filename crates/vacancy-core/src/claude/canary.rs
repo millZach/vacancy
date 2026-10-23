@@ -66,13 +66,38 @@ pub struct Identity {
 /// Claude Code at `program` as it resolves: every link followed (`~/.local/bin/claude` is often a link to the
 /// version installed), and on Windows a `\\?\C:\` prefix taken off again, so that path can be started as it is. The
 /// check and the call it lets read both use exactly this path.
+///
+/// Refused (an error) when what it resolves to isn't a regular file, or on Windows isn't an `.exe` (a `claude.exe`
+/// link to a `.cmd` or `.bat` would run through `cmd.exe`, which ADR 0008 forbids), and when taking the prefix off
+/// would name another place: Windows normalizes a plain path (`C:\Tools.\claude.exe` is `C:\Tools\claude.exe`), so
+/// the plain path must resolve to the very same one.
 pub fn resolve(program: &Path) -> io::Result<PathBuf> {
     let resolved = std::fs::canonicalize(program)?;
+    let refuse = |why: &str| {
+        Err(io::Error::other(format!(
+            "{} {why}, so Vacancy won't start it",
+            resolved.display()
+        )))
+    };
+    if !std::fs::metadata(&resolved)?.is_file() {
+        return refuse("isn't a file");
+    }
+    if cfg!(windows)
+        && !resolved
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+    {
+        return refuse("isn't an .exe");
+    }
     let text = resolved.to_string_lossy();
     if let Some(rest) = text.strip_prefix(r"\\?\")
         && rest.as_bytes().get(1) == Some(&b':')
     {
-        return Ok(PathBuf::from(rest));
+        let plain = PathBuf::from(rest);
+        if std::fs::canonicalize(&plain).ok().as_ref() != Some(&resolved) {
+            return refuse("names another place once its \\\\?\\ prefix is taken off");
+        }
+        return Ok(plain);
     }
     Ok(resolved)
 }
@@ -167,8 +192,16 @@ pub fn path(app_data: &Path) -> PathBuf {
     app_data.join(FILE)
 }
 
-/// The kept result, if any. A missing or damaged file is none: the check is due.
+/// Beside the kept result: while it exists, the kept result isn't trusted ([`load`] gives none). [`keep`] writes it
+/// when a newer result couldn't replace or remove the kept one.
+pub const REVOKED: &str = "claude-check.revoked";
+
+/// The kept result, if any. A missing or damaged file is none, and so is any result while [`REVOKED`] exists: the
+/// check is due.
 pub fn load(app_data: &Path) -> Option<Record> {
+    if std::fs::symlink_metadata(app_data.join(REVOKED)).is_ok() {
+        return None;
+    }
     std::fs::read(path(app_data))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -179,8 +212,64 @@ pub fn save(app_data: &Path, record: &Record) -> io::Result<()> {
     std::fs::create_dir_all(app_data)?;
     let temp = app_data.join(format!("{FILE}.tmp"));
     let json = serde_json::to_vec_pretty(record).map_err(io::Error::other)?;
+    writable(&temp);
     std::fs::write(&temp, json)?;
     std::fs::rename(&temp, path(app_data))
+}
+
+/// On Windows, takes a file's read-only flag off, if it has one, so it can be replaced or removed (Windows refuses
+/// both while it is set). Elsewhere nothing: the folder's permissions decide there, and clearing the flag would
+/// make the file writable by everyone.
+fn writable(file: &Path) {
+    #[cfg(windows)]
+    if let Ok(meta) = std::fs::symlink_metadata(file)
+        && meta.is_file()
+    {
+        let mut permissions = meta.permissions();
+        if permissions.readonly() {
+            // Windows' read-only attribute only: no Unix mode bits are involved.
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+            let _ = std::fs::set_permissions(file, permissions);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = file;
+}
+
+/// Keeps `record` as the latest result so that no older one is ever trusted again, even after a restart:
+///
+/// 1. it replaces the kept file, taking a read-only flag off first if that is what stood in the way;
+/// 2. if it can't, the kept file is revoked: [`REVOKED`] is written beside it (which [`load`] obeys), and the kept
+///    file is removed as well if it can be;
+/// 3. once a result has been kept, a [`REVOKED`] left from before is removed. If it can't be, it stays, and a pass
+///    is simply not trusted after a restart (the check runs again): it fails closed.
+///
+/// An error, in words, only when none of that could be written: then nothing on disk changed, and the caller's own
+/// memory of the result must stand for the rest of the run.
+pub fn keep(app_data: &Path, record: &Record) -> Result<(), String> {
+    let file = path(app_data);
+    let kept = save(app_data, record).or_else(|_| {
+        writable(&file);
+        save(app_data, record)
+    });
+    let revoked = app_data.join(REVOKED);
+    if kept.is_ok() {
+        writable(&revoked);
+        let _ = std::fs::remove_file(&revoked);
+        return Ok(());
+    }
+    writable(&revoked);
+    let tombstone = std::fs::write(&revoked, b"The kept check result is out of date.\n");
+    writable(&file);
+    let removed = std::fs::remove_file(&file);
+    if tombstone.is_ok() || removed.is_ok() || std::fs::symlink_metadata(&file).is_err() {
+        return Ok(());
+    }
+    Err(format!(
+        "Vacancy couldn't keep the check's result in {}: it holds until Vacancy quits.",
+        app_data.display()
+    ))
 }
 
 /// Where the check is for the Claude Code in use, as the panel's privacy row shows it.

@@ -196,17 +196,33 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   }, [bridge, verify]);
 
   /**
-   * A request with privacy mode off has ended: its own check of Claude Code may have run (or found it changed), so
-   * the status is read again, quietly, when the row may no longer be right: the check wasn't passed, or the answer
-   * came from names, sizes and dates though the row says Claude reads files.
+   * Goes up whenever Claude's mode changes (privacy mode either way, Claude on or off): a status read begun before
+   * then answers for a mode that has ended, and is dropped.
+   */
+  const modeGen = useRef(0);
+  const newMode = () => {
+    modeGen.current++;
+  };
+
+  /**
+   * A request with privacy mode off has ended: its own check of Claude Code may have run, found it changed, or kept
+   * the call from starting, so the status is read again, quietly, when the row may no longer be right: after any
+   * failure, while the check isn't passed, or when the answer came from names, sizes and dates though the row says
+   * Claude reads files. A read that comes back after the mode changed is dropped.
    */
   const refreshAfter = (event: ClaudeEvent) => {
     const s = statusRef.current.phase === 'ready' ? statusRef.current.status : null;
     if (!s || s.state !== 'on' || s.privacy) return;
-    const stale = s.check.kind !== 'passed' || (event.kind === 'done' && event.answer.basis.privacy && readsFiles(s));
+    const stale =
+      event.kind === 'failed' ||
+      s.check.kind !== 'passed' ||
+      (event.kind === 'done' && event.answer.basis.privacy && readsFiles(s));
     if (!stale) return;
+    const gen = modeGen.current;
     bridge.claudeStatus().then(
-      (now) => setStatus({ phase: 'ready', status: now }),
+      (now) => {
+        if (gen === modeGen.current) setStatus({ phase: 'ready', status: now });
+      },
       () => {
         // The row stays as it was; the next status read puts it right.
       },
@@ -553,6 +569,7 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
    * answered, nothing new is asked, so no request starts in the mode that is ending.
    */
   const changePrivacy = (on: boolean) => {
+    newMode();
     if (statusNow?.privacy !== on && endAll()) setEnded(on);
     changing.current = true;
     setPrivacyChanging(true);
@@ -597,6 +614,7 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     privacyChanging,
     ended,
     turnOn: () => {
+      newMode();
       const token = ++turnOnToken.current;
       setTurningOn(true);
       setSettingError(null);
@@ -615,11 +633,13 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       );
     },
     cancelTurnOn: () => {
+      newMode();
       turnOnToken.current++;
       setTurningOn(false);
       void setting(bridge.claudeSetEnabled(false));
     },
     turnOff: () => {
+      newMode();
       endAll();
       setEnded(null);
       setPrivacyAsk(false);
