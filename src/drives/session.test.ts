@@ -394,3 +394,40 @@ describe('the duplicate search after a scan', () => {
     expect(n.phase === 'done' && n.skippedGroups).toEqual([]);
   });
 });
+
+describe('Claude’s answers on a drive’s scan', () => {
+  const planOf = (s: Session) => {
+    const scan = scanOf(s, C.mountPoint);
+    return scan.phase === 'done' ? scan.plan : null;
+  };
+  const claudeItem = { ...fixtures.windows.proposals[0]!, id: 'claude-x', source: 'claude' as const, defaultOn: false };
+  const refreshed = {
+    overview: mapOf(C),
+    proposals: [...fixtures.windows.proposals.filter((p) => p.id !== 'w-temp'), claudeItem],
+    tidy: [],
+    tidyOthers: [],
+  };
+
+  it('shows the proposals Claude’s answer sent, unticked, and the plan keeps what is still there', () => {
+    const before = run(start, ...scanned(C, 1));
+    const s = run(before, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed });
+    const scan = scanOf(s, C.mountPoint);
+    expect(scan.phase === 'done' && scan.proposals.some((p) => p.id === 'claude-x')).toBe(true);
+    expect(planOf(s)).not.toContain('claude-x');
+    expect(planOf(s)).toEqual(planOf(before)!.filter((id) => id !== 'w-temp'));
+  });
+
+  it('sets the whole plan (Let Claude pick, Keep mine), leaving out what the scan doesn’t have', () => {
+    const s = run(start, ...scanned(C, 1), { type: 'setPlan', mountPoint: C.mountPoint, run: 1, ids: ['w-node', 'w-node', 'nope'] });
+    expect(planOf(s)).toEqual(['w-node']);
+  });
+
+  it('ignores an answer about an earlier scan, or one that comes after the plan ran', () => {
+    const later = run(start, ...scanned(C, 1), ...scanned(C, 2));
+    expect(run(later, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed })).toBe(later);
+    expect(run(later, { type: 'setPlan', mountPoint: C.mountPoint, run: 1, ids: [] })).toBe(later);
+    const ran = run(later, { type: 'runStarted', mountPoint: C.mountPoint, plan: { ...samplePlan, mountPoint: C.mountPoint } });
+    expect(run(ran, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 2, refreshed })).toBe(ran);
+    expect(run(ran, { type: 'tidyChosen', mountPoint: C.mountPoint, run: 2, tidy: [] })).toBe(ran);
+  });
+});

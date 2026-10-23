@@ -1,5 +1,6 @@
 import type {
   CategoryTotal,
+  ClaudeRefreshed,
   DuplicateProgress,
   Duplicates,
   DuplicatesOutcome,
@@ -127,6 +128,15 @@ export type Action =
   | { type: 'dupsFailed'; mountPoint: string; run: number; message: string }
   /** Unticks a duplicate group (every copy stays), or ticks it again. */
   | { type: 'skipGroup'; mountPoint: string; id: string; skipped: boolean }
+  /**
+   * Claude's answer about the scan `run` changed the map (its own items, unticked, or a layout): the map, proposals
+   * and sorts to show from now on. The plan keeps what is still there.
+   */
+  | { type: 'claudeApplied'; mountPoint: string; run: number; refreshed: ClaudeRefreshed }
+  /** The plan of the scan `run` as a whole (Let Claude pick, or Keep mine putting the plan back). */
+  | { type: 'setPlan'; mountPoint: string; run: number; ids: string[] }
+  /** The sorts of the scan `run` after a layout was picked for one of them. */
+  | { type: 'tidyChosen'; mountPoint: string; run: number; tidy: TidyProposal[] }
   /** The user confirmed the plan and it started: drive switching and scanning wait until it ends. */
   | { type: 'runStarted'; mountPoint: string; plan: PlanSummary }
   /** What the run did since the last batch, in order. */
@@ -236,6 +246,21 @@ function onSearch(
   return { ...s, scans: { ...s.scans, [mountPoint]: change(scan) } };
 }
 
+/**
+ * Applies `change` to the drive's finished scan `run` while its plan hasn't run. A later scan, a scan whose plan ran,
+ * or none, ignores it.
+ */
+function onScan(
+  s: Session,
+  mountPoint: string,
+  run: number,
+  change: (scan: Extract<DriveScan, { phase: 'done' }>) => Extract<DriveScan, { phase: 'done' }>,
+): Session {
+  const scan = scanOf(s, mountPoint);
+  if (scan.phase !== 'done' || scan.run !== run || ranPlan(scan)) return s;
+  return { ...s, scans: { ...s.scans, [mountPoint]: change(scan) } };
+}
+
 /** Applies `change` to the drive's scan only if it is the scan `run` (a later scan, or none, ignores it). */
 function onRun(
   s: Session,
@@ -338,6 +363,24 @@ export function reduce(s: Session, a: Action): Session {
       const skippedGroups = a.skipped ? [...scan.skippedGroups, a.id] : scan.skippedGroups.filter((g) => g !== a.id);
       return { ...s, scans: { ...s.scans, [a.mountPoint]: { ...scan, skippedGroups } } };
     }
+    case 'claudeApplied':
+      return onScan(s, a.mountPoint, a.run, (scan) => {
+        const ids = new Set([...a.refreshed.proposals.map((p) => p.id), ...a.refreshed.tidy.map((t) => t.id)]);
+        return {
+          ...scan,
+          overview: a.refreshed.overview,
+          proposals: a.refreshed.proposals,
+          tidy: a.refreshed.tidy,
+          plan: scan.plan.filter((id) => ids.has(id)),
+        };
+      });
+    case 'setPlan':
+      return onScan(s, a.mountPoint, a.run, (scan) => {
+        const known = (id: string) => scan.proposals.some((p) => p.id === id) || scan.tidy.some((t) => t.id === id);
+        return { ...scan, plan: [...new Set(a.ids)].filter(known) };
+      });
+    case 'tidyChosen':
+      return onScan(s, a.mountPoint, a.run, (scan) => ({ ...scan, tidy: a.tidy }));
     case 'runStarted': {
       if (s.locked || a.plan.mountPoint !== a.mountPoint) return s;
       const next = onPlanRun(s, a.mountPoint, (run) =>

@@ -1,5 +1,5 @@
 import { createContext, use } from 'react';
-import type { FullDiskAccess, PlanSummary, RunReport, VolumeInfo } from '../bridge';
+import type { ClaudeRefreshed, FullDiskAccess, PlanSummary, RunReport, TidyProposal, VolumeInfo } from '../bridge';
 import type { DriveScan, Gone, Screen } from './session';
 
 /** The drives, this computer's name and (on macOS) whether Vacancy can see everything, once they are known. */
@@ -47,6 +47,15 @@ export interface ReadyDrives {
   setInPlan: (id: string, on: boolean) => void;
   /** Unticks a duplicate group of the drive on screen (every copy of it stays), or ticks it again. */
   setGroupSkipped: (id: string, skipped: boolean) => void;
+  /**
+   * Claude's answer about a drive's scan `run` changed its map (its own items, unticked, or a layout): shows the map,
+   * proposals and sorts it sent. Ignored once that scan has been replaced or has run its plan.
+   */
+  claudeApplied: (mountPoint: string, run: number, refreshed: ClaudeRefreshed) => void;
+  /** Sets a drive's whole plan for its scan `run` (Let Claude pick, and Keep mine putting the plan back). */
+  setPlan: (mountPoint: string, run: number, ids: string[]) => void;
+  /** A drive's sorts for its scan `run`, after a layout was picked for one of them. */
+  setTidy: (mountPoint: string, run: number, tidy: TidyProposal[]) => void;
   /** While a plan runs, switching drives is disabled. `runPlan` sets it; this is for anything else that must hold. */
   setRunning: (running: boolean) => void;
   /**

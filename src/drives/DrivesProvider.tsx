@@ -238,6 +238,9 @@ function drivesValue(
     },
     setInPlan: (id, on) => dispatch({ type: 'plan', mountPoint: session.current, id, on }),
     setGroupSkipped: (id, skipped) => dispatch({ type: 'skipGroup', mountPoint: session.current, id, skipped }),
+    claudeApplied: (mountPoint, run, refreshed) => dispatch({ type: 'claudeApplied', mountPoint, run, refreshed }),
+    setPlan: (mountPoint, run, ids) => dispatch({ type: 'setPlan', mountPoint, run, ids }),
+    setTidy: (mountPoint, run, tidy) => dispatch({ type: 'tidyChosen', mountPoint, run, tidy }),
     setRunning: (running) => dispatch({ type: 'lock', locked: running }),
     runPlan,
     cancelRun: () => {
