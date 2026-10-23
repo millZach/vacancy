@@ -128,11 +128,16 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
    * then answers for a mode that has ended, and is dropped.
    */
   const modeGen = useRef(0);
-  /** Counts each change of mode asked for (privacy mode, Claude on or off). */
-  const modeReq = useRef(0);
-  /** Changes of mode the core hasn't answered yet, and whether two were out at once since the last settled. */
+  /**
+   * Changes of mode (privacy mode, Claude on or off) go to the core one at a time, in the order asked: each waits for
+   * the one before to answer. So the last one's answer is always the core's word on the mode that holds.
+   */
+  const modeQueue = useRef<Promise<unknown>>(Promise.resolve());
+  /** Changes of mode asked for and not answered yet. */
   const modesOut = useRef(0);
-  const modesOverlapped = useRef(false);
+  /** Since the queue was last empty: the newest answer from a change the core kept, and the first refusal. */
+  const modesKept = useRef<ClaudeStatus | null>(null);
+  const modesRefused = useRef<string | null>(null);
 
   /**
    * Reads the status again and shows it only if no change of mode was asked for or kept meanwhile: the core's own
@@ -140,11 +145,11 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
    */
   const reread = useCallback(
     (after?: (s: ClaudeStatus) => void) => {
-      const req = modeReq.current;
       const gen = modeGen.current;
+      if (modesOut.current > 0) return;
       bridge.claudeStatus().then(
         (now) => {
-          if (req !== modeReq.current || gen !== modeGen.current || modesOut.current > 0) return;
+          if (gen !== modeGen.current || modesOut.current > 0) return;
           setStatus({ phase: 'ready', status: now });
           after?.(now);
         },
@@ -237,31 +242,40 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     modeGen.current++;
   };
   /**
-   * A change of mode the core keeps: once it has (a refused one changes nothing), status reads still out are dropped.
-   * A change out on its own shows the core's answer, and then checks Claude Code if that is due. Changes out at once
-   * (privacy mode, then Turn off Claude before it answered) may be kept, and answered, in any order, so none of their
-   * answers is shown: once the last has answered, the status is read again instead.
+   * Asks the core for a change of mode, after every change asked before it has answered. Until the queue is empty no
+   * request starts and the panel shows none of the answers: each change the core keeps drops the status reads still
+   * out (a refused one changes nothing), and once the last has answered, the newest kept answer is shown, then Claude
+   * Code is checked if that is due, and the first refusal says why. Its promise settles when this change has answered.
    */
-  const modeSetting = (p: Promise<ClaudeStatus>) => {
-    modeReq.current++;
-    if (++modesOut.current > 1) modesOverlapped.current = true;
-    const settle = (s: ClaudeStatus | null, error: unknown) => {
-      if (--modesOut.current > 0) return;
-      const alone = !modesOverlapped.current;
-      modesOverlapped.current = false;
-      if (!alone) return reread(checkIfDue);
-      if (!s) return setSettingError(errorMessage(error));
-      ready(s);
-      // Privacy mode off, or Claude on with it off: Claude Code is checked first, if it hasn't passed already.
-      checkIfDue(s);
-    };
-    return p.then(
+  const modeSetting = (ask: () => Promise<ClaudeStatus>) => {
+    modesOut.current++;
+    changing.current = true;
+    setPrivacyChanging(true);
+    const settled = modeQueue.current.then(ask).then(
       (s) => {
         newMode();
-        settle(s, null);
+        modesKept.current = s;
       },
-      (error: unknown) => settle(null, error),
+      (error: unknown) => {
+        modesRefused.current ??= errorMessage(error);
+      },
     );
+    modeQueue.current = settled.then(() => {
+      if (--modesOut.current > 0) return;
+      changing.current = false;
+      setPrivacyChanging(false);
+      const s = modesKept.current;
+      const refused = modesRefused.current;
+      modesKept.current = null;
+      modesRefused.current = null;
+      if (s) {
+        ready(s);
+        // Privacy mode off, or Claude on with it off: Claude Code is checked first, if it hasn't passed already.
+        checkIfDue(s);
+      }
+      if (refused) setSettingError(refused);
+    });
+    return modeQueue.current;
   };
 
   /**
@@ -630,17 +644,12 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
    */
   const changePrivacy = (on: boolean) => {
     if (statusNow?.privacy !== on && endAll()) setEnded(on);
-    changing.current = true;
-    setPrivacyChanging(true);
     if (on) {
       // A check still running answers for privacy mode off: it no longer decides what the row shows.
       verifyToken.current++;
       setVerifying(false);
     }
-    void modeSetting(bridge.claudeSetPrivacy(on)).finally(() => {
-      changing.current = false;
-      setPrivacyChanging(false);
-    });
+    void modeSetting(() => bridge.claudeSetPrivacy(on));
   };
 
   // Folded while Claude is off (the map gets the room); open once it's turned on. A choice the person made wins.
@@ -666,14 +675,16 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       const token = ++turnOnToken.current;
       setTurningOn(true);
       setSettingError(null);
-      void modeSetting(bridge.claudeSetEnabled(true)).finally(() => {
+      void modeSetting(() => bridge.claudeSetEnabled(true)).finally(() => {
         if (token === turnOnToken.current) setTurningOn(false);
       });
     },
+    // The turning on still out answers first (asking Claude Code whether it's signed in takes up to 30 seconds),
+    // then Claude is turned off; until then nothing is asked.
     cancelTurnOn: () => {
       turnOnToken.current++;
       setTurningOn(false);
-      void modeSetting(bridge.claudeSetEnabled(false));
+      void modeSetting(() => bridge.claudeSetEnabled(false));
     },
     turnOff: () => {
       endAll();
@@ -681,7 +692,7 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       setPrivacyAsk(false);
       verifyToken.current++;
       setVerifying(false);
-      void modeSetting(bridge.claudeSetEnabled(false));
+      void modeSetting(() => bridge.claudeSetEnabled(false));
     },
     recheck,
     setPrivacy: (on) => {

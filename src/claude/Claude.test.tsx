@@ -461,69 +461,10 @@ describe('privacy mode', () => {
     expect(within(header()).queryByText('Claude on · reads files')).toBeNull();
   });
 
-  it('a privacy change that answers after Turn off Claude doesn’t bring Claude back on', async () => {
+  it('a change of mode waits for the one before: privacy mode on, then Turn off Claude, ends off with privacy mode on', async () => {
     const bridge = windows({ claude: 'on', privacy: 'off' });
     await toMap(bridge);
     await openPlan();
-    const privacyOn = { ...(await bridge.claudeStatus()), privacy: true };
-    let answer: (s: typeof privacyOn) => void = () => {};
-    vi.spyOn(bridge, 'claudeSetPrivacy').mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
-    // Privacy mode on is asked for; before the core answers, the person turns Claude off, and that answers first.
-    const off = vi.spyOn(bridge, 'claudeSetEnabled');
-    await userEvent.click(within(panel()).getByRole('switch', { name: 'Privacy mode' }));
-    await userEvent.click(within(panel()).getByRole('button', { name: 'Turn off Claude' }));
-    await act(async () => {
-      await answered(off, 0);
-    });
-    await act(async () => {
-      answer(privacyOn);
-      await Promise.resolve();
-    });
-    await waitFor(() => expect(within(panel()).getByRole('button', { name: 'Show Claude' })).toBeInTheDocument());
-    expect(within(header()).queryByText(/Claude on/)).toBeNull();
-  });
-
-  it('turned on, cancelled and on again while the first is still out: the core’s word decides, and Claude Code is checked', async () => {
-    const bridge = windows({ privacy: 'off', canary: 'ok' });
-    await toMap(bridge);
-    await unfold();
-    const realEnabled = bridge.claudeSetEnabled.bind(bridge);
-    let letFirst: () => void = () => {};
-    const enable = vi.spyOn(bridge, 'claudeSetEnabled').mockImplementationOnce(async (on) => {
-      await new Promise<void>((resolve) => (letFirst = resolve));
-      return realEnabled(on);
-    });
-    const realCheck = bridge.claudeCheck.bind(bridge);
-    let letCheck: () => void = () => {};
-    const check = vi.spyOn(bridge, 'claudeCheck').mockImplementationOnce(async (again) => {
-      await new Promise<void>((resolve) => (letCheck = resolve));
-      return realCheck(again);
-    });
-    await userEvent.click(within(panel()).getByRole('button', { name: 'Turn on Claude' }));
-    await userEvent.click(within(panel()).getByRole('button', { name: 'Cancel' }));
-    await userEvent.click(within(panel()).getByRole('button', { name: 'Turn on Claude' }));
-    // The cancel and the second turn-on answer while the first turn-on is still out; then it answers too.
-    await act(async () => {
-      await Promise.all([answered(enable, 1), answered(enable, 2)]);
-    });
-    await act(async () => {
-      letFirst();
-      await answered(enable, 0);
-    });
-    await waitFor(() => expect(check).toHaveBeenCalled());
-    await act(async () => {
-      letCheck();
-      await answered(check, 0);
-    });
-    expect(await within(panel()).findByText(/Off: Claude can read files on the drive you scanned/)).toBeInTheDocument();
-    expect(within(panel()).queryByText('Checking Claude Code…')).toBeNull();
-  });
-
-  it('changes of mode out at once show none of their own answers: the status is read again once the last has answered', async () => {
-    const bridge = windows({ claude: 'on', privacy: 'off' });
-    await toMap(bridge);
-    await openPlan();
-    // Turn off Claude's answer is the core's word from before privacy mode on was kept, and it comes in last.
     const realPrivacy = bridge.claudeSetPrivacy.bind(bridge);
     let letPrivacy: () => void = () => {};
     vi.spyOn(bridge, 'claudeSetPrivacy').mockImplementationOnce(async (on) => {
@@ -533,26 +474,78 @@ describe('privacy mode', () => {
     const realEnabled = bridge.claudeSetEnabled.bind(bridge);
     let letOff: () => void = () => {};
     const off = vi.spyOn(bridge, 'claudeSetEnabled').mockImplementationOnce(async (on) => {
-      const s = await realEnabled(on);
       await new Promise<void>((resolve) => (letOff = resolve));
-      return s;
+      return realEnabled(on);
     });
     await userEvent.click(within(panel()).getByRole('switch', { name: 'Privacy mode' }));
     await userEvent.click(within(panel()).getByRole('button', { name: 'Turn off Claude' }));
-    await waitFor(() => expect(off).toHaveBeenCalled());
-    const status = vi.spyOn(bridge, 'claudeStatus');
+    // Turn off Claude isn't asked until privacy mode on has answered, and nothing new starts meanwhile.
+    expect(off).not.toHaveBeenCalled();
+    expect(within(panel()).getByRole('button', { name: 'Review my plan' })).toBeDisabled();
     await act(async () => {
       letPrivacy();
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await Promise.resolve();
     });
-    expect(status).not.toHaveBeenCalled();
+    await waitFor(() => expect(off).toHaveBeenCalled(), { timeout: 4000 });
+    // Privacy mode on has answered, but the row waits for the core's word once Turn off Claude has answered too.
+    expect(within(panel()).getByRole('switch', { name: 'Privacy mode' })).toHaveAttribute('aria-checked', 'false');
+    expect(within(panel()).getByRole('button', { name: 'Review my plan' })).toBeDisabled();
     await act(async () => {
       letOff();
       await answered(off, 0);
     });
-    await waitFor(() => expect(status).toHaveBeenCalled());
     expect(await within(panel()).findByRole('button', { name: 'Show Claude' })).toBeInTheDocument();
-    expect((await answered(status, 0)).privacy).toBe(true);
+    expect(within(header()).queryByText(/Claude on/)).toBeNull();
+    expect((await bridge.claudeStatus()).privacy).toBe(true);
+  });
+
+  it('turned on, cancelled and on again while the first is still out: each waits its turn, and Claude Code is checked', async () => {
+    const bridge = windows({ privacy: 'off', canary: 'ok' });
+    await toMap(bridge);
+    await unfold();
+    const realEnabled = bridge.claudeSetEnabled.bind(bridge);
+    let letFirst: () => void = () => {};
+    const enable = vi.spyOn(bridge, 'claudeSetEnabled').mockImplementationOnce(async (on) => {
+      await new Promise<void>((resolve) => (letFirst = resolve));
+      return realEnabled(on);
+    });
+    const check = vi.spyOn(bridge, 'claudeCheck');
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Turn on Claude' }));
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Cancel' }));
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Turn on Claude' }));
+    expect(enable).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      letFirst();
+      await Promise.resolve();
+    });
+    // The cancel and the second turn-on go after it, in order; then Claude Code is checked, once.
+    await waitFor(() => expect(enable).toHaveBeenCalledTimes(3), { timeout: 4000 });
+    expect(enable.mock.calls.map(([on]) => on)).toEqual([true, false, true]);
+    expect(await within(panel()).findByText(/Off: Claude can read files on the drive you scanned/, undefined, { timeout: 8000 })).toBeInTheDocument();
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(within(panel()).queryByText('Checking Claude Code…')).toBeNull();
+  });
+
+  it('changes of mode the core refuses, one after another, say why, and nothing new starts until both have answered', async () => {
+    const bridge = windows({ claude: 'on', privacy: 'off' });
+    await toMap(bridge);
+    await openPlan();
+    let letPrivacy: () => void = () => {};
+    vi.spyOn(bridge, 'claudeSetPrivacy').mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => (letPrivacy = resolve));
+      throw new Error('Vacancy couldn’t keep the setting: Access is denied.');
+    });
+    vi.spyOn(bridge, 'claudeSetEnabled').mockRejectedValueOnce(new Error('Vacancy couldn’t keep the setting: The file is locked.'));
+    await userEvent.click(within(panel()).getByRole('switch', { name: 'Privacy mode' }));
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Turn off Claude' }));
+    expect(within(panel()).getByRole('button', { name: 'Review my plan' })).toBeDisabled();
+    await act(async () => {
+      letPrivacy();
+      await Promise.resolve();
+    });
+    expect(await within(panel()).findByText(/Access is denied/)).toBeInTheDocument();
+    expect(within(panel()).getByRole('switch', { name: 'Privacy mode' })).toHaveAttribute('aria-checked', 'false');
+    expect(within(panel()).getByRole('button', { name: 'Review my plan' })).toBeEnabled();
   });
 
   it('a check of Claude Code that answers after Claude was turned off is dropped', async () => {
