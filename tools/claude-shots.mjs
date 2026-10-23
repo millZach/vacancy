@@ -1,11 +1,14 @@
 // Screenshots the Claude panel (ADR 0008, prototype/ai-advisor variant B) in Edge, on the mock bridge's Claude, which
-// never calls Claude: off with the privacy notice and what always stays hidden, turning on, on, each job's answer
+// never calls Claude: off and folded to its rail (the map gets the room), opened with the privacy notice and what
+// always stays hidden, turning on, on, each job's answer
 // (Explain big folders with its hover card, a folder chat with a follow-up and a typed question, Review my plan, a
 // row's Ask Claude, Let Claude pick's changes with Keep mine and Use Claude's plan, Suggest Tidy up layouts with
 // Claude's layout picked and its drawer), what Vacancy left out, the privacy confirm and an answer with privacy mode
-// off, Claude's marks in the confirm dialog, the summary and Past runs, then each other state on a fresh page (not
-// found, not signed in, slow with Cancel, cancelled, an error and a timeout in Claude's words, off again with
-// Claude's items still in the plan, the folded rail), a macOS pass (no Tidy up layouts) and a 1024x700 pass.
+// off (ending the conversation so far, which the log says), Claude's marks in the confirm dialog, the summary and
+// Past runs, then each other state on a fresh page (not found, not signed in, a sign-in check that timed out or
+// failed, slow with Cancel, cancelled, an error and a timeout in Claude's words, off again with Claude's items still
+// in the plan and the panel folded again, a pick set aside because the plan changed while Claude picked, and one
+// settled by a later edit), a macOS pass (no Tidy up layouts) and a 1024x700 pass.
 //
 //   npm run dev                       (the UI on the mock bridge, http://localhost:1420)
 //   npm run claude-shots -- [options]
@@ -81,7 +84,13 @@ async function job(page, name, kind, timeout = 20_000) {
 async function windows() {
   const page = await open('fixture=windows&claudeMs=1200&run=1500&dups=1200');
   const p = panel(page);
-  check(await has(p.getByRole('heading', { name: 'Turn on Claude?' })), 'off: the panel is the turn-on step');
+  check(await has(page.locator('.cp.is-folded')), 'off: the panel is folded to its rail');
+  check(await has(p.getByRole('button', { name: 'Show Claude' })), 'off: the rail has a Claude button');
+  check(!(await has(p.getByRole('heading', { name: 'Turn on Claude?' }))), 'off: folded, it shows nothing else');
+  await shot(page, '00-off-folded');
+  await p.getByRole('button', { name: 'Show Claude' }).click();
+  await settle(page);
+  check(await has(p.getByRole('heading', { name: 'Turn on Claude?' })), 'off: opened, the panel is the turn-on step');
   check(await has(page.getByRole('button', { name: /^Rules only/ })), 'off: the header says Rules only');
   await shot(page, '01-off');
   await p.getByRole('button', { name: 'What always stays hidden' }).click();
@@ -209,6 +218,9 @@ async function windows() {
   await confirm.getByRole('button', { name: 'Turn privacy mode off' }).click();
   await settle(page);
   check(await has(p.getByRole('switch', { name: 'Privacy mode', checked: false })), 'privacy: off after the confirm');
+  check(await has(p.getByText('Privacy mode is off now, so Vacancy ended the conversation so far.', { exact: false })), 'privacy: changing it ends the conversation, and says so');
+  check((await p.locator('.cp-entry').count()) === 0, 'privacy: nothing of the conversation is left');
+  await shot(page, '20b-privacy-ended');
   check(await has(page.getByRole('button', { name: /^Claude on · reads files/ })), 'privacy off: the header says so');
   const review2 = await job(page, 'Review my plan', 'reviewPlan');
   check(await has(review2.locator('.cl-basis.is-open')), 'privacy off: the answer says which files Claude opened');
@@ -255,6 +267,9 @@ async function windows() {
 async function states() {
   {
     const page = await open('fixture=windows&claude=notfound');
+    check(await has(page.locator('.cp.is-folded')), 'not found: folded, like off');
+    await panel(page).getByRole('button', { name: 'Show Claude' }).click();
+    await settle(page);
     check(await has(panel(page).getByRole('heading', { name: 'Claude Code isn’t on this PC.' })), 'not found');
     await shot(page, '30-not-found');
     await page.close();
@@ -263,6 +278,21 @@ async function states() {
     const page = await open('fixture=windows&claude=signedout');
     check(await has(panel(page).getByRole('heading', { name: 'Sign in to Claude Code first.' })), 'not signed in');
     await shot(page, '31-not-signed-in');
+    await page.close();
+  }
+  {
+    const page = await open('fixture=windows&claude=checktimeout');
+    check(await has(panel(page).getByRole('heading', { name: 'Claude Code didn’t answer.' })), 'check timed out: its own state');
+    check(await has(panel(page).getByText('within 30 seconds', { exact: false })), 'check timed out: says why');
+    check(!(await has(panel(page).getByText('Found · not signed in'))), 'check timed out: never "not signed in"');
+    await shot(page, '31b-check-timed-out');
+    await page.close();
+  }
+  {
+    const page = await open('fixture=windows&claude=checkerror');
+    check(await has(panel(page).getByRole('heading', { name: 'Vacancy couldn’t check Claude Code.' })), 'check failed: its own state');
+    check(await has(panel(page).getByText('Access is denied', { exact: false })), 'check failed: in its own words');
+    await shot(page, '31c-check-failed');
     await page.close();
   }
   {
@@ -301,17 +331,43 @@ async function states() {
     const page = await open('fixture=windows&claude=on&claudeMs=300');
     await job(page, 'Explain big folders', 'explainFolders');
     await panel(page).getByRole('button', { name: 'Turn off Claude' }).click();
-    await panel(page).getByRole('heading', { name: 'Turn on Claude?' }).waitFor();
+    await page.locator('.cp.is-folded').waitFor();
+    check(await has(panel(page).getByRole('button', { name: 'Show Claude' })), 'off again: the panel folds to its rail');
     await page.getByRole('button', { name: 'Build a plan' }).click();
     const tray = page.getByRole('complementary', { name: 'Plan' });
     await tray.locator('.tray-row.is-ai').first().scrollIntoViewIfNeeded();
     await settle(page);
     check(await has(tray.getByText('Android emulator images')), 'off again: Claude’s items stay in the plan');
     check(!(await has(page.locator('.map-tile.is-explained'))), 'off again: no ✳ on the map');
-    await shot(page, '36-off-again');
-    await panel(page).getByRole('button', { name: 'Fold the Claude panel' }).click();
+    await shot(page, '36-off-again-folded');
+    await panel(page).getByRole('button', { name: 'Show Claude' }).click();
+    await panel(page).getByRole('heading', { name: 'Turn on Claude?' }).waitFor();
     await settle(page, 300);
-    await shot(page, '37-folded');
+    await shot(page, '37-off-again-opened');
+    await page.close();
+  }
+  {
+    // The plan changes while Claude picks: its answer is set aside, then a later answer is settled by an edit.
+    const page = await open('fixture=windows&claude=on&claudeMs=1500');
+    await page.getByRole('button', { name: 'Build a plan' }).click();
+    const tray = page.getByRole('complementary', { name: 'Plan' });
+    await tray.waitFor();
+    await panel(page).getByRole('button', { name: 'Let Claude pick', exact: true }).click();
+    await tray.getByRole('checkbox', { name: 'Include Temp folders' }).click();
+    const stale = panel(page).locator('.cp-entry[data-job="pickPlan"]').first();
+    await stale.getByText('my own items are out of the tray again', { exact: false }).waitFor({ timeout: 10_000 });
+    await settle(page);
+    check(!(await has(stale.getByRole('button', { name: 'Keep mine' }))), 'pick set aside: no Keep mine');
+    check(!(await tray.getByRole('checkbox', { name: 'Include Temp folders' }).isChecked()), 'pick set aside: the edit stays');
+    check(!(await has(tray.getByText('Android emulator images'))), 'pick set aside: Claude’s items are out again');
+    await shot(page, '38-pick-set-aside');
+    const pick = await job(page, 'Let Claude pick', 'pickPlan');
+    await tray.getByRole('checkbox', { name: 'Include Temp folders' }).click();
+    await settle(page);
+    check(await has(pick.getByText('Your plan changed since, so these changes are settled.', { exact: false })), 'pick settled by an edit');
+    check(!(await has(pick.getByRole('button', { name: 'Keep mine' }))), 'pick settled: no Keep mine');
+    await into(pick.locator('.cl-diff-settled'));
+    await shot(page, '39-pick-settled');
     await page.close();
   }
 }
