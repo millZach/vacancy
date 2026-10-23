@@ -422,6 +422,35 @@ describe('Claude’s answers on a drive’s scan', () => {
     expect(planOf(s)).toEqual(['w-node']);
   });
 
+  it('counts each change of what is in the plan, however it changes, and nothing else', () => {
+    const versionOf = (s: ReturnType<typeof run>) => {
+      const scan = scanOf(s, C.mountPoint);
+      return scan.phase === 'done' ? scan.planVersion : null;
+    };
+    const s0 = run(start, ...scanned(C, 1));
+    expect(versionOf(s0)).toBe(0);
+    const s1 = run(s0, { type: 'plan', mountPoint: C.mountPoint, id: 'w-node', on: false });
+    expect(versionOf(s1)).toBe(1);
+    // Ticking what is ticked changes nothing; neither does a whole plan with the same items in another order.
+    expect(run(s1, { type: 'plan', mountPoint: C.mountPoint, id: 'w-temp', on: true })).toBe(s1);
+    const same = run(s1, { type: 'setPlan', mountPoint: C.mountPoint, run: 1, ids: [...planOf(s1)!].reverse() });
+    expect(versionOf(same)).toBe(1);
+    const s2 = run(s1, { type: 'setPlan', mountPoint: C.mountPoint, run: 1, ids: ['w-node'] });
+    expect(versionOf(s2)).toBe(2);
+    // Claude's items arriving unticked change the map, not the plan; a plan item they drop does.
+    const added = { ...refreshed, proposals: [...fixtures.windows.proposals, claudeItem] };
+    expect(versionOf(run(s2, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed: added }))).toBe(2);
+    expect(versionOf(run(s1, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed }))).toBe(2);
+  });
+
+  it('sets a whole plan from a version only while the plan is still at it: an edit made meanwhile stays', () => {
+    const s0 = run(start, ...scanned(C, 1));
+    const picked = run(s0, { type: 'setPlan', mountPoint: C.mountPoint, run: 1, ids: ['w-node'], from: 0 });
+    expect(planOf(picked)).toEqual(['w-node']);
+    const edited = run(s0, { type: 'plan', mountPoint: C.mountPoint, id: 'w-temp', on: false });
+    expect(run(edited, { type: 'setPlan', mountPoint: C.mountPoint, run: 1, ids: ['w-node'], from: 0 })).toBe(edited);
+  });
+
   it('ignores an answer about an earlier scan, or one that comes after the plan ran', () => {
     const later = run(start, ...scanned(C, 1), ...scanned(C, 2));
     expect(run(later, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed })).toBe(later);

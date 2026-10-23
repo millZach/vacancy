@@ -141,7 +141,7 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
   const claudeOn = isOn(claude);
   const scope: Scope | null =
     overview && state.phase === 'done'
-      ? { mountPoint: overview.volume.mountPoint, run: state.run, plan, tidyIds: state.tidy.map((t) => t.id) }
+      ? { mountPoint: overview.volume.mountPoint, run: state.run, plan, planVersion: state.planVersion, tidyIds: state.tidy.map((t) => t.id) }
       : null;
   const talk = claude && scope ? claude.conversation(scope) : null;
   const flagged = new Set(talk && claudeOn ? liveFlags(talk, plan).map((f) => f.id) : []);

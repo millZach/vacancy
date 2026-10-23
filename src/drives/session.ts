@@ -64,6 +64,11 @@ export type DriveScan =
        * sorts always start out of it.
        */
       plan: string[];
+      /**
+       * Goes up by one each time what is in the plan changes, however it changes: Claude's panel tells an answer about
+       * the plan as it was sent from one about the plan as it is now.
+       */
+      planVersion: number;
       /** When it finished, in ms since the epoch. */
       at: number;
       /** The plan this scan ran, if it ran one. A drive keeps it, and its summary, until it is scanned again. */
@@ -133,8 +138,11 @@ export type Action =
    * and sorts to show from now on. The plan keeps what is still there.
    */
   | { type: 'claudeApplied'; mountPoint: string; run: number; refreshed: ClaudeRefreshed }
-  /** The plan of the scan `run` as a whole (Let Claude pick, or Keep mine putting the plan back). */
-  | { type: 'setPlan'; mountPoint: string; run: number; ids: string[] }
+  /**
+   * The plan of the scan `run` as a whole (Let Claude pick, or Keep mine putting the plan back). With `from`, only
+   * while the plan is still at that version: an edit made meanwhile is never overwritten.
+   */
+  | { type: 'setPlan'; mountPoint: string; run: number; ids: string[]; from?: number }
   /** The sorts of the scan `run` after a layout was picked for one of them. */
   | { type: 'tidyChosen'; mountPoint: string; run: number; tidy: TidyProposal[] }
   /** The user confirmed the plan and it started: drive switching and scanning wait until it ends. */
@@ -225,6 +233,14 @@ function goTo(s: Session, mountPoint: string, screen: Screen): Session {
   return { ...s, scans, current: mountPoint, screen, gone: null };
 }
 
+type DoneScan = Extract<DriveScan, { phase: 'done' }>;
+
+/** `scan` with the plan `plan`: its version goes up by one when what is in it changes, and stays when it doesn't. */
+function withPlan(scan: DoneScan, plan: string[]): DoneScan {
+  const same = plan.length === scan.plan.length && plan.every((id) => scan.plan.includes(id));
+  return same ? scan : { ...scan, plan, planVersion: scan.planVersion + 1 };
+}
+
 /** Applies `change` to the plan run of a drive whose scan is done. `change` returns the run as it was to do nothing. */
 function onPlanRun(s: Session, mountPoint: string, change: (run: PlanRun | null) => PlanRun | null): Session {
   const scan = scanOf(s, mountPoint);
@@ -258,7 +274,8 @@ function onScan(
 ): Session {
   const scan = scanOf(s, mountPoint);
   if (scan.phase !== 'done' || scan.run !== run || ranPlan(scan)) return s;
-  return { ...s, scans: { ...s.scans, [mountPoint]: change(scan) } };
+  const next = change(scan);
+  return next === scan ? s : { ...s, scans: { ...s.scans, [mountPoint]: next } };
 }
 
 /** Applies `change` to the drive's scan only if it is the scan `run` (a later scan, or none, ignores it). */
@@ -307,6 +324,7 @@ export function reduce(s: Session, a: Action): Session {
               proposals: a.outcome.proposals,
               tidy: a.outcome.tidy,
               plan: a.outcome.proposals.filter((p) => p.defaultOn).map((p) => p.id),
+              planVersion: 0,
               at: a.at,
               planRun: null,
               duplicates: { phase: 'checking', progress: null },
@@ -330,7 +348,7 @@ export function reduce(s: Session, a: Action): Session {
       if (scan.phase !== 'done' || !known || ranPlan(scan)) return s;
       if (scan.plan.includes(a.id) === a.on) return s;
       const plan = a.on ? [...scan.plan, a.id] : scan.plan.filter((id) => id !== a.id);
-      return { ...s, scans: { ...s.scans, [a.mountPoint]: { ...scan, plan } } };
+      return { ...s, scans: { ...s.scans, [a.mountPoint]: withPlan(scan, plan) } };
     }
     case 'dupsProgress':
       return onSearch(s, a.mountPoint, a.run, (scan) => ({
@@ -343,12 +361,11 @@ export function reduce(s: Session, a: Action): Session {
         if (a.outcome.status === 'cancelled' || ranPlan(scan)) return { ...scan, duplicates: { phase: 'stopped' } };
         const ids = new Set([...a.outcome.proposals.map((p) => p.id), ...a.outcome.tidy.map((t) => t.id)]);
         return {
-          ...scan,
+          ...withPlan(scan, scan.plan.filter((id) => ids.has(id))),
           overview: a.outcome.overview,
           proposals: a.outcome.proposals,
           // The sorts again, with the extra copies marked as deleted by duplicates (delete wins over sort).
           tidy: a.outcome.tidy,
-          plan: scan.plan.filter((id) => ids.has(id)),
           duplicates: { phase: 'done', found: a.outcome.duplicates },
         };
       });
@@ -367,17 +384,17 @@ export function reduce(s: Session, a: Action): Session {
       return onScan(s, a.mountPoint, a.run, (scan) => {
         const ids = new Set([...a.refreshed.proposals.map((p) => p.id), ...a.refreshed.tidy.map((t) => t.id)]);
         return {
-          ...scan,
+          ...withPlan(scan, scan.plan.filter((id) => ids.has(id))),
           overview: a.refreshed.overview,
           proposals: a.refreshed.proposals,
           tidy: a.refreshed.tidy,
-          plan: scan.plan.filter((id) => ids.has(id)),
         };
       });
     case 'setPlan':
       return onScan(s, a.mountPoint, a.run, (scan) => {
+        if (a.from !== undefined && a.from !== scan.planVersion) return scan;
         const known = (id: string) => scan.proposals.some((p) => p.id === id) || scan.tidy.some((t) => t.id === id);
-        return { ...scan, plan: [...new Set(a.ids)].filter(known) };
+        return withPlan(scan, [...new Set(a.ids)].filter(known));
       });
     case 'tidyChosen':
       return onScan(s, a.mountPoint, a.run, (scan) => ({ ...scan, tidy: a.tidy }));

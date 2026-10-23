@@ -283,7 +283,9 @@ export function ClaudeTrigger({ busy, failed, onOpen }: { busy: boolean; failed:
     ? 'Rules only'
     : status.state === 'signedOut'
       ? 'Claude · not signed in'
-      : busy
+      : status.state === 'checkTimedOut' || status.state === 'checkFailed'
+        ? 'Claude · couldn’t check'
+        : busy
         ? 'Claude is working'
         : failed
           ? 'Claude · didn’t answer'
@@ -319,7 +321,9 @@ export function ClaudeNote() {
         ? ['Built-in rules. Claude is off.', 'After the scan you can turn on Claude, your own Claude Code, in the panel beside the map.']
         : status.state === 'signedOut'
           ? ['Built-in rules. Claude Code isn’t signed in.', 'Run claude in a terminal and sign in to use Claude beside the map.']
-          : [
+          : status.state === 'checkTimedOut' || status.state === 'checkFailed'
+            ? ['Built-in rules. Vacancy couldn’t check Claude Code.', 'Check again in the Claude panel beside the map.']
+            : [
               'Built-in rules, and Claude beside the map.',
               status.privacy
                 ? 'Privacy mode is on: Claude gets names, sizes, counts and dates only.'

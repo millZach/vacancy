@@ -22,7 +22,7 @@ import { RiskChip, SourceTag } from '../plan/bits';
 import { activeMoves, kindFolders } from '../tidy/model';
 import { Basis, Dropped, HiddenFold, JobLine, Mark, PrivacyNotice, PrivacyRow } from './bits';
 import { FIRST_QUESTION } from './ClaudeProvider';
-import { tileAt, useClaude, type ChatEntry, type Claude, type Conversation, type JobEntry, type JobKind, type Scope } from './context';
+import { pickOffer, tileAt, useClaude, type ChatEntry, type Claude, type Conversation, type JobEntry, type JobKind, type Scope } from './context';
 import './claude.css';
 
 interface Props {
@@ -65,17 +65,23 @@ const WORKING: Record<JobKind, string> = {
 export function ClaudePanel(props: Props) {
   const claude = useClaude();
   if (!claude) return null;
+  const status = claude.status.phase === 'ready' ? claude.status.status : null;
   if (claude.folded)
     return (
       <aside className="cp is-folded" aria-label="Claude" data-no-ripple>
-        <button type="button" className="cp-rail" onClick={() => claude.setFolded(false)} aria-label="Show Claude">
+        <button
+          type="button"
+          className="cp-rail"
+          onClick={() => claude.setFolded(false)}
+          aria-label="Show Claude"
+          title={status?.state === 'on' ? 'Show Claude' : 'Claude is off. Show Claude to turn it on.'}
+        >
           <PanelLeftOpen size={16} aria-hidden />
           <Mark size={16} />
-          <span>Claude</span>
+          <span>{status?.state === 'on' ? 'Claude' : 'Claude · off'}</span>
         </button>
       </aside>
     );
-  const status = claude.status.phase === 'ready' ? claude.status.status : null;
   const c = claude.conversation(props.scope);
   return (
     <aside className="cp" aria-label="Claude" data-no-ripple>
@@ -110,6 +116,8 @@ function headLine(status: ClaudeStatus | null, c: Conversation): string {
   if (status.state === 'notFound') return 'Not found';
   if (status.state === 'off') return 'Off';
   if (status.state === 'signedOut') return 'On · not signed in';
+  if (status.state === 'checkTimedOut') return 'On · Claude Code didn’t answer';
+  if (status.state === 'checkFailed') return 'On · couldn’t check Claude Code';
   if (c.entries.some((e) => e.phase === 'slow')) return 'On · replies are slow';
   const last = c.entries.at(-1);
   if (last?.phase === 'failed' && last.failure?.kind !== 'cancelled') return 'On · the last request failed';
@@ -124,7 +132,12 @@ function PanelOff({ claude, status }: { claude: Claude; status: ClaudeStatus }) 
       ? ['Claude Code isn’t on this PC.', 'Vacancy uses your own Claude Code, so it has to be installed here. Built-in cleanups still work.', 'Not found in this check']
       : status.state === 'signedOut'
         ? ['Sign in to Claude Code first.', 'Claude Code is installed but not signed in. Open a terminal, run claude, and sign in. Then check again.', 'Found · not signed in']
-        : ['Turn on Claude?', 'Claude can explain folders, review your plan and suggest layouts. It stays off until you turn it on.', 'Found on this PC · off'];
+        : status.state === 'checkTimedOut'
+          ? ['Claude Code didn’t answer.', 'Vacancy asked Claude Code whether it’s signed in, and it took too long. Check again in a moment.', 'Found · didn’t answer the check']
+          : status.state === 'checkFailed'
+            ? ['Vacancy couldn’t check Claude Code.', 'Asking Claude Code whether it’s signed in failed. Check again, or turn Claude off.', 'Found · the check failed']
+            : ['Turn on Claude?', 'Claude can explain folders, review your plan and suggest layouts. It stays off until you turn it on.', 'Found on this PC · off'];
+  const retry = status.state === 'notFound' || status.state === 'signedOut' || status.state === 'checkTimedOut' || status.state === 'checkFailed';
   return (
     <div className="cp-off-body">
       <h3>{title}</h3>
@@ -138,6 +151,11 @@ function PanelOff({ claude, status }: { claude: Claude; status: ClaudeStatus }) 
           <span>{checking ? 'Checking Claude Code…' : row}</span>
         </div>
       </div>
+      {status.message && (status.state === 'checkTimedOut' || status.state === 'checkFailed') && (
+        <p className="cl-job is-error" role="alert">
+          <TriangleAlert size={13} aria-hidden /> <span>{status.message}</span>
+        </p>
+      )}
       <PrivacyNotice privacy={status.privacy} compact />
       <HiddenFold hidden={status.hidden} />
       {claude.settingError && (
@@ -159,12 +177,12 @@ function PanelOff({ claude, status }: { claude: Claude; status: ClaudeStatus }) 
             <Mark size={13} /> Turn on Claude
           </button>
         ))}
-      {(status.state === 'notFound' || status.state === 'signedOut') && (
+      {retry && (
         <button type="button" className="btn cp-on" onClick={claude.recheck} disabled={checking}>
           {checking ? 'Checking…' : 'Check again'}
         </button>
       )}
-      {status.state === 'signedOut' && (
+      {retry && status.state !== 'notFound' && (
         <button type="button" className="link-button cp-off" onClick={claude.turnOff}>
           Turn off Claude
         </button>
@@ -215,6 +233,12 @@ function PanelOn(p: OnProps) {
             I only propose: nothing changes until you confirm.
           </p>
         </div>
+        {claude.ended !== null && (
+          <p className="cp-quiet cp-ended" role="status">
+            Privacy mode is {claude.ended ? 'on' : 'off'} now, so Vacancy ended the conversation so far. Nothing from it is sent
+            to Claude again.
+          </p>
+        )}
         {c.entries.map((e) => (e.kind === 'job' ? <JobItem key={e.id} e={e} {...p} /> : <ChatItem key={e.id} e={e} {...p} />))}
       </div>
       <div className="cp-foot">
@@ -289,7 +313,7 @@ function ItemLink({ about, name, p }: { about: ClaudeAbout; name: string; p: OnP
 }
 
 function JobItem({ e, ...p }: OnProps & { e: JobEntry }) {
-  const { claude, status, scope } = p;
+  const { claude, scope } = p;
   const a = e.answer;
   return (
     <div className="cp-entry" data-job={e.job}>
@@ -309,11 +333,6 @@ function JobItem({ e, ...p }: OnProps & { e: JobEntry }) {
           {a.result.kind === 'tidy' && <TidyReply e={e} {...p} />}
           {a.result.kind !== 'pick' && a.result.kind !== 'explain' && <Dropped items={a.dropped} />}
           <Basis basis={a.basis} />
-          {e.privacy !== status.privacy && (
-            <button type="button" className="link-button cl-again" onClick={() => claude.start(scope, e.job)}>
-              Ask again with privacy mode {status.privacy ? 'on' : 'off'}
-            </button>
-          )}
         </div>
       )}
     </div>
@@ -391,11 +410,31 @@ function PickReply({ e, ...p }: OnProps & { e: JobEntry }) {
   if (r?.kind !== 'pick' || !pick) return null;
   const known = new Set(p.proposals.map((x) => x.id));
   const stay = pick.before.filter((id) => known.has(id) && r.plan.includes(id)).length;
+  if (pick.choice === 'stale')
+    return (
+      <>
+        <p>
+          <Mark size={12} /> Your plan changed while I was picking, so Vacancy set my answer aside: nothing was ticked or unticked
+          {pick.added.length > 0 ? (pick.busy ? '. Taking my own items back out…' : pick.error ? '.' : ', and my own items are out of the tray again.') : '.'}
+        </p>
+        {pick.error && (
+          <p className="cl-job is-error" role="alert">
+            <TriangleAlert size={13} aria-hidden /> <span>{pick.error} My items stay in the tray, unticked.</span>
+          </p>
+        )}
+        <button type="button" className="link-button cl-again" onClick={() => p.claude.start(p.scope, 'pickPlan')}>
+          Let Claude pick again
+        </button>
+      </>
+    );
   if (pick.choice === 'kept')
     return (
-      <p>
-        <Mark size={12} /> You kept your plan. My own items are out of the tray again.
-      </p>
+      <>
+        <p>
+          <Mark size={12} /> You kept your plan. My own items are out of the tray again.
+        </p>
+        {pick.error && <p className="cp-quiet">{pick.error}</p>}
+      </>
     );
   if (pick.choice === 'used')
     return (
@@ -404,8 +443,9 @@ function PickReply({ e, ...p }: OnProps & { e: JobEntry }) {
         {r.changes.some((c) => c.change === 'add') ? 'My own items are in the tray, unticked: tick the ones you want.' : ''}
       </p>
     );
+  const offer = pickOffer(p.c, e, p.scope.plan, p.scope.planVersion);
   return (
-    <div className="cl-diff" aria-label="Claude’s plan">
+    <div className={offer === 'open' ? 'cl-diff' : 'cl-diff is-settled'} aria-label="Claude’s plan">
       <p>
         <Mark size={12} /> {r.summary}
       </p>
@@ -418,7 +458,7 @@ function PickReply({ e, ...p }: OnProps & { e: JobEntry }) {
           Claude’s <b>{formatBytes(r.bytesAfter)}</b>
         </span>
       </p>
-      <p className="cp-quiet">These changes are in your plan now. Keep mine puts yours back.</p>
+      {offer === 'open' && <p className="cp-quiet">These changes are in your plan now. Keep mine puts yours back.</p>}
       <ul>
         {r.changes.map((ch) => (
           <li key={ch.id} className={`is-${ch.change}`}>
@@ -458,14 +498,22 @@ function PickReply({ e, ...p }: OnProps & { e: JobEntry }) {
           <TriangleAlert size={13} aria-hidden /> <span>{pick.error}</span>
         </p>
       )}
-      <div className="cl-diff-actions">
-        <button type="button" className="btn" onClick={() => p.claude.keepMine(p.scope, e.id)} disabled={pick.busy}>
-          {pick.busy ? 'Putting it back…' : 'Keep mine'}
-        </button>
-        <button type="button" className="cta" onClick={() => p.claude.useClaudes(p.scope, e.id)} disabled={pick.busy}>
-          Use Claude’s plan
-        </button>
-      </div>
+      {offer === 'open' ? (
+        <div className="cl-diff-actions">
+          <button type="button" className="btn" onClick={() => p.claude.keepMine(p.scope, e.id)} disabled={pick.busy}>
+            {pick.busy ? 'Putting it back…' : 'Keep mine'}
+          </button>
+          <button type="button" className="cta" onClick={() => p.claude.useClaudes(p.scope, e.id)} disabled={pick.busy}>
+            Use Claude’s plan
+          </button>
+        </div>
+      ) : (
+        <p className="cl-settled cl-diff-settled">
+          {offer === 'replaced'
+            ? 'A newer pick replaced this one. Its changes are settled.'
+            : 'Your plan changed since, so these changes are settled. Let Claude pick again to compare.'}
+        </p>
+      )}
     </div>
   );
 }

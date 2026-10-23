@@ -1,8 +1,19 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../App';
-import { BridgeProvider, createMockBridge, fixtures, type Bridge, type MockOptions, type RunListing } from '../bridge';
+import {
+  BridgeProvider,
+  createMockBridge,
+  fixtures,
+  type Bridge,
+  type ClaudeAnswer,
+  type ClaudeEvent,
+  type MockOptions,
+  type RunListing,
+} from '../bridge';
+import { PRIVACY_TURNS } from '../bridge/mockClaude';
+import { PANEL_KEY } from './ClaudeProvider';
 import { DrivesProvider } from '../drives/DrivesProvider';
 import { HistoryMenu } from '../history/HistoryMenu';
 import { ConfirmDialog } from '../run/ConfirmDialog';
@@ -50,18 +61,29 @@ async function job(name: string, kind: string) {
 
 const checked = (name: string) => within(tray()).getByRole('checkbox', { name: `Include ${name}` }).getAttribute('aria-checked') === 'true';
 
+/** Unfolds the panel from its rail (it is folded while Claude is off). */
+async function unfold() {
+  await userEvent.click(within(panel()).getByRole('button', { name: 'Show Claude' }));
+}
+
 beforeEach(() => {
+  window.localStorage.clear();
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(
     DOMRect.fromRect({ x: 0, y: 0, width: 1200, height: 700 }),
   );
 });
 
 describe('the Claude panel’s states', () => {
-  it('is off until turned on: the turn-on step, the privacy notice and what always stays hidden', async () => {
+  it('is folded to its rail while off, and once opened is the turn-on step with the privacy notice', async () => {
     const bridge = windows();
     const enable = vi.spyOn(bridge, 'claudeSetEnabled');
     await toMap(bridge);
 
+    // Off: a thin strip with a Claude button, so the map gets the room.
+    expect(panel()).toHaveClass('is-folded');
+    expect(within(panel()).getByRole('button', { name: 'Show Claude' })).toHaveTextContent('Claude · off');
+    expect(within(panel()).queryByRole('heading', { name: 'Turn on Claude?' })).toBeNull();
+    await unfold();
     expect(within(panel()).getByRole('heading', { name: 'Turn on Claude?' })).toBeInTheDocument();
     expect(within(panel()).getByText('The contents of any file.')).toBeInTheDocument();
     expect(within(header()).getByText('Rules only')).toBeInTheDocument();
@@ -74,6 +96,7 @@ describe('the Claude panel’s states', () => {
 
   it('checks that Claude Code answers while turning on, then is on with privacy mode on', async () => {
     await toMap(windows({ claudeMs: 300 }));
+    await unfold();
     await userEvent.click(within(panel()).getByRole('button', { name: 'Turn on Claude' }));
 
     expect(within(panel()).getByText('Checking that Claude Code answers…')).toBeInTheDocument();
@@ -88,15 +111,34 @@ describe('the Claude panel’s states', () => {
   it('says when Claude Code isn’t on this computer, or isn’t signed in, and can check again', async () => {
     const bridge = windows({ claude: 'notfound' });
     const view = await toMap(bridge);
+    await unfold();
     expect(within(panel()).getByRole('heading', { name: 'Claude Code isn’t on this PC.' })).toBeInTheDocument();
     const status = vi.spyOn(bridge, 'claudeStatus');
     await userEvent.click(within(panel()).getByRole('button', { name: 'Check again' }));
     expect(status).toHaveBeenCalled();
     view.unmount();
 
+    // Turned on but not signed in: the panel is open by itself, to say so.
     await toMap(windows({ claude: 'signedout' }));
     expect(within(panel()).getByRole('heading', { name: 'Sign in to Claude Code first.' })).toBeInTheDocument();
     expect(within(panel()).getByText('Found · not signed in')).toBeInTheDocument();
+  });
+
+  it('says when the sign-in check timed out or failed, with why, never as not signed in', async () => {
+    const view = await toMap(windows({ claude: 'checktimeout' }));
+    expect(within(panel()).getByRole('heading', { name: 'Claude Code didn’t answer.' })).toBeInTheDocument();
+    expect(within(panel()).getByRole('alert')).toHaveTextContent('within 30 seconds');
+    expect(within(panel()).getByText('On · Claude Code didn’t answer')).toBeInTheDocument();
+    expect(within(panel()).queryByText('Found · not signed in')).toBeNull();
+    expect(within(panel()).getByRole('button', { name: 'Check again' })).toBeInTheDocument();
+    expect(within(panel()).getByRole('button', { name: 'Turn off Claude' })).toBeInTheDocument();
+    expect(within(header()).getByText('Claude · couldn’t check')).toBeInTheDocument();
+    view.unmount();
+
+    await toMap(windows({ claude: 'checkerror' }));
+    expect(within(panel()).getByRole('heading', { name: 'Vacancy couldn’t check Claude Code.' })).toBeInTheDocument();
+    expect(within(panel()).getByRole('alert')).toHaveTextContent('Access is denied');
+    expect(within(panel()).queryByRole('heading', { name: 'Sign in to Claude Code first.' })).toBeNull();
   });
 
   it('works with a Cancel, says when it’s slow, and Cancel ends it with nothing changed', async () => {
@@ -137,7 +179,10 @@ describe('the Claude panel’s states', () => {
     expect(within(tray()).getByText('Android emulator images')).toBeInTheDocument();
 
     await userEvent.click(within(panel()).getByRole('button', { name: 'Turn off Claude' }));
-    expect(await within(panel()).findByRole('heading', { name: 'Turn on Claude?' })).toBeInTheDocument();
+    // Off again, it folds by itself; opened, it is the turn-on step with nothing of the conversation left.
+    expect(await within(panel()).findByRole('button', { name: 'Show Claude' })).toBeInTheDocument();
+    await unfold();
+    expect(within(panel()).getByRole('heading', { name: 'Turn on Claude?' })).toBeInTheDocument();
     expect(within(tray()).getByText('Android emulator images')).toBeInTheDocument();
     expect(within(tray()).queryByRole('button', { name: 'Ask Claude' })).toBeNull();
     expect(document.querySelector('.map-tile.is-explained')).toBeNull();
@@ -149,6 +194,27 @@ describe('the Claude panel’s states', () => {
     expect(within(panel()).getByRole('button', { name: 'Show Claude' })).toBeInTheDocument();
     await userEvent.click(within(header()).getByRole('button', { name: /Claude on: show the Claude panel/ }));
     expect(within(panel()).getByRole('button', { name: 'Turn off Claude' })).toBeInTheDocument();
+  });
+
+  it('remembers whether the person opened or folded it, across launches, over the default', async () => {
+    // Opened while off: open on the next launch too, though Claude is still off.
+    const first = await toMap(windows());
+    await unfold();
+    expect(window.localStorage.getItem(PANEL_KEY)).toBe('open');
+    first.unmount();
+    const second = await toMap(windows());
+    expect(within(panel()).getByRole('heading', { name: 'Turn on Claude?' })).toBeInTheDocument();
+    second.unmount();
+
+    // Folded while on: folded on the next launch, though Claude is on.
+    window.localStorage.clear();
+    const third = await toMap(windows({ claude: 'on' }));
+    expect(within(panel()).getByRole('button', { name: 'Turn off Claude' })).toBeInTheDocument();
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Fold the Claude panel' }));
+    expect(window.localStorage.getItem(PANEL_KEY)).toBe('folded');
+    third.unmount();
+    await toMap(windows({ claude: 'on' }));
+    expect(panel()).toHaveClass('is-folded');
   });
 });
 
@@ -181,7 +247,7 @@ describe('privacy mode', () => {
     expect(set).toHaveBeenLastCalledWith(true);
   });
 
-  it('every answer says what it was based on, and offers to ask again once the mode changed', async () => {
+  it('every answer says what it was based on; changing the mode ends the conversation, and says so', async () => {
     await toMap(windows({ claude: 'on' }));
     await openPlan();
     const review = await job('Review my plan', 'reviewPlan');
@@ -189,11 +255,42 @@ describe('privacy mode', () => {
 
     await userEvent.click(within(panel()).getByRole('switch', { name: 'Privacy mode' }));
     await userEvent.click(screen.getByRole('button', { name: 'Turn privacy mode off' }));
-    expect(await within(review).findByRole('button', { name: 'Ask again with privacy mode off' })).toBeInTheDocument();
+    expect(await within(panel()).findByText(/Privacy mode is off now, so Vacancy ended the conversation so far/)).toBeInTheDocument();
+    expect(panel().querySelector('.cp-entry')).toBeNull();
     const again = await job('Review my plan', 'reviewPlan');
     expect(within(again).getByText(/Claude opened/)).toBeInTheDocument();
     // With privacy mode off the mock reads raytracer\target and flags it too.
     expect(within(again).getAllByText(/raytracer/).length).toBeGreaterThan(0);
+    expect(within(panel()).queryByText(/ended the conversation so far/)).toBeNull();
+
+    // Back on: that conversation ends too.
+    await userEvent.click(within(panel()).getByRole('switch', { name: 'Privacy mode' }));
+    expect(await within(panel()).findByText(/Privacy mode is on now, so Vacancy ended the conversation so far/)).toBeInTheDocument();
+    expect(panel().querySelector('.cp-entry')).toBeNull();
+  });
+
+  it('a chat sends the privacy mode of each turn, and one from privacy mode off is never sent with it on', async () => {
+    const bridge = windows({ claude: 'on', privacy: 'off' });
+    const chat = vi.spyOn(bridge, 'claudeChat');
+    await toMap(bridge);
+    await openPlan();
+    const row = within(tray()).getByText('Rust build output in 12 projects').closest('.tray-row') as HTMLElement;
+    await userEvent.click(within(row).getByRole('button', { name: 'Ask Claude' }));
+    await waitFor(() => expect(panel().querySelector('.cp-entry[data-chat] .cl-first')).toBeTruthy());
+    expect(chat.mock.calls[0]?.[2]).toEqual([{ from: 'person', text: expect.any(String) as string, privacy: false }]);
+
+    await userEvent.click(within(panel()).getByRole('switch', { name: 'Privacy mode' }));
+    await waitFor(() => expect(panel().querySelector('.cp-entry')).toBeNull());
+    await userEvent.click(within(row).getByRole('button', { name: 'Ask Claude' }));
+    await waitFor(() => expect(panel().querySelector('.cp-entry[data-chat] .cl-first')).toBeTruthy());
+    // A new chat, every turn of it made with privacy mode on.
+    expect(chat.mock.calls.at(-1)?.[2]).toEqual([{ from: 'person', text: expect.any(String) as string, privacy: true }]);
+
+    // And the core (here the mock, as the core does) refuses a chat that still holds a privacy-off turn.
+    const events: ClaudeEvent[] = [];
+    await bridge.claudeChat('C:\\', { kind: 'proposal', id: 'w-rust' }, [{ from: 'person', text: 'Old question', privacy: false }, { from: 'person', text: 'New', privacy: true }], (e) => events.push(e));
+    await waitFor(() => expect(events.some((e) => e.kind === 'failed')).toBe(true));
+    expect(events.find((e) => e.kind === 'failed')).toMatchObject({ failure: { kind: 'error', message: PRIVACY_TURNS } });
   });
 });
 
@@ -258,6 +355,104 @@ describe('the jobs', () => {
     expect(within(row).getByText('Review')).toBeInTheDocument();
   });
 
+  it('a Pick answer about a plan edited meanwhile is set aside: no tick changes, its own items taken out', async () => {
+    const bridge = windows({ claude: 'on', claudeMs: 400 });
+    const remove = vi.spyOn(bridge, 'claudeRemoveItems');
+    await toMap(bridge);
+    await openPlan();
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Let Claude pick' }));
+    // While Claude picks, the person unticks something.
+    await userEvent.click(within(tray()).getByRole('checkbox', { name: 'Include Temp folders' }));
+    const pick = await waitFor(() => {
+      const e = panel().querySelector<HTMLElement>('.cp-entry[data-job="pickPlan"] .cp-msg');
+      expect(e).toBeTruthy();
+      return e!;
+    });
+    expect(within(pick).getByText(/Your plan changed while I was picking/)).toBeInTheDocument();
+    expect(within(pick).queryByRole('button', { name: 'Keep mine' })).toBeNull();
+    // The edit stays, and Claude's ticks never went in: the installers are still ticked, the game not.
+    expect(checked('Temp folders')).toBe(false);
+    expect(checked('Old installers in Downloads')).toBe(true);
+    await waitFor(() => expect(remove).toHaveBeenCalledWith('C:\\', ['claude-android', 'claude-public']));
+    await waitFor(() => expect(within(tray()).queryByText('Android emulator images')).toBeNull());
+    expect(await within(pick).findByText(/my own items are out of the tray again/)).toBeInTheDocument();
+    expect(within(pick).getByRole('button', { name: 'Let Claude pick again' })).toBeInTheDocument();
+  });
+
+  it('only the newest pick, with the plan as it left it, offers Keep mine and Use Claude’s plan', async () => {
+    await toMap(windows({ claude: 'on' }));
+    await openPlan();
+    const first = await job('Let Claude pick', 'pickPlan');
+    expect(within(first).getByRole('button', { name: 'Keep mine' })).toBeInTheDocument();
+
+    // An edit after the answer settles it.
+    await userEvent.click(within(tray()).getByRole('checkbox', { name: 'Include Temp folders' }));
+    expect(within(first).queryByRole('button', { name: 'Keep mine' })).toBeNull();
+    expect(within(first).getByText(/Your plan changed since, so these changes are settled/)).toBeInTheDocument();
+    // Ticked again, the plan is as the answer left it once more.
+    await userEvent.click(within(tray()).getByRole('checkbox', { name: 'Include Temp folders' }));
+    expect(within(first).queryByRole('button', { name: 'Keep mine' })).toBeNull();
+
+    // A newer pick replaces it; only the newer one offers the choice.
+    const second = await job('Let Claude pick', 'pickPlan');
+    expect(within(second).getByRole('button', { name: 'Keep mine' })).toBeInTheDocument();
+    expect(within(first).getByText(/A newer pick replaced this one/)).toBeInTheDocument();
+    await userEvent.click(within(second).getByRole('button', { name: 'Keep mine' }));
+    expect(await within(second).findByText(/You kept your plan/)).toBeInTheDocument();
+    expect(within(first).queryByRole('button', { name: 'Use Claude’s plan' })).toBeNull();
+  });
+
+  it('Let Claude pick never changes the tick of Claude’s own items', async () => {
+    const bridge = windows({ claude: 'on' });
+    await toMap(bridge);
+    await job('Explain big folders', 'explainFolders');
+    await openPlan();
+    // The person ticks one of Claude's items, then asks Claude to pick: it stays ticked, the other unticked.
+    await userEvent.click(within(tray()).getByRole('checkbox', { name: 'Include Android emulator images' }));
+    const pick = await job('Let Claude pick', 'pickPlan');
+    expect(checked('Android emulator images')).toBe(true);
+    expect(within(pick).queryByText('Android emulator images')).toBeNull();
+  });
+
+  it('a cancelled chat’s late answer neither shows nor ends its retry', async () => {
+    const bridge = windows({ claude: 'on' });
+    const listeners: ((e: ClaudeEvent) => void)[] = [];
+    vi.spyOn(bridge, 'claudeChat').mockImplementation((_m, _a, _msgs, onEvent) => {
+      listeners.push(onEvent);
+      return Promise.resolve(`claude-r${listeners.length}`);
+    });
+    const cancel = vi.spyOn(bridge, 'claudeCancel').mockResolvedValue(undefined);
+    await toMap(bridge);
+    await openPlan();
+    const row = within(tray()).getByText('Rust build output in 12 projects').closest('.tray-row') as HTMLElement;
+    await userEvent.click(within(row).getByRole('button', { name: 'Ask Claude' }));
+    await waitFor(() => expect(listeners).toHaveLength(1));
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Cancel' }));
+    expect(cancel).toHaveBeenCalledWith('claude-r1');
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(listeners).toHaveLength(2));
+    const answer = (text: string): ClaudeAnswer => ({
+      job: 'ask',
+      basis: { privacy: true, text: 'From names, sizes and dates only.', opened: [], refused: [] },
+      result: { kind: 'ask', reply: text, followUps: [] },
+      dropped: [],
+      refreshed: null,
+    });
+    // The first attempt's late events: its Cancelled, then an answer it had already sent. Neither counts.
+    act(() => {
+      listeners[0]!({ kind: 'failed', requestId: 'claude-r1', failure: { kind: 'cancelled' } });
+      listeners[0]!({ kind: 'done', requestId: 'claude-r1', answer: answer('LATE answer from the cancelled attempt') });
+      // An event naming another request on the retry's own channel doesn't count either.
+      listeners[1]!({ kind: 'done', requestId: 'claude-r1', answer: answer('LATE answer on the wrong channel') });
+    });
+    expect(within(panel()).getByText('Claude is looking at Rust build output in 12 projects…')).toBeInTheDocument();
+    expect(within(panel()).queryByText(/LATE answer/)).toBeNull();
+    // The retry still runs, and its answer lands; Cancel now stops the retry, not the first attempt.
+    act(() => listeners[1]!({ kind: 'done', requestId: 'claude-r2', answer: answer('The retry’s answer.') }));
+    expect(await within(panel()).findByText(/The retry’s answer/)).toBeInTheDocument();
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
   it('Ask Claude: a row’s chat gets a first answer, suggested follow-ups and the composer', async () => {
     const bridge = windows({ claude: 'on' });
     const chat = vi.spyOn(bridge, 'claudeChat');
@@ -279,7 +474,7 @@ describe('the jobs', () => {
     await userEvent.type(input, 'Can I get it back from the Recycle Bin?{Enter}');
     expect(await within(entry).findByText(/skips the Recycle Bin and the Trash/)).toBeInTheDocument();
     const sent = chat.mock.calls.at(-1)?.[2];
-    expect(sent?.at(-1)).toEqual({ from: 'person', text: 'Can I get it back from the Recycle Bin?' });
+    expect(sent?.at(-1)).toEqual({ from: 'person', text: 'Can I get it back from the Recycle Bin?', privacy: true });
     expect(sent).toHaveLength(3);
     expect(within(entry).getByRole('button', { name: 'What would you do?' })).toBeInTheDocument();
   });

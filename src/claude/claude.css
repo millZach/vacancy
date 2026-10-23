@@ -448,6 +448,12 @@ button.advisor-trigger:hover {
 .cl-diff-size { color: var(--color-text-3); }
 .cl-diff-same { margin: 8px 0 0 !important; color: var(--color-text-3); }
 .cl-diff-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 10px; }
+/* A pick whose plan changed since, or that a newer pick replaced: its changes stay readable, its choice is gone. */
+.cl-diff.is-settled ul,
+.cl-diff.is-settled .cl-diff-total { opacity: 0.62; }
+.cl-diff-settled { margin: 10px 0 0 !important; }
+/* Privacy mode changed: the conversation so far was ended. */
+.cp-ended { margin: 0; padding: 8px 10px; border: 1px dashed var(--color-line-2); border-radius: 8px; font-size: var(--text-xs); }
 
 /* review flags */
 .cl-flag {

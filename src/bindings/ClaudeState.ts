@@ -4,4 +4,4 @@
  * Where Claude is, as the panel's head shows it. A request's own states (working, slow, timed out, error) come in
  * its [`Event`]s.
  */
-export type ClaudeState = "notFound" | "signedOut" | "off" | "on";
+export type ClaudeState = "notFound" | "signedOut" | "off" | "on" | "checkTimedOut" | "checkFailed";

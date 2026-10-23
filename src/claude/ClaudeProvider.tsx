@@ -8,9 +8,12 @@ import {
   type TidyProposal,
 } from '../bridge';
 import type { ReadyDrives } from '../drives/context';
+import type { DriveScan } from '../drives/session';
 import { errorMessage } from '../errors';
 import {
   ClaudeContext,
+  isEnabled,
+  pickOffer,
   type ChatEntry,
   type Claude,
   type Conversation,
@@ -18,6 +21,7 @@ import {
   type JobEntry,
   type JobKind,
   type Layouts,
+  type PickCard,
   type Scope,
   type StatusState,
   type Where,
@@ -26,14 +30,42 @@ import {
 /** What a chat's first question asks; the panel shows it as "About <name>". */
 export const FIRST_QUESTION = 'What is it, what would I lose by deleting it, and does it come back?';
 
-/** A request's place in `requests` once Cancel came before its id. */
-const CANCEL = '\u0000cancel';
+/** Where the panel's open or folded choice is kept, once the person has made one. */
+export const PANEL_KEY = 'vacancy.claudePanel';
+
+function readPanel(): 'open' | 'folded' | null {
+  try {
+    const v = window.localStorage.getItem(PANEL_KEY);
+    return v === 'open' || v === 'folded' ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+function keepPanel(v: 'open' | 'folded') {
+  try {
+    window.localStorage.setItem(PANEL_KEY, v);
+  } catch {
+    // Not kept: the panel still opens and folds, only not across launches.
+  }
+}
 
 const EMPTY: Conversation = { entries: [], about: null, layouts: {} };
 
 const keyOf = (w: Where) => `${w.mountPoint}#${w.run}`;
 const sameAbout = (a: ClaudeAbout, b: ClaudeAbout) =>
   a.kind === 'proposal' ? b.kind === 'proposal' && a.id === b.id : b.kind === 'folder' && a.path === b.path;
+const sameSet = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((id) => b.includes(id));
+
+/**
+ * One attempt at a request: its own token (a retry is a new attempt), its request id once the core gives it, and
+ * whether Cancel came before the id did.
+ */
+interface Attempt {
+  token: number;
+  id: string | null;
+  cancelled: boolean;
+}
 
 let seq = 0;
 
@@ -41,8 +73,8 @@ let seq = 0;
  * Live Claude for everything below it (`useClaude()`), ADR 0008: Claude's status and its two switches (on/off, and
  * privacy mode with its confirm), and each drive scan's conversation in the Claude panel. Claude proposes only:
  * every answer arrives checked by the core, and what it changes (its own items, unticked; Let Claude pick's ticks;
- * a layout picked) goes into the drive's plan, which still runs only after the one confirmation. Turning Claude off
- * clears the conversations and keeps what is in the plan.
+ * a layout picked) goes into the drive's plan, which still runs only after the one confirmation. Turning Claude off,
+ * or changing privacy mode, ends the conversations and keeps what is in the plan.
  */
 export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | null; children: ReactNode }) {
   const bridge = useBridge();
@@ -50,18 +82,19 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   const [settingError, setSettingError] = useState<string | null>(null);
   const [turningOn, setTurningOn] = useState(false);
   const [checking, setChecking] = useState(false);
-  const [folded, setFolded] = useState(false);
+  const [panel, setPanel] = useState(readPanel);
   const [privacyAsk, setPrivacyAsk] = useState(false);
+  const [ended, setEnded] = useState<boolean | null>(null);
   const [convos, setConvos] = useState<Record<string, Conversation>>({});
   const drivesRef = useRef(drives);
   useEffect(() => {
     drivesRef.current = drives;
   });
   /**
-   * Each running request's id, by `drive#run/entry`, for Cancel: '' until the id comes, and CANCEL when Cancel came
-   * first. A request not in it is no longer wanted, and its events are ignored.
+   * Each running request's attempt, by `drive#run/entry`. A request not in it, or an event or id from an attempt
+   * that isn't the one in it, is no longer wanted and is ignored.
    */
-  const requests = useRef(new Map<string, string>());
+  const requests = useRef(new Map<string, Attempt>());
   const turnOnToken = useRef(0);
 
   const ready = (s: ClaudeStatus) => {
@@ -99,41 +132,68 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       .finally(() => setChecking(false));
   }, [bridge]);
 
-  /** A request still wanted: not cancelled, not ended, and Claude not turned off since. */
-  const live = (rkey: string) => {
+  /** The attempt `token` is still the one wanted for `rkey`: not cancelled, not ended, not retried since. */
+  const current = (rkey: string, token: number) => {
     const r = requests.current.get(rkey);
-    return r !== undefined && r !== CANCEL;
+    return r !== undefined && r.token === token && !r.cancelled;
   };
-  /** Starts a request: keeps its id for Cancel once it comes, or cancels it then if Cancel came first. */
-  const track = (rkey: string, begin: () => Promise<string>, failed: (message: string) => void) => {
-    requests.current.set(rkey, '');
+  /** An event belongs to the wanted attempt: its token, and its request id once known. */
+  const wanted = (rkey: string, token: number, event: ClaudeEvent) => {
+    const r = requests.current.get(rkey);
+    return current(rkey, token) && (r?.id === null || r?.id === event.requestId);
+  };
+  /**
+   * Starts attempt `token` of a request: keeps its id for Cancel once it comes, or cancels it then if Cancel (or a
+   * newer attempt) came first.
+   */
+  const track = (rkey: string, token: number, begin: () => Promise<string>, failed: (message: string) => void) => {
+    requests.current.set(rkey, { token, id: null, cancelled: false });
     begin().then(
       (requestId) => {
         const r = requests.current.get(rkey);
-        if (r === CANCEL) {
-          requests.current.delete(rkey);
-          void bridge.claudeCancel(requestId);
-        } else if (r === '') requests.current.set(rkey, requestId);
+        if (r && r.token === token && !r.cancelled) {
+          requests.current.set(rkey, { ...r, id: requestId });
+          return;
+        }
+        if (r?.token === token) requests.current.delete(rkey);
+        void bridge.claudeCancel(requestId);
       },
       (error: unknown) => {
-        if (!live(rkey)) return;
+        if (!current(rkey, token)) return;
         requests.current.delete(rkey);
         failed(errorMessage(error));
       },
     );
   };
 
-  /** A request ended: forget its id, and look again at Claude Code if it went missing or signed out. */
-  const ended = (rkey: string, event: ClaudeEvent) => {
-    requests.current.delete(rkey);
+  /** Attempt `token` ended: forget it, and look again at Claude Code if it went missing or signed out. */
+  const finished = (rkey: string, token: number, event: ClaudeEvent) => {
+    if (requests.current.get(rkey)?.token === token) requests.current.delete(rkey);
     if (event.kind === 'failed' && (event.failure.kind === 'notFound' || event.failure.kind === 'signedOut')) recheck();
+  };
+
+  /** Stops every request running and forgets every conversation (turning Claude off, or privacy mode changing). */
+  const endAll = () => {
+    for (const r of requests.current.values()) if (r.id) void bridge.claudeCancel(r.id);
+    requests.current.clear();
+    const had = Object.values(convos).some((c) => c.entries.length > 0);
+    setConvos({});
+    return had;
   };
 
   const statusNow = status.phase === 'ready' ? status.status : null;
 
+  /** The drive's scan `w` as it is now, if it is still that scan and finished. */
+  const scanOf = (w: Where): Extract<DriveScan, { phase: 'done' }> | null => {
+    const scan = drivesRef.current?.list.find((d) => d.volume.mountPoint === w.mountPoint)?.scan;
+    return scan?.phase === 'done' && scan.run === w.run ? scan : null;
+  };
+
   const start = (scope: Scope, job: JobKind) => {
     if (!statusNow) return;
+    setEnded(null);
     const id = `job-${++seq}`;
+    const token = ++seq;
     const entry: JobEntry = {
       kind: 'job', id, job, phase: 'working', answer: null, failure: null, privacy: statusNow.privacy, kept: [], pick: null,
     };
@@ -144,31 +204,20 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
         : job === 'tidyLayout'
           ? { job, ids: scope.tidyIds }
           : { job, ids: [...scope.plan] };
+    const sent = scope.planVersion;
     const rkey = `${keyOf(scope)}/${id}`;
     const onEvent = (event: ClaudeEvent) => {
-      if (event.kind === 'working' || !live(rkey)) return;
+      if (event.kind === 'working' || !wanted(rkey, token, event)) return;
       if (event.kind === 'slow') return editEntry<JobEntry>(scope, id, (e) => (e.phase === 'working' ? { ...e, phase: 'slow' } : e));
-      ended(rkey, event);
+      finished(rkey, token, event);
       if (event.kind === 'failed')
         return editEntry<JobEntry>(scope, id, (e) => (e.phase === 'done' || e.phase === 'failed' ? e : { ...e, phase: 'failed', failure: event.failure }));
       const answer = event.answer;
-      editEntry<JobEntry>(scope, id, (e) => {
-        const pick =
-          answer.result.kind === 'pick'
-            ? {
-                before: [...scope.plan],
-                added: answer.result.changes.filter((c) => c.change === 'add').map((c) => c.id),
-                choice: 'open' as const,
-                busy: false,
-                error: null,
-              }
-            : null;
-        return { ...e, phase: 'done', answer, pick };
-      });
-      // Claude's changes go into the drive's scan: its own items (unticked), its layouts, and a pick's ticks.
       const d = drivesRef.current;
+      if (answer.result.kind === 'pick') return picked(scope, id, sent, answer);
+      editEntry<JobEntry>(scope, id, (e) => ({ ...e, phase: 'done', answer, pick: null }));
+      // Claude's changes go into the drive's scan: its own items (unticked) and its layouts.
       if (answer.refreshed) d?.claudeApplied(scope.mountPoint, scope.run, answer.refreshed);
-      if (answer.result.kind === 'pick') d?.setPlan(scope.mountPoint, scope.run, answer.result.plan);
       if (answer.result.kind === 'tidy') {
         const all = [...(answer.refreshed?.tidy ?? []), ...(answer.refreshed?.tidyOthers ?? []), ...answer.result.layouts];
         const layouts: Record<string, Layouts> = {};
@@ -182,41 +231,83 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     };
     track(
       rkey,
+      token,
       () => bridge.claudeStart(scope.mountPoint, arg, onEvent),
       (message) => editEntry<JobEntry>(scope, id, (e) => ({ ...e, phase: 'failed', failure: { kind: 'error', message } })),
     );
   };
 
-  /** The drive's sort in use, for a layout answer that didn't send the built-in one again. */
-  const currentTidy = (w: Where, id: string): TidyProposal | undefined => {
-    const scan = drivesRef.current?.list.find((d) => d.volume.mountPoint === w.mountPoint)?.scan;
-    return scan?.phase === 'done' ? scan.tidy.find((t) => t.id === id && t.layout === 'builtin') : undefined;
+  /**
+   * Let Claude pick answered about the plan at version `sent`. If the plan is still there, Claude's ticks go in at
+   * once (never over an edit made meanwhile) with its own items unticked, and the card offers Keep mine. If it
+   * changed while Claude was picking, the answer is set aside: no tick changes, and its own items are taken out.
+   */
+  const picked = (scope: Scope, id: string, sent: number, answer: Extract<ClaudeEvent, { kind: 'done' }>['answer']) => {
+    if (answer.result.kind !== 'pick') return;
+    const r = answer.result;
+    const d = drivesRef.current;
+    const added = r.changes.filter((c) => c.change === 'add').map((c) => c.id);
+    const scan = scanOf(scope);
+    const card = (p: Partial<PickCard>): PickCard => ({
+      before: scan ? [...scan.plan] : [...scope.plan], added, choice: 'open', version: sent, after: [], busy: false, error: null, ...p,
+    });
+    if (!scan || scan.planVersion !== sent) {
+      editEntry<JobEntry>(scope, id, (e) => ({ ...e, phase: 'done', answer, pick: card({ choice: 'stale', busy: added.length > 0 }) }));
+      if (added.length === 0) return;
+      const setPick = (p: Partial<PickCard>) => editEntry<JobEntry>(scope, id, (e) => (e.pick ? { ...e, pick: { ...e.pick, ...p } } : e));
+      bridge.claudeRemoveItems(scope.mountPoint, added).then(
+        (refreshed) => {
+          drivesRef.current?.claudeApplied(scope.mountPoint, scope.run, refreshed);
+          setPick({ busy: false });
+        },
+        (error: unknown) => {
+          // Claude's items stay in the tray, unticked, like any of its suggestions; nothing is ticked.
+          if (answer.refreshed) drivesRef.current?.claudeApplied(scope.mountPoint, scope.run, answer.refreshed);
+          setPick({ busy: false, error: errorMessage(error) });
+        },
+      );
+      return;
+    }
+    const known = (x: string) => scan.proposals.some((p) => p.id === x) || scan.tidy.some((t) => t.id === x);
+    const after = [...new Set(r.plan)].filter(known);
+    const version = sameSet(after, scan.plan) ? sent : sent + 1;
+    editEntry<JobEntry>(scope, id, (e) => ({ ...e, phase: 'done', answer, pick: card({ version, after }) }));
+    // Claude's changes go into the drive's scan: the ticks first (only over the plan as it was sent), then its own
+    // items, unticked.
+    d?.setPlan(scope.mountPoint, scope.run, r.plan, sent);
+    if (answer.refreshed) d?.claudeApplied(scope.mountPoint, scope.run, answer.refreshed);
   };
+
+  /** The drive's sort in use, for a layout answer that didn't send the built-in one again. */
+  const currentTidy = (w: Where, id: string): TidyProposal | undefined => scanOf(w)?.tidy.find((t) => t.id === id && t.layout === 'builtin');
 
   /** Sends a chat's turns so far; Claude answers the last. */
   const send = (scope: Scope, chat: ChatEntry) => {
     const rkey = `${keyOf(scope)}/${chat.id}`;
+    const token = ++seq;
     const onEvent = (event: ClaudeEvent) => {
-      if (event.kind === 'working' || !live(rkey)) return;
+      if (event.kind === 'working' || !wanted(rkey, token, event)) return;
       if (event.kind === 'slow')
         return editEntry<ChatEntry>(scope, chat.id, (e) => (e.phase === 'working' ? { ...e, phase: 'slow' } : e));
-      ended(rkey, event);
+      finished(rkey, token, event);
       editEntry<ChatEntry>(scope, chat.id, (e) => {
         if (e.phase !== 'working' && e.phase !== 'slow') return e;
         if (event.kind === 'failed') return { ...e, phase: 'failed', failure: event.failure };
         const r = event.answer.result;
         if (r.kind !== 'ask') return { ...e, phase: 'failed', failure: { kind: 'error', message: 'Claude answered something else.' } };
+        const basis = event.answer.basis;
         return {
           ...e,
           phase: 'done',
           failure: null,
-          turns: [...e.turns, { from: 'claude', text: r.reply, basis: event.answer.basis, followUps: r.followUps }],
+          turns: [...e.turns, { from: 'claude', text: r.reply, privacy: basis.privacy, basis, followUps: r.followUps }],
         };
       });
     };
-    const messages = chat.turns.map((t) => ({ from: t.from, text: t.text }));
+    const messages = chat.turns.map((t) => ({ from: t.from, text: t.text, privacy: t.privacy }));
     track(
       rkey,
+      token,
       () => bridge.claudeChat(scope.mountPoint, chat.about, messages, onEvent),
       (message) => editEntry<ChatEntry>(scope, chat.id, (e) => ({ ...e, phase: 'failed', failure: { kind: 'error', message } })),
     );
@@ -224,16 +315,18 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
 
   const ask = (scope: Scope, about: ClaudeAbout, name: string, text?: string) => {
     if (!statusNow) return;
+    setEnded(null);
+    const privacy = statusNow.privacy;
     const c = convos[keyOf(scope)] ?? EMPTY;
     const had = c.entries.find((e): e is ChatEntry => e.kind === 'chat' && sameAbout(e.about, about));
     const busy = had?.phase === 'working' || had?.phase === 'slow';
     let chat: ChatEntry;
     let go: boolean;
     if (!had) {
-      chat = { kind: 'chat', id: `chat-${++seq}`, about, name, turns: [{ from: 'person', text: FIRST_QUESTION }], phase: 'working', failure: null };
+      chat = { kind: 'chat', id: `chat-${++seq}`, about, name, turns: [{ from: 'person', text: FIRST_QUESTION, privacy }], phase: 'working', failure: null };
       go = true;
     } else if (text !== undefined && text.trim() && !busy) {
-      chat = { ...had, turns: [...had.turns, { from: 'person', text: text.trim() }], phase: 'working', failure: null };
+      chat = { ...had, turns: [...had.turns, { from: 'person', text: text.trim(), privacy }], phase: 'working', failure: null };
       go = true;
     } else if (text === undefined && had.phase === 'failed') {
       // Try again: the same turns once more.
@@ -254,34 +347,41 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
 
   const cancel = (w: Where, entryId: string) => {
     const rkey = `${keyOf(w)}/${entryId}`;
-    const requestId = requests.current.get(rkey);
-    if (requestId === '') requests.current.set(rkey, CANCEL);
-    else if (requestId && requestId !== CANCEL) {
+    const r = requests.current.get(rkey);
+    if (r?.id) {
       requests.current.delete(rkey);
-      void bridge.claudeCancel(requestId);
-    }
+      void bridge.claudeCancel(r.id);
+    } else if (r) requests.current.set(rkey, { ...r, cancelled: true });
     editEntry<Entry>(w, entryId, (e) =>
       e.phase === 'working' || e.phase === 'slow' ? { ...e, phase: 'failed', failure: { kind: 'cancelled' } } : e,
     );
   };
 
-  const keepMine = (scope: Scope, entryId: string) => {
+  /** A pick's card, if it may still offer Keep mine and Use Claude's plan for the plan as it is now. */
+  const openPick = (scope: Scope, entryId: string): JobEntry | null => {
     const c = convos[keyOf(scope)] ?? EMPTY;
     const entry = c.entries.find((e): e is JobEntry => e.id === entryId && e.kind === 'job');
-    const pick = entry?.pick;
-    if (!pick || pick.choice !== 'open' || pick.busy) return;
-    const setPick = (p: Partial<NonNullable<JobEntry['pick']>>) =>
+    if (!entry?.pick || entry.pick.busy) return null;
+    return pickOffer(c, entry, scope.plan, scope.planVersion) === 'open' ? entry : null;
+  };
+
+  const keepMine = (scope: Scope, entryId: string) => {
+    const pick = openPick(scope, entryId)?.pick;
+    if (!pick) return;
+    const setPick = (p: Partial<PickCard>) =>
       editEntry<JobEntry>(scope, entryId, (e) => (e.pick ? { ...e, pick: { ...e.pick, ...p } } : e));
     setPick({ busy: true, error: null });
     const back = () => {
-      drivesRef.current?.setPlan(scope.mountPoint, scope.run, pick.before);
-      setPick({ busy: false, choice: 'kept' });
+      // Only over the plan as Claude's answer left it: an edit made meanwhile stays.
+      const moved = scanOf(scope)?.planVersion !== pick.version;
+      drivesRef.current?.setPlan(scope.mountPoint, scope.run, pick.before, pick.version);
+      setPick({ busy: false, choice: 'kept', error: moved ? 'Your plan changed meanwhile, so Vacancy left your ticks as they are.' : null });
     };
     if (pick.added.length === 0) return back();
     bridge.claudeRemoveItems(scope.mountPoint, pick.added).then(
       (refreshed) => {
-        drivesRef.current?.claudeApplied(scope.mountPoint, scope.run, refreshed);
         back();
+        drivesRef.current?.claudeApplied(scope.mountPoint, scope.run, refreshed);
       },
       (error: unknown) => setPick({ busy: false, error: errorMessage(error) }),
     );
@@ -303,14 +403,28 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     );
   };
 
+  /** Privacy mode is changing to `on`: the conversations so far end, so nothing from one mode is sent in the other. */
+  const privacyChanging = (on: boolean) => {
+    if (statusNow?.privacy === on) return;
+    if (endAll()) setEnded(on);
+  };
+
+  // Folded while Claude is off (the map gets the room); open once it's turned on. A choice the person made wins.
+  const folded = panel ? panel === 'folded' : !(statusNow && isEnabled(statusNow.state));
+
   const value: Claude = {
     status,
     settingError,
     turningOn,
     checking,
     folded,
-    setFolded,
+    setFolded: (f) => {
+      const v = f ? 'folded' : 'open';
+      setPanel(v);
+      keepPanel(v);
+    },
     privacyAsk,
+    ended,
     turnOn: () => {
       const token = ++turnOnToken.current;
       setTurningOn(true);
@@ -334,18 +448,20 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       void setting(bridge.claudeSetEnabled(false));
     },
     turnOff: () => {
-      requests.current.clear();
-      setConvos({});
+      endAll();
+      setEnded(null);
       setPrivacyAsk(false);
       void setting(bridge.claudeSetEnabled(false));
     },
     recheck,
     setPrivacy: (on) => {
-      if (on) void setting(bridge.claudeSetPrivacy(true));
-      else setPrivacyAsk(true);
+      if (!on) return setPrivacyAsk(true);
+      privacyChanging(true);
+      void setting(bridge.claudeSetPrivacy(true));
     },
     confirmPrivacyOff: () => {
       setPrivacyAsk(false);
+      privacyChanging(false);
       void setting(bridge.claudeSetPrivacy(false));
     },
     cancelPrivacyOff: () => setPrivacyAsk(false),
@@ -357,8 +473,10 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     keepFlag: (w, entryId, id) =>
       editEntry<JobEntry>(w, entryId, (e) => (e.kept.includes(id) ? e : { ...e, kept: [...e.kept, id] })),
     keepMine,
-    useClaudes: (w, entryId) =>
-      editEntry<JobEntry>(w, entryId, (e) => (e.pick?.choice === 'open' ? { ...e, pick: { ...e.pick, choice: 'used' } } : e)),
+    useClaudes: (scope, entryId) => {
+      if (!openPick(scope, entryId)) return;
+      editEntry<JobEntry>(scope, entryId, (e) => (e.pick ? { ...e, pick: { ...e.pick, choice: 'used' } } : e));
+    },
     chooseLayout,
   };
 

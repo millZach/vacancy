@@ -122,7 +122,7 @@ describe('the mock bridge’s Claude', () => {
   it('chats about an item, saying what the answer was based on in each privacy mode', async () => {
     const { bridge, mountPoint } = await scanned('windows', { claude: 'on' });
     const events: ClaudeEvent[] = [];
-    await bridge.claudeChat(mountPoint, { kind: 'proposal', id: 'w-node' }, [{ from: 'person', text: 'Why is this risky?' }], (e) =>
+    await bridge.claudeChat(mountPoint, { kind: 'proposal', id: 'w-node' }, [{ from: 'person', text: 'Why is this risky?', privacy: true }], (e) =>
       events.push(e),
     );
     await vi.advanceTimersByTimeAsync(2000);
@@ -132,7 +132,7 @@ describe('the mock bridge’s Claude', () => {
     expect(answer.result.followUps.length).toBeGreaterThan(0);
     expect(answer.basis.text).toMatch(/names, sizes and dates/);
     await bridge.claudeSetPrivacy(false);
-    const open = done(await play(bridge, mountPoint, { job: 'ask', about: { kind: 'proposal', id: 'w-node' }, messages: [{ from: 'person', text: 'What is it?' }] }));
+    const open = done(await play(bridge, mountPoint, { job: 'ask', about: { kind: 'proposal', id: 'w-node' }, messages: [{ from: 'person', text: 'What is it?', privacy: true }] }));
     expect(open.basis.privacy).toBe(false);
     expect(open.basis.opened[0]).toMatch(/package\.json/);
   });

@@ -18,16 +18,37 @@ export type JobKind = 'reviewPlan' | 'pickPlan' | 'explainFolders' | 'tidyLayout
 /** Where a request is: running, running long, answered, or ended without an answer (cancelled included). */
 export type Phase = 'working' | 'slow' | 'done' | 'failed';
 
-/** What Let Claude pick's card offers once Claude's changes are in the plan. */
+/**
+ * What Let Claude pick's card offers once Claude's changes are in the plan: Keep mine or Use Claude's plan, while
+ * the plan is as the answer left it (`kept` and `used` once picked). `stale`: the plan changed while Claude was
+ * picking, so its answer was set aside (nothing ticked, its own items taken out again) and Pick should run again.
+ */
 export interface PickCard {
   /** The plan as it was sent, to put back with Keep mine. */
   before: string[];
   /** Claude's own items the pick added, to take back out with Keep mine. */
   added: string[];
-  choice: 'open' | 'kept' | 'used';
+  choice: 'open' | 'kept' | 'used' | 'stale';
+  /** The plan's version once Claude's changes went in, and what was in it then: Keep mine is offered only while both hold. */
+  version: number;
+  after: string[];
   /** Keep mine is taking Claude's items back out. */
   busy: boolean;
   error: string | null;
+}
+
+/**
+ * Whether a pick's card may still offer Keep mine and Use Claude's plan: `open` only for the newest pick, while the
+ * plan is still as its answer left it; `replaced` by a newer pick; `changed` since (an edit, or anything else);
+ * `null` once settled (kept, used or stale).
+ */
+export function pickOffer(c: Conversation, e: JobEntry, plan: readonly string[], planVersion: number): 'open' | 'changed' | 'replaced' | null {
+  const pick = e.pick;
+  if (!pick || pick.choice !== 'open') return null;
+  const newest = [...c.entries].reverse().find((x): x is JobEntry => x.kind === 'job' && x.job === 'pickPlan' && x.pick !== null);
+  if (newest?.id !== e.id) return 'replaced';
+  const same = plan.length === pick.after.length && plan.every((id) => pick.after.includes(id));
+  return planVersion === pick.version && same ? 'open' : 'changed';
 }
 
 /** One job in the panel's log: what was asked, how it went, and Claude's checked answer. */
@@ -49,6 +70,8 @@ export interface JobEntry {
 export interface ChatTurn {
   from: 'person' | 'claude';
   text: string;
+  /** Privacy mode when the turn was made. The core never sends a privacy-off turn with privacy mode on. */
+  privacy: boolean;
   /** Claude's turns: what the answer was based on, and what to ask next. */
   basis?: ClaudeBasis;
   followUps?: string[];
@@ -93,9 +116,10 @@ export interface Where {
   run: number;
 }
 
-/** The drive scan a job is about, and what the plan holds now. */
+/** The drive scan a job is about, and what the plan holds now (and its version). */
 export interface Scope extends Where {
   plan: string[];
+  planVersion: number;
   tidyIds: string[];
 }
 
@@ -114,6 +138,11 @@ export interface Claude {
   setFolded: (folded: boolean) => void;
   /** The confirm before privacy mode goes off is up. */
   privacyAsk: boolean;
+  /**
+   * Privacy mode changed with conversations open, so they were ended: the mode now (true: on), for a short note in
+   * the log until the next question. Nothing from them is sent again.
+   */
+  ended: boolean | null;
   turnOn: () => void;
   cancelTurnOn: () => void;
   turnOff: () => void;
@@ -135,7 +164,7 @@ export interface Claude {
   /** Let Claude pick: puts the plan back and takes Claude's items out again. */
   keepMine: (scope: Scope, entryId: string) => void;
   /** Let Claude pick: keeps Claude's changes. */
-  useClaudes: (scope: Where, entryId: string) => void;
+  useClaudes: (scope: Scope, entryId: string) => void;
   chooseLayout: (scope: Scope, tidyId: string, layout: TidyLayout) => void;
 }
 
@@ -144,6 +173,11 @@ export const ClaudeContext = createContext<Claude | null>(null);
 /** Claude, or null outside a `ClaudeProvider` (screens then show no Claude at all). */
 export function useClaude(): Claude | null {
   return use(ClaudeContext);
+}
+
+/** Claude is turned on (signed in or not, checked or not): the panel opens by itself only then. */
+export function isEnabled(state: ClaudeStatus['state']): boolean {
+  return state === 'on' || state === 'signedOut' || state === 'checkTimedOut' || state === 'checkFailed';
 }
 
 /** Claude is on and signed in: jobs can run. */

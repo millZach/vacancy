@@ -17,4 +17,9 @@ fixture: boolean,
 /**
  * What always stays hidden, even with privacy mode off, for the privacy screens.
  */
-hidden: Array<ClaudeHidden>, };
+hidden: Array<ClaudeHidden>, 
+/**
+ * Why the sign-in check didn't work, in words, for [`State::CheckTimedOut`] and [`State::CheckFailed`] (and
+ * [`State::NotFound`] when Claude Code went missing as it was checked).
+ */
+message: string | null, };

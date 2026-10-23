@@ -52,8 +52,11 @@ export interface ReadyDrives {
    * proposals and sorts it sent. Ignored once that scan has been replaced or has run its plan.
    */
   claudeApplied: (mountPoint: string, run: number, refreshed: ClaudeRefreshed) => void;
-  /** Sets a drive's whole plan for its scan `run` (Let Claude pick, and Keep mine putting the plan back). */
-  setPlan: (mountPoint: string, run: number, ids: string[]) => void;
+  /**
+   * Sets a drive's whole plan for its scan `run` (Let Claude pick, and Keep mine putting the plan back). With `from`,
+   * only while the plan is still at that version (`planVersion`): an edit made meanwhile is never overwritten.
+   */
+  setPlan: (mountPoint: string, run: number, ids: string[], from?: number) => void;
   /** A drive's sorts for its scan `run`, after a layout was picked for one of them. */
   setTidy: (mountPoint: string, run: number, tidy: TidyProposal[]) => void;
   /** While a plan runs, switching drives is disabled. `runPlan` sets it; this is for anything else that must hold. */

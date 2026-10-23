@@ -1,6 +1,7 @@
 // The mock bridge's Claude (ADR 0008): canned answers for every job and every state, on each fixture, shaped like
 // what the core sends (src-tauri's claude_* commands). Nothing here calls Claude, reads a disk or moves a file.
-// Pick the state with `&claude=off|notfound|signedout|on|slow|error|timeout` and privacy mode with
+// Pick the state with `&claude=off|notfound|signedout|checktimeout|checkerror|on|slow|error|timeout` (`checktimeout`
+// and `checkerror`: Claude is on, but asking Claude Code whether it's signed in timed out, or failed) and privacy mode with
 // `&privacy=on|off`; `&claudeMs=` sets how long an answer takes (default 900 ms; `slow` takes 8 s, saying it's
 // slow after 1.5 s). The answers follow the approved prototype's (prototype/ai-advisor, variant B).
 import type {
@@ -27,8 +28,22 @@ import type {
   TidyProposal,
 } from './types';
 
-export type MockClaudeState = 'off' | 'notfound' | 'signedout' | 'on' | 'slow' | 'error' | 'timeout';
-export const MOCK_CLAUDE_STATES: readonly MockClaudeState[] = ['off', 'notfound', 'signedout', 'on', 'slow', 'error', 'timeout'];
+export type MockClaudeState = 'off' | 'notfound' | 'signedout' | 'checktimeout' | 'checkerror' | 'on' | 'slow' | 'error' | 'timeout';
+export const MOCK_CLAUDE_STATES: readonly MockClaudeState[] = [
+  'off',
+  'notfound',
+  'signedout',
+  'checktimeout',
+  'checkerror',
+  'on',
+  'slow',
+  'error',
+  'timeout',
+];
+
+/** What the core says when asking Claude Code whether it's signed in didn't work (`claude::Status::message`). */
+export const CHECK_TIMED_OUT = 'Claude Code didn’t answer within 30 seconds when Vacancy asked whether it’s signed in.';
+export const CHECK_FAILED = 'Vacancy couldn’t start Claude Code: Access is denied. (os error 5)';
 
 export interface MockClaudeOptions {
   /** Where Claude starts: `off` by default (Claude is off until the person turns it on). */
@@ -83,6 +98,9 @@ export const HIDDEN: ClaudeHidden[] = [
 ];
 
 const BASIS_ON = 'From names, sizes and dates only. Claude didn’t open any files.';
+/** The core's refusal of a privacy-on chat that carries turns made with privacy mode off. */
+export const PRIVACY_TURNS =
+  'This chat began with privacy mode off. With it on, Vacancy won’t send what was said then. Start a new chat.';
 
 /** One of Claude's own items, before the mock adds it: where its tile is carved from, and what it says. */
 interface Item {
@@ -317,7 +335,19 @@ export function createMockClaude(
   let next = 0;
 
   const status = (): ClaudeStatus => ({
-    state: state === 'notfound' ? 'notFound' : !enabled ? 'off' : state === 'signedout' ? 'signedOut' : 'on',
+    state:
+      state === 'notfound'
+        ? 'notFound'
+        : !enabled
+          ? 'off'
+          : state === 'signedout'
+            ? 'signedOut'
+            : state === 'checktimeout'
+              ? 'checkTimedOut'
+              : state === 'checkerror'
+                ? 'checkFailed'
+                : 'on',
+    message: !enabled ? null : state === 'checktimeout' ? CHECK_TIMED_OUT : state === 'checkerror' ? CHECK_FAILED : null,
     privacy,
     fixture: false,
     hidden: structuredClone(HIDDEN),
@@ -378,14 +408,16 @@ export function createMockClaude(
       case 'pickPlan': {
         const changes: ClaudeChange[] = [];
         let plan = [...job.ids];
+        // Pick changes ticks only on the rules' proposals: Claude's own items stay as the person left them.
+        const rules = (id: string) => scan.proposals.find((x) => x.id === id && x.source !== 'claude');
         for (const u of canned.pick.untick) {
-          const p = scan.proposals.find((x) => x.id === u.id);
+          const p = rules(u.id);
           if (!p || !plan.includes(u.id)) continue;
           plan = plan.filter((id) => id !== u.id);
           changes.push({ id: u.id, title: p.title, change: 'untick', why: u.why, bytes: p.bytes });
         }
         for (const t of canned.pick.tick) {
-          const p = scan.proposals.find((x) => x.id === t.id);
+          const p = rules(t.id);
           if (!p || plan.includes(t.id)) continue;
           plan.push(t.id);
           changes.push({ id: t.id, title: p.title, change: 'tick', why: t.why, bytes: p.bytes });
@@ -445,6 +477,8 @@ export function createMockClaude(
   const ask = (scan: MockClaudeScan, about: ClaudeAbout, messages: ClaudeMessage[]): ClaudeAnswer | ClaudeFailure => {
     const last = messages.at(-1);
     if (!last || last.from !== 'person' || !last.text.trim()) return { kind: 'error', message: 'Type a question for Claude first.' };
+    // As the core: with privacy mode on, nothing said with it off is sent again.
+    if (privacy && messages.some((m) => !m.privacy)) return { kind: 'error', message: PRIVACY_TURNS };
     let reply: string;
     let opened: string[] = [];
     if (about.kind === 'proposal') {
@@ -498,6 +532,7 @@ export function createMockClaude(
       if (state === 'notfound') return finish({ kind: 'notFound' });
       if (!enabled) return finish({ kind: 'error', message: 'Claude is off. Turn it on first.' });
       if (state === 'signedout') return finish({ kind: 'signedOut' });
+      if (state === 'checktimeout' || state === 'checkerror') return finish({ kind: 'error', message: status().message ?? '' });
       if (state === 'timeout') return finish({ kind: 'timedOut' });
       if (state === 'error')
         return finish({ kind: 'error', message: 'API Error: 429 rate_limit_error: This request would exceed your account’s rate limit. Please try again later.' });

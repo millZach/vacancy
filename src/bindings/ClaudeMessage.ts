@@ -4,4 +4,8 @@ import type { ClaudeSpeaker } from "./ClaudeSpeaker";
 /**
  * One message of a chat.
  */
-export type ClaudeMessage = { from: ClaudeSpeaker, text: string, };
+export type ClaudeMessage = { from: ClaudeSpeaker, text: string, 
+/**
+ * Privacy mode when the message was made: a call with privacy mode on never sends one made with it off.
+ */
+privacy: boolean, };
