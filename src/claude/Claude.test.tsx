@@ -563,9 +563,9 @@ describe('privacy mode', () => {
     });
     let answer: (s: typeof passed) => void = () => {};
     vi.spyOn(bridge, 'claudeCheck').mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
-    // Turn off Claude is asked for; before the core answers, the person presses Check again.
-    await userEvent.click(within(panel()).getByRole('button', { name: 'Turn off Claude' }));
+    // The person presses Check again, then turns Claude off while the check is still out.
     await userEvent.click(within(note).getByRole('button', { name: 'Check again' }));
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Turn off Claude' }));
     await act(async () => {
       letOff();
       await Promise.resolve();
@@ -578,6 +578,31 @@ describe('privacy mode', () => {
     });
     expect(within(panel()).getByRole('button', { name: 'Show Claude' })).toBeInTheDocument();
     expect(within(header()).queryByText(/Claude on/)).toBeNull();
+  });
+
+  it('while a change of mode is out, Claude Code isn’t checked: Check again waits for it', async () => {
+    const bridge = windows({ claude: 'on', privacy: 'off', canary: 'fail' });
+    await toMap(bridge);
+    await openPlan();
+    const note = await within(panel()).findByRole('note', undefined, { timeout: 4000 });
+    expect(note).toHaveTextContent(CHECK_UNVERIFIED);
+    const realEnabled = bridge.claudeSetEnabled.bind(bridge);
+    let letOff: () => void = () => {};
+    const off = vi.spyOn(bridge, 'claudeSetEnabled').mockImplementationOnce(async (on) => {
+      await new Promise<void>((resolve) => (letOff = resolve));
+      return realEnabled(on);
+    });
+    const check = vi.spyOn(bridge, 'claudeCheck');
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Turn off Claude' }));
+    expect(within(note).getByRole('button', { name: 'Check again' })).toBeDisabled();
+    await userEvent.click(within(note).getByRole('button', { name: 'Check again' }));
+    expect(check).not.toHaveBeenCalled();
+    await act(async () => {
+      letOff();
+      await answered(off, 0);
+    });
+    expect(await within(panel()).findByRole('button', { name: 'Show Claude' })).toBeInTheDocument();
+    expect(check).not.toHaveBeenCalled();
   });
 
   it('every answer says what it was based on; changing the mode ends the conversation, and says so', async () => {

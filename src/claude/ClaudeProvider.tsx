@@ -169,6 +169,8 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   const verifyToken = useRef(0);
   const verify = useCallback(
     (again: boolean) => {
+      // While a change of mode is out, nothing is asked: once the last has answered, the check runs if it's due.
+      if (modesOut.current > 0) return;
       const token = ++verifyToken.current;
       const gen = modeGen.current;
       setVerifying(true);

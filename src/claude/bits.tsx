@@ -149,7 +149,7 @@ export function PrivacyRow({
           {(failed !== null || due) && (
             <>
               {' '}
-              <button type="button" className="link-button cl-check-again" onClick={claude.verify} disabled={claude.verifying}>
+              <button type="button" className="link-button cl-check-again" onClick={claude.verify} disabled={claude.verifying || claude.privacyChanging}>
                 {due ? 'Check now' : 'Check again'}
               </button>
             </>
