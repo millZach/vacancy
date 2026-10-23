@@ -511,7 +511,9 @@ export function createMockClaude(
     setEnabled: (on: boolean) => {
       if (state !== 'notfound') enabled = on;
       if (!on) for (const r of [...requests.values()]) r.finish({ kind: 'cancelled' });
-      return Promise.resolve(status());
+      // Turning on checks that Claude Code answers, as the core does: about as long as an answer (at most 1.2 s).
+      const ms = on ? Math.min(options.claudeMs ?? 900, 1200) : 0;
+      return new Promise<ClaudeStatus>((resolve) => window.setTimeout(() => resolve(status()), ms));
     },
     setPrivacy: (on: boolean) => {
       privacy = on;

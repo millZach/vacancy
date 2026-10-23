@@ -50,7 +50,7 @@ function done(events: ClaudeEvent[]): ClaudeAnswer {
 
 describe('the mock bridge’s Claude', () => {
   it('is off until turned on, with privacy mode on and the always-hidden places listed', async () => {
-    const bridge = createMockBridge(fixtures.windows);
+    const bridge = createMockBridge(fixtures.windows, { claudeMs: 0 });
     const status = await bridge.claudeStatus();
     expect(status).toMatchObject({ state: 'off', privacy: true, fixture: false });
     expect(status.hidden.map((h) => h.group)).toEqual(['keys', 'browser', 'vaults']);
@@ -69,7 +69,7 @@ describe('the mock bridge’s Claude', () => {
     ['error', 'on'],
     ['timeout', 'on'],
   ] as const)('starts %s as %s', async (claude, state) => {
-    const bridge = createMockBridge(fixtures.windows, { claude });
+    const bridge = createMockBridge(fixtures.windows, { claude, claudeMs: 0 });
     if (claude === 'signedout') await bridge.claudeSetEnabled(true);
     expect((await bridge.claudeStatus()).state).toBe(state);
   });
@@ -177,7 +177,9 @@ describe('the mock bridge’s Claude', () => {
     ['error', 'error'],
   ] as const)('fails a request when Claude is %s', async (claude, kind) => {
     const { bridge, mountPoint } = await scanned('windows', { claude });
-    await bridge.claudeSetEnabled(true);
+    const on = bridge.claudeSetEnabled(true);
+    await vi.advanceTimersByTimeAsync(1500);
+    await on;
     const events = await play(bridge, mountPoint, { job: 'explainFolders' });
     expect(events[0]!.kind).toBe('working');
     expect(events.at(-1)).toMatchObject({ kind: 'failed', failure: { kind } });

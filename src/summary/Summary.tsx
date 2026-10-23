@@ -1,6 +1,7 @@
 import { Info, Play, RotateCcw, Signpost, TriangleAlert, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
 import type { DuplicatesDone, RunReport, Skip, StepReport } from '../bridge';
+import { Mark } from '../claude/bits';
 import { formatBytes, formatCount, formatDuration } from '../format';
 import { Legend } from '../map/Legend';
 import { MapView, type TileLook } from '../map/MapView';
@@ -262,6 +263,8 @@ export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onCl
   const { left, stopped, notes } = keptOf(r);
   const stoppedSteps = [...new Set(r.steps.filter((s) => s.skipped.some((k) => k.kind === 'cancelled')).map((s) => s.title))];
   const stoppedBytes = stopped.reduce((s, k) => s + k.bytes, 0);
+  // What Claude suggested (ADR 0008): its own items, and sorts into its layout. Vacancy did the work, the same way.
+  const claudeSteps = r.steps.filter((s) => s.source === 'claude');
 
   return (
     <aside className="tray summary" aria-label="What Vacancy did" data-no-ripple>
@@ -369,6 +372,27 @@ export function SummaryPanel({ report: r, os, onHot, onReplay, onScanAgain, onCl
         )}
 
         <ReorganizedSection report={r} onUndo={onUndo} />
+
+        {claudeSteps.length > 0 && (
+          <section className="summary-sec" aria-label="Suggested by Claude">
+            <h3>Suggested by Claude</h3>
+            <ul className="cl-sum-list">
+              {claudeSteps.map((s) => (
+                <li key={s.id} onMouseEnter={() => onHot(tileOf(s.id))} onMouseLeave={() => onHot(null)}>
+                  <Mark size={12} />
+                  <span>
+                    <b>{s.title}</b>
+                    {s.kind === 'move' ? 'Sorted into Claude’s folders. The moves are journaled, so Undo still works.' : s.why}
+                  </span>
+                  <span className="cl-sum-num">
+                    {s.kind === 'move' ? `${formatCount(s.movedItems)} moved` : formatBytes(s.freedBytes)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+            <p className="summary-note">Claude proposed {claudeSteps.length === 1 ? 'this' : 'these'}. {claudeSteps.length === 1 ? 'It' : 'They'} passed the Guard, and you ticked {claudeSteps.length === 1 ? 'it' : 'them'} before the run.</p>
+          </section>
+        )}
 
         {(left.length > 0 || stopped.length > 0) && (
           <section className="summary-sec">

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { useBridge, type RunHistory, type RunListing, type RunReport, type TidyListing } from '../bridge';
 import { errorMessage } from '../errors';
 import { formatBytes, formatCount } from '../format';
+import { Mark } from '../claude/bits';
 import { formatWhen } from '../summary/when';
 import './history.css';
 import '../tidy/tidy.css';
@@ -205,12 +206,17 @@ export function HistoryMenu({ locked, onOpen, onUndo }: Props) {
                     role="menuitem"
                     tabIndex={-1}
                     className="history-row"
-                    aria-label={`${when} on ${run.volumeName}: ${formatBytes(run.freedBytes)} freed${run.cancelled ? ', stopped part way' : ''}`}
+                    aria-label={`${when} on ${run.volumeName}: ${formatBytes(run.freedBytes)} freed${run.cancelled ? ', stopped part way' : ''}${run.claudeSteps > 0 ? `, ${run.claudeSteps === 1 ? '1 step' : `${run.claudeSteps} steps`} suggested by Claude` : ''}`}
                     onClick={() => choose(run)}
                   >
                     <span className="history-when">{when}</span>
                     {run.cancelled && <span className="history-tag">Stopped</span>}
                     {run.movedItems > 0 && <span className="history-tag is-moved">{formatCount(run.movedItems)} moved</span>}
+                    {run.claudeSteps > 0 && (
+                      <span className="history-tag is-claude" title={`${run.claudeSteps === 1 ? '1 step was' : `${run.claudeSteps} steps were`} suggested by Claude`}>
+                        <Mark size={10} /> Claude
+                      </span>
+                    )}
                     <span className="history-freed">
                       {opening === run.id ? (
                         <LoaderCircle size={13} className="history-spin" aria-label="Opening" />
