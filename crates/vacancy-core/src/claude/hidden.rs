@@ -21,6 +21,8 @@ use std::sync::OnceLock;
 use serde::Serialize;
 use ts_rs::TS;
 
+use super::runner::{Style, cover_path_in, rule_cover};
+
 /// What a pattern stands for: a folder (hidden with everything in it), or a file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
@@ -402,10 +404,12 @@ fn spellings(parts: &[&str]) -> Vec<String> {
 
 /// Claude Code's `permissions.deny` rules for the whole list, with Claude Code's and Codex's own folders where
 /// `config` puts them: `Read(...)` rules, which Claude Code applies to Read, Glob and Grep alike (see the module
-/// docs). Named places are gitignore-style patterns from the file system's root (`//**/`), so they hold on every
-/// drive and in every home; a moved folder is its own path from the root (`//c/Users/alex/.claude-work`), each of
-/// its names escaped as a literal ([`super::runner::rule_literal`]) before the rule's own `/**` goes on, so a
-/// folder called `[work]` or `{a,b}` is denied as it is spelled.
+/// docs). Named places are gitignore-style patterns from the file system's root, so they hold on every drive and in
+/// every home, each twice: `//**/x`, and `//*/**/x`, because the matcher's leading `**` is a regex `.*`, which
+/// stops at a line break, so under a folder whose name has one only the second matches (a middle `**` and a `*`
+/// match line breaks). A moved folder is its own path ([`config_rules_in`]). A moved folder no rule can name gets
+/// none here: [`deniable`] says so, and privacy mode off then gives no reads at all
+/// ([`super::runner::reads_unavailable_in`]).
 pub fn deny_rules_in(config: &[PathBuf]) -> Vec<String> {
     let mut rules = Vec::new();
     let mut push = |rule: String| {
@@ -415,35 +419,69 @@ pub fn deny_rules_in(config: &[PathBuf]) -> Vec<String> {
     };
     for place in PLACES {
         for joined in spellings(place.parts) {
-            match place.kind {
-                Kind::Folder => {
-                    push(format!("Read(//**/{joined})"));
-                    push(format!("Read(//**/{joined}/**)"));
+            for from in ["//**/", "//*/**/"] {
+                push(format!("Read({from}{joined})"));
+                if place.kind == Kind::Folder {
+                    push(format!("Read({from}{joined}/**)"));
                 }
-                Kind::File => push(format!("Read(//**/{joined})")),
             }
         }
     }
     for dir in config {
-        let at = if dir.is_absolute() {
-            format!("/{}", super::runner::rule_path(dir))
-        } else {
-            let rest: Vec<String> = names(dir)
-                .into_iter()
-                .filter(|n| n != "~")
-                .map(|n| super::runner::rule_literal(&n))
-                .collect();
-            if rest.is_empty() {
-                continue;
-            }
-            format!("//**/{}", rest.join("/"))
-        };
-        push(format!("Read({at})"));
-        push(format!("Read({at}/**)"));
+        for rule in dir
+            .to_str()
+            .and_then(|d| config_rules_in(d, Style::HOST))
+            .unwrap_or_default()
+        {
+            push(rule);
+        }
     }
     rules
 }
 
+/// The deny rules for one of Claude Code's or Codex's own folders as `text` (in `style`) sets it: an absolute one
+/// as its path from the root (`//c/Users/alex/.claude-work`, both it and everything in it), a relative one
+/// (`~/.codex-work`) by its names anywhere, like a named place. Each name matches as it is spelled or more, never
+/// less ([`super::runner::rule_cover`]): a `[work]` folder is `\[work\]`, and a name with a line break or a Unix
+/// backslash holds a `*` where those are. `None` when no rule can name it: a Windows path that is neither from a
+/// drive letter nor relative (a share, `\\?\`, `C:x`), or a relative one with no names.
+pub fn config_rules_in(text: &str, style: Style) -> Option<Vec<String>> {
+    let absolute = match style {
+        Style::Windows => {
+            let b = text.as_bytes();
+            b.first().is_some_and(|c| *c == b'\\' || *c == b'/')
+                || (b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':')
+        }
+        Style::Unix => text.starts_with('/'),
+    };
+    let ats: Vec<String> = if absolute {
+        vec![format!("/{}", cover_path_in(text, style)?)]
+    } else {
+        let names: Vec<String> = text
+            .split(|c| c == '/' || (style == Style::Windows && c == '\\'))
+            .filter(|n| !matches!(*n, "" | "." | ".." | "~"))
+            .map(rule_cover)
+            .collect();
+        if names.is_empty() {
+            return None;
+        }
+        let names = names.join("/");
+        vec![format!("//**/{names}"), format!("//*/**/{names}")]
+    };
+    Some(
+        ats.iter()
+            .flat_map(|at| [format!("Read({at})"), format!("Read({at}/**)")])
+            .collect(),
+    )
+}
+
+/// Whether deny rules can name the moved folder `dir` ([`config_rules_in`]). A folder whose path isn't Unicode
+/// can't be: Claude Code would see other characters than Vacancy spells.
+pub fn deniable(dir: &Path) -> bool {
+    dir.to_str()
+        .and_then(|d| config_rules_in(d, Style::HOST))
+        .is_some()
+}
 /// [`deny_rules_in`] with the app's [`config_dirs`].
 pub fn deny_rules() -> Vec<String> {
     deny_rules_in(config_dirs())
@@ -685,7 +723,12 @@ mod tests {
         assert!(hides_in(&PathBuf::from(format!("{claude}-old")).join("x"), &config).is_none());
         assert!(hides_in(PathBuf::from(claude).parent().unwrap(), &config).is_none());
         let rules = deny_rules_in(&config);
-        let at = |dir: &str| format!("/{}", super::super::runner::rule_path(Path::new(dir)));
+        let at = |dir: &str| {
+            format!(
+                "/{}",
+                super::super::runner::rule_path(Path::new(dir)).unwrap()
+            )
+        };
         for dir in [claude, codex] {
             assert!(rules.contains(&format!("Read({})", at(dir))), "{rules:?}");
             assert!(
@@ -726,7 +769,7 @@ mod tests {
                     "/Volumes/AI/[work]/claude-config",
                     r"Read(//Volumes/AI/\[work\]/claude-config",
                 ),
-                ("/opt/*/{a,b}/codex", r"Read(//opt/\*/\{a,b\}/codex"),
+                ("/opt/*/{a,b}/codex", r"Read(//opt/*/\{a,b\}/codex"),
             ]
         };
         for (dir, rule) in set {
@@ -739,7 +782,7 @@ mod tests {
         }
         // A relative one, by its names anywhere.
         let relative = config_dirs_from(|name| (name == "CODEX_HOME").then(|| "~/[codex]*".into()));
-        assert!(deny_rules_in(&relative).contains(&r"Read(//**/\[codex\]\*/**)".to_owned()));
+        assert!(deny_rules_in(&relative).contains(&r"Read(//**/\[codex\]*/**)".to_owned()));
 
         // Resolved: a real folder reached through `..`, so the resolved path differs from the one set; both are
         // denied, each escaped.
@@ -753,7 +796,10 @@ mod tests {
         let resolved = plain(&std::fs::canonicalize(&real).unwrap());
         assert!(config.contains(&resolved), "{config:?}");
         let rules = deny_rules_in(&config);
-        let at = format!("Read(/{}/**)", super::super::runner::rule_path(&resolved));
+        let at = format!(
+            "Read(/{}/**)",
+            super::super::runner::rule_path(&resolved).unwrap()
+        );
         assert!(at.contains(r"/\[work\]/cfg/**)"), "{at}");
         assert!(rules.contains(&at), "{rules:?}");
         assert!(
@@ -786,16 +832,20 @@ mod tests {
         ] {
             assert!(rules.contains(&rule.to_owned()), "{rule}");
         }
-        assert!(
-            rules
-                .iter()
-                .all(|r| r.starts_with("Read(//**/") && r.ends_with(')') && !r.contains('|'))
-        );
+        assert!(rules.iter().all(|r| (r.starts_with("Read(//**/")
+            || r.starts_with("Read(//*/**/"))
+            && r.ends_with(')')
+            && !r.contains('|')));
+        // Each twice: from `//**/`, and from `//*/**/` for a path with a line break in a folder's name.
+        for rule in rules.iter().filter(|r| r.starts_with("Read(//**/")) {
+            let twin = rule.replacen("Read(//**/", "Read(//*/**/", 1);
+            assert!(rules.contains(&twin), "{twin}");
+        }
         let expected: usize = PLACES
             .iter()
             .map(|p| {
                 let n = spellings(p.parts).len();
-                if p.kind == Kind::Folder { 2 * n } else { n }
+                2 * if p.kind == Kind::Folder { 2 * n } else { n }
             })
             .sum();
         assert_eq!(rules.len(), expected, "no rule twice");

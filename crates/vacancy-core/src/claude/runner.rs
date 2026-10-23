@@ -105,25 +105,59 @@ fn locked(call: &Call) -> Vec<String> {
     .collect()
 }
 
-/// One real name (a folder's or a file's) as a literal in a Claude Code permission rule. Rules you write yourself
-/// are gitignore patterns that Claude Code doesn't escape (its permissions docs, "Special characters"), so a folder
-/// called `[work]` would be a character class matching `w`, `o`, `r` or `k`, and a deny rule would miss it. Each
-/// gitignore special character gets a backslash: `\`, `[`, `]`, `*`, `{`, `}`, `!` and `#` (the last two mean
-/// something only at a pattern's start, but escaping them anywhere is harmless), and a trailing space, which
-/// gitignore would trim. Parentheses need no escaping (the docs again).
+/// How a path is spelled: with Windows' drives and separators, or a Unix one's. The app uses its own
+/// ([`Style::HOST`]); the rule tests spell both on either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Style {
+    Windows,
+    Unix,
+}
+
+impl Style {
+    /// The style of the system Vacancy runs on.
+    pub const HOST: Style = if cfg!(windows) {
+        Style::Windows
+    } else {
+        Style::Unix
+    };
+}
+
+/// Whether a character of a real name is one Claude Code's rule matcher provably spells as itself once escaped
+/// ([`rule_literal`]): printable ASCII, except `\`, `?` and `*`. Everything else is left out, because the matcher
+/// (the `ignore` package, 7.0.5 in Claude Code 2.1.309) gets it wrong:
 ///
-/// `?` stays as it is: in the gitignore matcher Claude Code uses (the `ignore` package) `\?` matches nothing, not
-/// even a `?`, so the escaped form would make a deny rule miss. As it is, `?` matches any one character: a deny
-/// rule then hides a little more, never less, and [`read_settings_in`] gives no allow rule for a path with one
-/// (`--add-dir` still lets Claude read it). Windows names can't hold `?`, `*` or `\` at all.
-pub fn rule_literal(name: &str) -> String {
-    let mut out = String::with_capacity(name.len() + 4);
-    for c in name.chars() {
-        if matches!(c, '\\' | '[' | ']' | '*' | '{' | '}' | '!' | '#') {
-            out.push('\\');
-        }
-        out.push(c);
-    }
+/// - a line break splits a rule given as text into two patterns, and with CR, tab and every other whitespace
+///   (no-break space, U+2028...) turns into a plain space, so the rule names another place;
+/// - a backslash escapes what follows it, and `\\` before `^`, `$`, `.`, `|`, `+`, `(`, `)` or `{` doesn't come out
+///   as a backslash (`x\^z` misses), so a Unix name holding one can't be spelled;
+/// - `?` matches any one character, and `\?` matches nothing at all;
+/// - an escaped `*` at the end of a pattern is a wildcard all the same (Claude Code takes a rule's `/**` off, so a
+///   folder `a*` would be `a\*`, matching `ab` too);
+/// - letters beyond ASCII may come in another Unicode normal form (`é` as one character or two) or fold case
+///   differently, and control characters are nobody's name.
+///
+/// Windows names can't hold `\`, `?`, `*` or control characters at all. The differential test
+/// (`tests/rule_matcher.rs`, through `tools/rule-matcher.mjs`) runs the rules through the matcher itself for names
+/// with each of these.
+pub fn exact_char(c: char) -> bool {
+    matches!(c, ' '..='~') && !matches!(c, '\\' | '?' | '*')
+}
+
+/// One real name (a folder's or a file's) as a literal in a Claude Code permission rule, or `None` when it holds a
+/// character the matcher can't spell ([`exact_char`]). Rules you write yourself are gitignore patterns that Claude
+/// Code doesn't escape (its permissions docs, "Special characters"), so a folder called `[work]` would be a
+/// character class matching `w`, `o`, `r` or `k`, and a deny rule would miss it. Each gitignore special character
+/// gets a backslash: `[`, `]`, `{`, `}`, `!` and `#` (the last two mean something only at a pattern's start,
+/// but escaping them anywhere is harmless), and a trailing space, which gitignore would trim. The matcher escapes
+/// `^`, `$`, `.`, `|`, `+`, `(` and `)` itself.
+pub fn rule_literal(name: &str) -> Option<String> {
+    name.chars().all(exact_char).then(|| escape(name))
+}
+
+/// `name`, all of whose characters are [`exact_char`], with a backslash before each special one and before each
+/// trailing space.
+fn escape(name: &str) -> String {
+    let out = escape_inner(name);
     let kept = out.trim_end_matches(' ');
     let spaces = out.len() - kept.len();
     let mut escaped = kept.to_owned();
@@ -133,49 +167,112 @@ pub fn rule_literal(name: &str) -> String {
     escaped
 }
 
+/// One real name as a pattern that matches it and maybe more, never less: for a deny rule, which may hide a little
+/// more than the place it names but never less. Each run of characters [`rule_literal`] can't spell becomes `*`,
+/// which matches any characters but `/` (line breaks among them), however many the name has in whatever Unicode
+/// form; the rest is escaped as a literal. A name it can spell comes out as [`rule_literal`] does.
+pub fn rule_cover(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    let mut run = String::new();
+    let mut wild = false;
+    for c in name.chars() {
+        if exact_char(c) {
+            run.push(c);
+            wild = false;
+        } else if !wild {
+            out.push_str(&escape_inner(&std::mem::take(&mut run)));
+            out.push('*');
+            wild = true;
+        }
+    }
+    out.push_str(&escape(&run));
+    out
+}
+
+/// [`escape`] for a part of a name something else follows: its spaces aren't trailing.
+fn escape_inner(part: &str) -> String {
+    let mut out = String::with_capacity(part.len() + 4);
+    for c in part.chars() {
+        if matches!(c, '[' | ']' | '{' | '}' | '!' | '#') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A path's names after its drive, in `style`: `D:\tmp\fx` is `(Some('d'), ["tmp", "fx"])`, `/Users/alex` is
+/// `(None, ["Users", "alex"])`. `None` for a path that isn't absolute in that style: a Windows path without a drive
+/// letter (a share, `\\?\`, `\x`), or a Unix one not from `/`.
+fn absolute_names(text: &str, style: Style) -> Option<(Option<char>, Vec<&str>)> {
+    let (drive, rest) = match style {
+        Style::Windows => {
+            let b = text.as_bytes();
+            if b.len() < 3
+                || !b[0].is_ascii_alphabetic()
+                || b[1] != b':'
+                || !matches!(b[2], b'\\' | b'/')
+            {
+                return None;
+            }
+            (Some((b[0] as char).to_ascii_lowercase()), &text[2..])
+        }
+        Style::Unix => (None, text.strip_prefix('/')?),
+    };
+    let names = rest
+        .split(|c| c == '/' || (style == Style::Windows && c == '\\'))
+        .filter(|n| !n.is_empty())
+        .collect();
+    Some((drive, names))
+}
+
+/// `names` from the root, with the drive as `/d`.
+fn joined(drive: Option<char>, names: impl Iterator<Item = String>) -> String {
+    let mut out = drive.map(|d| format!("/{d}")).unwrap_or_default();
+    for name in names {
+        out.push('/');
+        out.push_str(&name);
+    }
+    out
+}
+
 /// A folder as Claude Code's permission rules spell it, as a literal: from the file system's root, with forward
 /// slashes, a Windows drive as `/c`, and each name escaped ([`rule_literal`]). `D:\tmp\fx` is `/d/tmp/fx`,
-/// `D:\AI\[work]` is `/d/AI/\[work\]`; `/Users/alex` stays as it is. The caller adds the wildcards it means
-/// (`/**`) after it.
-pub fn rule_path(path: &Path) -> String {
-    let text = path.to_string_lossy();
-    // A backslash separates names only on Windows; elsewhere it is part of a name, and escaped as one.
-    let text = if cfg!(windows) {
-        text.replace('\\', "/")
-    } else {
-        text.into_owned()
-    };
-    let bytes = text.as_bytes();
-    let (drive, rest) = if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
-        (
-            format!("/{}", (bytes[0] as char).to_ascii_lowercase()),
-            &text[2..],
-        )
-    } else {
-        (String::new(), text.as_str())
-    };
-    let names: Vec<String> = rest
-        .split('/')
-        .filter(|n| !n.is_empty())
-        .map(rule_literal)
-        .collect();
-    if names.is_empty() {
-        drive
-    } else {
-        format!("{drive}/{}", names.join("/"))
-    }
+/// `D:\AI\[work]` is `/d/AI/\[work\]`; `/Users/alex` stays as it is; `/` is empty. The caller adds the wildcards it
+/// means (`/**`) after it. `None` when a name has a character the matcher can't spell, or the path isn't absolute
+/// with a drive (Windows) or from `/` (Unix): then no rule may allow it.
+pub fn rule_path_in(text: &str, style: Style) -> Option<String> {
+    let (drive, names) = absolute_names(text, style)?;
+    let names: Option<Vec<String>> = names.into_iter().map(rule_literal).collect();
+    Some(joined(drive, names?.into_iter()))
+}
+
+/// [`rule_path_in`] for a path on this system. `None` too for one that isn't Unicode.
+pub fn rule_path(path: &Path) -> Option<String> {
+    rule_path_in(path.to_str()?, Style::HOST)
+}
+
+/// A folder as a deny rule spells it, matching it and maybe more, never less: [`rule_path_in`], with each name
+/// [`rule_cover`]ed instead. `None` only when the path isn't absolute in `style`.
+pub fn cover_path_in(text: &str, style: Style) -> Option<String> {
+    let (drive, names) = absolute_names(text, style)?;
+    Some(joined(drive, names.into_iter().map(rule_cover)))
+}
+
+/// The allow rule for reads in the folder `text` (in `style`) and everything in it, or `None` when
+/// [`rule_path_in`] can't spell it exactly.
+pub fn allow_rule_in(text: &str, style: Style) -> Option<String> {
+    rule_path_in(text, style).map(|at| format!("Read(/{at}/**)"))
 }
 
 /// The `--settings` JSON for privacy mode off: Read allowed under `roots`, and the always-hidden places denied
 /// (deny rules win over allow rules in Claude Code), Claude Code's and Codex's own folders where `config` puts them
-/// among them. A root whose path holds a `?` gets no allow rule (see [`rule_literal`]): `--add-dir` alone lets
-/// Claude read it, and nothing beside it is allowed by accident.
+/// among them. A root [`rule_path`] can't spell gets no allow rule: nothing beside it is allowed by accident.
+/// (Fixture mode then gives no reads at all: see [`reads_unavailable_in`].)
 pub fn read_settings_in(roots: &[PathBuf], config: &[PathBuf]) -> Value {
     let allow: Vec<String> = roots
         .iter()
-        .map(|root| rule_path(root))
-        .filter(|at| !at.contains('?'))
-        .map(|at| format!("Read(/{at}/**)"))
+        .filter_map(|root| allow_rule_in(root.to_str()?, Style::HOST))
         .collect();
     serde_json::json!({
         "permissions": {
@@ -183,6 +280,36 @@ pub fn read_settings_in(roots: &[PathBuf], config: &[PathBuf]) -> Value {
             "deny": hidden::deny_rules_in(config),
         }
     })
+}
+
+/// Why privacy mode off can't give Claude Read, Glob and Grep, in the panel's words, or `None` when it can: a moved
+/// Claude Code or Codex folder (`config`) no deny rule can name, or in fixture mode a fixture folder (`fixture`)
+/// no allow rule can spell exactly, so Claude couldn't be kept inside it. Every call then runs as if privacy mode
+/// were on.
+pub fn reads_unavailable_in(fixture: Option<&Path>, config: &[PathBuf]) -> Option<String> {
+    if let Some(dir) = config.iter().find(|dir| !hidden::deniable(dir)) {
+        return Some(format!(
+            "Claude can't open files for now: Vacancy can't name the folder {} in a rule that keeps it hidden \
+             from Claude, so Claude gets names, sizes, counts and dates only.",
+            dir.display()
+        ));
+    }
+    if let Some(root) = fixture
+        && rule_path(root).is_none()
+    {
+        return Some(
+            "Claude can't open files in this fixture folder: its path has characters Claude Code's read rules \
+             can't spell exactly, so Claude couldn't be kept inside it. Claude gets names, sizes, counts and \
+             dates only."
+                .to_owned(),
+        );
+    }
+    None
+}
+
+/// [`reads_unavailable_in`] with the app's own config folders ([`hidden::config_dirs`]).
+pub fn reads_unavailable(fixture: Option<&Path>) -> Option<String> {
+    reads_unavailable_in(fixture, hidden::config_dirs())
 }
 
 /// [`read_settings_in`] with the app's own config folders ([`hidden::config_dirs`]).
@@ -675,7 +802,7 @@ mod tests {
         } else {
             PathBuf::from("/Volumes/Work/claude-config")
         };
-        let rule = format!("Read(/{}/**)", rule_path(&moved));
+        let rule = format!("Read(/{}/**)", rule_path(&moved).unwrap());
         let config = std::slice::from_ref(&moved);
         for access in [
             Access::Private,
@@ -757,86 +884,142 @@ mod tests {
 
     #[test]
     fn rule_paths_are_posix_from_the_root() {
-        if cfg!(windows) {
-            assert_eq!(rule_path(Path::new(r"D:\tmp\fx")), "/d/tmp/fx");
-            assert_eq!(rule_path(Path::new(r"C:\")), "/c");
-            assert_eq!(rule_path(Path::new(r"D:\tmp\fx\")), "/d/tmp/fx");
+        use Style::{Unix, Windows};
+        let some = |s: &str| Some(s.to_owned());
+        assert_eq!(rule_path_in(r"D:\tmp\fx", Windows), some("/d/tmp/fx"));
+        assert_eq!(rule_path_in(r"C:\", Windows), some("/c"));
+        assert_eq!(rule_path_in(r"D:\tmp\fx\", Windows), some("/d/tmp/fx"));
+        assert_eq!(rule_path_in("D:/tmp/fx", Windows), some("/d/tmp/fx"));
+        assert_eq!(rule_path_in("/Users/alex", Unix), some("/Users/alex"));
+        assert_eq!(rule_path_in("/Users/alex/", Unix), some("/Users/alex"));
+        assert_eq!(rule_path_in("/", Unix), some(""));
+        // Not from a drive letter, or not from `/`: no rule spells it.
+        for odd in [r"\\server\share\x", r"\\?\C:\x", r"\x", "C:x", "C:", "x"] {
+            assert_eq!(rule_path_in(odd, Windows), None, "{odd}");
+            assert_eq!(cover_path_in(odd, Windows), None, "{odd}");
         }
-        assert_eq!(rule_path(Path::new("/Users/alex")), "/Users/alex");
-        assert_eq!(rule_path(Path::new("/Users/alex/")), "/Users/alex");
-        assert_eq!(rule_path(Path::new("/")), "");
+        assert_eq!(rule_path_in("x/y", Unix), None);
+        if cfg!(windows) {
+            assert_eq!(rule_path(Path::new(r"D:\tmp\fx")), some("/d/tmp/fx"));
+        } else {
+            assert_eq!(rule_path(Path::new("/Users/alex")), some("/Users/alex"));
+        }
     }
 
     /// Every gitignore special character in a real name is escaped, so a rule names the place as it is spelled and
-    /// only the wildcards the caller adds (`/**`) are wildcards.
+    /// only the wildcards the caller adds (`/**`) are wildcards. A name with a character the matcher can't spell
+    /// has no literal at all, and its cover holds a `*` for each run of them.
     #[test]
-    fn real_names_are_literals_in_a_rule() {
+    fn real_names_are_literals_in_a_rule_or_have_none() {
         for (name, literal) in [
             ("claude-config", "claude-config"),
             ("[work]", r"\[work\]"),
             ("a]b", r"a\]b"),
-            ("a*b", r"a\*b"),
-            ("**", r"\*\*"),
             ("{a,b}", r"\{a,b\}"),
             ("!x", r"\!x"),
             ("#x", r"\#x"),
-            ("a\\b", r"a\\b"),
             ("x ", r"x\ "),
             ("x  ", r"x\ \ "),
             ("a b", "a b"),
-            // Parentheses need no escaping; `?` stays a one-character wildcard (see rule_literal).
+            ("x^z$.|+", "x^z$.|+"),
+            // Parentheses need no escaping.
             ("Finance (2024)", "Finance (2024)"),
-            ("a?b", "a?b"),
         ] {
-            assert_eq!(rule_literal(name), literal, "{name}");
+            assert_eq!(rule_literal(name), Some(literal.to_owned()), "{name}");
+            assert_eq!(rule_cover(name), literal, "{name}");
         }
-        if cfg!(windows) {
-            assert_eq!(
-                rule_path(Path::new(r"D:\AI\[work]\claude-config")),
-                r"/d/AI/\[work\]/claude-config"
-            );
-            assert_eq!(
-                rule_path(Path::new(r"E:\{a,b}\x!y\#z")),
-                r"/e/\{a,b\}/x\!y/\#z"
-            );
-        } else {
-            assert_eq!(
-                rule_path(Path::new("/Volumes/[work]/*/{a,b}/a\\b")),
-                r"/Volumes/\[work\]/\*/\{a,b\}/a\\b"
-            );
+        for (name, cover) in [
+            ("a\nb", "a*b"),
+            ("a\r\n\tb", "a*b"),
+            ("a\\b", "a*b"),
+            ("a*b", "a*b"),
+            ("**", "*"),
+            ("a*", "a*"),
+            (r"x\^z", "x*^z"),
+            ("a?b", "a*b"),
+            ("\n", "*"),
+            ("[\n] ", r"\[*\]\ "),
+            ("zoë", "zo*"),
+            ("caf\u{e9}\u{301}x", "caf*x"),
+            ("a\u{a0}b", "a*b"),
+            ("a\u{2028}b", "a*b"),
+            ("\u{ff0a}x", "*x"),
+            ("a\u{7f}", "a*"),
+        ] {
+            assert_eq!(rule_literal(name), None, "{name:?} has no literal");
+            assert_eq!(rule_cover(name), cover, "{name:?}");
         }
+        assert_eq!(
+            rule_path_in(r"D:\AI\[work]\claude-config", Style::Windows),
+            Some(r"/d/AI/\[work\]/claude-config".to_owned())
+        );
+        assert_eq!(
+            rule_path_in(r"E:\{a,b}\x!y\#z", Style::Windows),
+            Some(r"/e/\{a,b\}/x\!y/\#z".to_owned())
+        );
+        assert_eq!(
+            rule_path_in("/Volumes/[work]/{a,b}", Style::Unix),
+            Some(r"/Volumes/\[work\]/\{a,b\}".to_owned())
+        );
+        // A Unix backslash, a line break, a `?`: no literal, so no allow rule; the deny rule's cover hides more.
+        for odd in [
+            "/Volumes/a\\b/cfg",
+            "/Volumes/a\nb/cfg",
+            "/tmp/fx?",
+            "/tmp/fx*",
+        ] {
+            assert_eq!(rule_path_in(odd, Style::Unix), None, "{odd:?}");
+        }
+        assert_eq!(
+            cover_path_in("/Volumes/a\nb/[x]\\y", Style::Unix),
+            Some(r"/Volumes/a*b/\[x\]*y".to_owned())
+        );
     }
 
-    /// The fixture folder's allow rule is a literal too, and a root with a `?` in it gets no allow rule at all, so a
-    /// name one letter off is never allowed by accident (`--add-dir` still names the root itself).
+    /// The fixture folder's allow rule is a literal too, and a root no literal spells gets no allow rule at all, so
+    /// nothing beside it is ever allowed by accident.
     #[test]
-    fn allow_rules_escape_the_roots_and_skip_a_root_with_a_question_mark() {
+    fn allow_rules_escape_the_roots_and_skip_a_root_they_cannot_spell() {
         let root = if cfg!(windows) {
             PathBuf::from(r"D:\tmp\[fx]{1}")
         } else {
-            PathBuf::from("/tmp/[fx]{1}*")
+            PathBuf::from("/tmp/[fx]{1}!#")
         };
         let settings = read_settings_in(std::slice::from_ref(&root), &[]);
         let allow = settings["permissions"]["allow"].as_array().unwrap();
         if cfg!(windows) {
             assert_eq!(allow, &[json(r"Read(//d/tmp/\[fx\]\{1\}/**)")]);
         } else {
-            assert_eq!(allow, &[json(r"Read(//tmp/\[fx\]\{1\}\*/**)")]);
-            let odd = PathBuf::from("/tmp/fx?");
-            let settings = read_settings_in(std::slice::from_ref(&odd), &[]);
-            assert!(
-                settings["permissions"]["allow"]
-                    .as_array()
-                    .unwrap()
-                    .is_empty()
-            );
-            let inv = invocation_in(Path::new("claude"), &call(), &Access::Read(vec![odd]), &[]);
-            assert_eq!(
-                inv.args.last().unwrap(),
-                "/tmp/fx?",
-                "--add-dir takes the path as it is"
-            );
+            assert_eq!(allow, &[json(r"Read(//tmp/\[fx\]\{1\}\!\#/**)")]);
         }
+        let odd: Vec<PathBuf> = if cfg!(windows) {
+            vec![PathBuf::from(r"D:\tmp\zoë")]
+        } else {
+            [
+                "/tmp/fx?",
+                "/tmp/fx*",
+                "/tmp/fx\nname",
+                "/tmp/fx\\^z",
+                "/tmp/zoë",
+            ]
+            .iter()
+            .map(PathBuf::from)
+            .collect()
+        };
+        for root in odd {
+            let settings = read_settings_in(std::slice::from_ref(&root), &[]);
+            assert_eq!(
+                settings["permissions"]["allow"],
+                serde_json::json!([]),
+                "{root:?}"
+            );
+            assert!(
+                reads_unavailable_in(Some(&root), &[]).is_some(),
+                "fixture mode refuses reads in {root:?}"
+            );
+            assert!(reads_unavailable_in(None, &[]).is_none());
+        }
+        assert!(reads_unavailable_in(Some(&root), &[]).is_none());
         let inv = invocation_in(
             Path::new("claude"),
             &call(),
@@ -848,6 +1031,24 @@ mod tests {
             &root.display().to_string(),
             "--add-dir takes a path, not a pattern: it is never escaped"
         );
+    }
+
+    /// A moved Claude Code or Codex folder no deny rule can name makes reads unavailable, in any mode.
+    #[test]
+    fn a_config_folder_no_rule_can_name_makes_reads_unavailable() {
+        let share = if cfg!(windows) {
+            PathBuf::from(r"\\server\share\claude")
+        } else {
+            PathBuf::from("~")
+        };
+        let why = reads_unavailable_in(None, std::slice::from_ref(&share)).unwrap();
+        assert!(why.contains("names, sizes, counts and dates only"), "{why}");
+        let fine = if cfg!(windows) {
+            PathBuf::from(r"D:\AI\[work]\cfg")
+        } else {
+            PathBuf::from("/Volumes/a\nb/cfg")
+        };
+        assert!(reads_unavailable_in(None, &[fine]).is_none());
     }
 
     fn json(s: &str) -> Value {
