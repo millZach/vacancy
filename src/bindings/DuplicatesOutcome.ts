@@ -7,7 +7,12 @@ import type { TidyProposal } from "./TidyProposal";
 /**
  * How a duplicate search ended.
  */
-export type DuplicatesOutcome = { "status": "done", overview: Overview, proposals: Array<Proposal>, 
+export type DuplicatesOutcome = { "status": "done", 
+/**
+ * This map's revision ([`crate::ScannedVolume::next_revision`]), counted with Claude's: the UI shows it
+ * only if nothing newer is shown, and takes the search as done either way.
+ */
+revision: number, overview: Overview, proposals: Array<Proposal>, 
 /**
  * The Tidy up sorts again: a sort leaves out an extra copy the plan deletes (delete wins over sort).
  */

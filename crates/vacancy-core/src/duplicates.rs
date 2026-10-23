@@ -231,6 +231,10 @@ pub struct DuplicateProgress {
 pub enum DuplicatesOutcome {
     /// It finished: the map and the proposals again, with the duplicates' tiles and proposal (if it found any).
     Done {
+        /// This map's revision ([`crate::ScannedVolume::next_revision`]), counted with Claude's: the UI shows it
+        /// only if nothing newer is shown, and takes the search as done either way.
+        #[ts(type = "number")]
+        revision: u64,
         overview: Box<Overview>,
         proposals: Vec<Proposal>,
         /// The Tidy up sorts again: a sort leaves out an extra copy the plan deletes (delete wins over sort).

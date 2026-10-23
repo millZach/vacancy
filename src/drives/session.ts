@@ -56,8 +56,12 @@ export type DriveScan =
       run: number;
       /** The core's id for this scan (`ScanOutcome`'s `scan`), which every Claude command about it names. */
       scan: number;
-      /** The newest `ClaudeRefreshed.revision` shown: an older one, arriving late, is ignored. */
-      claudeRevision: number;
+      /**
+       * The revision of the map shown (the core's, one per complete map it gives out for this scan: the scan's own is
+       * 0, then the duplicate search's and Claude's, counted together). A map with a revision no higher, arriving
+       * late, is ignored, whichever kind it is.
+       */
+      mapRevision: number;
       overview: Overview;
       /** The cleanups proposed for this drive, biggest first. */
       proposals: Proposal[];
@@ -132,7 +136,10 @@ export type Action =
   | { type: 'plan'; mountPoint: string; id: string; on: boolean }
   /** How far the duplicate search of the scan `run` has got. */
   | { type: 'dupsProgress'; mountPoint: string; run: number; progress: DuplicateProgress }
-  /** The duplicate search of the scan `run` ended: the map and proposals again, with what it found. */
+  /**
+   * The duplicate search of the scan `run` ended: the map and proposals again, with what it found. The search is
+   * done either way; its map is shown only if nothing newer (a higher `revision`, Claude's) is shown already.
+   */
   | { type: 'dupsEnded'; mountPoint: string; run: number; outcome: DuplicatesOutcome }
   | { type: 'dupsFailed'; mountPoint: string; run: number; message: string }
   /** Unticks a duplicate group (every copy stays), or ticks it again. */
@@ -324,7 +331,7 @@ export function reduce(s: Session, a: Action): Session {
               phase: 'done',
               run: a.run,
               scan: a.outcome.scan,
-              claudeRevision: 0,
+              mapRevision: a.outcome.revision,
               overview: a.outcome.overview,
               proposals: a.outcome.proposals,
               tidy: a.outcome.tidy,
@@ -364,6 +371,9 @@ export function reduce(s: Session, a: Action): Session {
       return onSearch(s, a.mountPoint, a.run, (scan) => {
         // Once its plan has run, a scan's map stays the one the run started from.
         if (a.outcome.status === 'cancelled' || ranPlan(scan)) return { ...scan, duplicates: { phase: 'stopped' } };
+        const duplicates = { phase: 'done' as const, found: a.outcome.duplicates };
+        // A newer map (Claude's, made after the search had added its proposal) is kept: it has the duplicates too.
+        if (a.outcome.revision <= scan.mapRevision) return { ...scan, duplicates };
         const ids = new Set([...a.outcome.proposals.map((p) => p.id), ...a.outcome.tidy.map((t) => t.id)]);
         return {
           ...withPlan(scan, scan.plan.filter((id) => ids.has(id))),
@@ -371,7 +381,8 @@ export function reduce(s: Session, a: Action): Session {
           proposals: a.outcome.proposals,
           // The sorts again, with the extra copies marked as deleted by duplicates (delete wins over sort).
           tidy: a.outcome.tidy,
-          duplicates: { phase: 'done', found: a.outcome.duplicates },
+          mapRevision: a.outcome.revision,
+          duplicates,
         };
       });
     case 'dupsFailed':
@@ -387,14 +398,14 @@ export function reduce(s: Session, a: Action): Session {
     }
     case 'claudeApplied':
       return onScan(s, a.mountPoint, a.run, (scan) => {
-        if (a.refreshed.revision <= scan.claudeRevision) return scan;
+        if (a.refreshed.revision <= scan.mapRevision) return scan;
         const ids = new Set([...a.refreshed.proposals.map((p) => p.id), ...a.refreshed.tidy.map((t) => t.id)]);
         return {
           ...withPlan(scan, scan.plan.filter((id) => ids.has(id))),
           overview: a.refreshed.overview,
           proposals: a.refreshed.proposals,
           tidy: a.refreshed.tidy,
-          claudeRevision: a.refreshed.revision,
+          mapRevision: a.refreshed.revision,
         };
       });
     case 'setPlan':

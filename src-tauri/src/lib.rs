@@ -921,6 +921,7 @@ async fn scan_volume(
             let overview = Box::new(scanned.overview.clone());
             let proposals = scanned.proposals.list().to_vec();
             let tidy = scanned.tidy.proposals();
+            let revision = scanned.revision();
             let scanned = Scanned {
                 volume: scanned,
                 plan: None,
@@ -935,6 +936,7 @@ async fn scan_volume(
                     overview,
                     proposals,
                     tidy,
+                    revision,
                 })
             } else {
                 Ok(ScanOutcome::Cancelled)
@@ -1055,6 +1057,7 @@ async fn find_duplicates(
             scanned.searched = true;
             let duplicates = duplicates::attach(&mut scanned.volume, found);
             Ok(DuplicatesOutcome::Done {
+                revision: scanned.volume.next_revision(),
                 overview: Box::new(scanned.volume.overview.clone()),
                 proposals: scanned.volume.proposals.list().to_vec(),
                 // Delete wins over sort: the sorts' previews now mark the extra copies as deleted by duplicates.

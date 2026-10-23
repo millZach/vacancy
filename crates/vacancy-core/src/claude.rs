@@ -290,14 +290,11 @@ impl Chats {
     }
 }
 
-/// What Claude's jobs keep with one scan: its chats, which of its items were made with privacy mode off, and how
-/// many times the map was given out again since the scan.
+/// What Claude's jobs keep with one scan: its chats, and which of its items were made with privacy mode off.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct OnScan {
     pub chats: Chats,
     pub off: PrivacyOff,
-    /// The last [`Refreshed::revision`] given out.
-    revision: u64,
 }
 
 /// Which of Claude's items about one scan were made with privacy mode off, from files it may have read. A call with
@@ -461,8 +458,9 @@ pub enum JobResult {
 #[serde(rename_all = "camelCase")]
 #[ts(export, rename = "ClaudeRefreshed")]
 pub struct Refreshed {
-    /// Goes up by one each time the scan's map is given out again: the UI shows only the newest, so a slow answer
-    /// never puts back a map that a later change replaced.
+    /// Goes up by one each time the scan's map is given out again, here or by the duplicate search
+    /// ([`ScannedVolume::next_revision`]): the UI shows only the newest, so a slow answer never puts back a map that
+    /// a later change replaced.
     #[ts(type = "number")]
     pub revision: u64,
     pub overview: Box<Overview>,
@@ -476,9 +474,8 @@ pub struct Refreshed {
 impl Refreshed {
     /// The scan's map, proposals and sorts as they are now, with the next revision.
     pub fn of(scanned: &mut ScannedVolume) -> Self {
-        scanned.claude.revision += 1;
         Self {
-            revision: scanned.claude.revision,
+            revision: scanned.next_revision(),
             overview: Box::new(scanned.overview.clone()),
             proposals: scanned.proposals.list().to_vec(),
             tidy: scanned.tidy.proposals(),

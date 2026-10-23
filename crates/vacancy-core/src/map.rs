@@ -341,6 +341,9 @@ pub enum ScanOutcome {
         proposals: Vec<Proposal>,
         /// The folders Tidy up can sort (Windows; none on macOS, nor on a drive without the known folders).
         tidy: Vec<crate::tidy::TidyProposal>,
+        /// This map's revision ([`ScannedVolume::next_revision`]): 0, the scan's own.
+        #[ts(type = "number")]
+        revision: u64,
     },
     /// It was cancelled; there is no map.
     Cancelled,
@@ -372,9 +375,24 @@ pub struct ScannedVolume {
     pub how: HowScanned,
     /// What Claude's jobs keep with this scan: its chats, and which of its items were made with privacy mode off.
     pub claude: crate::claude::OnScan,
+    /// The revision of the map last given out: 0 for the scan's own.
+    revision: u64,
 }
 
 impl ScannedVolume {
+    /// The revision of the map last given out: 0 for the scan's own, until a complete map is given out again.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// One more complete map (map, proposals and sorts) given out again for this scan, by the duplicate search or a
+    /// Claude job: its revision, one above the last. The UI shows a map only if its revision is above the one it
+    /// shows, so a slow answer never puts back a map that a later one replaced, whichever kind each is.
+    pub fn next_revision(&mut self) -> u64 {
+        self.revision += 1;
+        self.revision
+    }
+
     /// Carves the categories again for the proposals as they are now and redraws the overview against the same
     /// drive figures: after the duplicate finder adds its proposal, whose tiles come out of the folders they are in.
     pub(crate) fn reshape(&mut self) {
@@ -719,6 +737,7 @@ pub(crate) fn finish_map(
         overview,
         how,
         claude: Default::default(),
+        revision: 0,
     })
 }
 

@@ -20,7 +20,7 @@ function mapOf(volume: VolumeInfo): Overview {
 }
 
 /** A finished scan of `volume`: its map and the fixture's proposals. */
-const done = (volume: VolumeInfo) => ({ status: 'done' as const, scan: 1, overview: mapOf(volume), proposals: fixtures.windows.proposals, tidy: [] });
+const done = (volume: VolumeInfo) => ({ status: 'done' as const, scan: 1, revision: 0, overview: mapOf(volume), proposals: fixtures.windows.proposals, tidy: [] });
 
 const run = (s: Session, ...actions: Action[]) => actions.reduce(reduce, s);
 const listed = (drives: VolumeInfo[] = [C, D, E]): Action => ({ type: 'listed', drives });
@@ -317,6 +317,7 @@ describe('each drive’s run and summary', () => {
 describe('the duplicate search after a scan', () => {
   const found = {
     status: 'done' as const,
+    revision: 1,
     overview: { ...mapOf(C), freeBytes: 1 },
     proposals: [
       ...fixtures.windows.proposals,
@@ -381,6 +382,56 @@ describe('the duplicate search after a scan', () => {
     const e = scanOf(ended, C.mountPoint);
     expect(e.phase === 'done' && e.tidy[0]!.moves.every((m) => m.deletedBy.includes('duplicates'))).toBe(true);
     expect(e.phase === 'done' && e.plan.includes(tidy[0]!.id)).toBe(true);
+  });
+
+  /** Claude's answer, with its own item, made after the search had added its proposal: the newer map. */
+  const claudeItem = { ...fixtures.windows.proposals[0]!, id: 'claude-x', source: 'claude' as const, defaultOn: false };
+  const withClaude = (revision: number, proposals = found.proposals) => ({
+    revision,
+    overview: mapOf(C),
+    proposals: [...proposals, claudeItem],
+    tidy: [],
+    tidyOthers: [],
+  });
+  const idsOf = (s: Session) => {
+    const scan = scanOf(s, C.mountPoint);
+    return scan.phase === 'done' ? scan.proposals.map((p) => p.id) : [];
+  };
+
+  it('never lets a late duplicate map take out a newer Claude item, or its tick, and still ends the search', () => {
+    const s0 = run(start, ...scanned(C, 1));
+    // Claude's map (revision 2, made after the search's at 1) arrives first; the person ticks Claude's item.
+    const claude = run(s0, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed: withClaude(2) });
+    const ticked = run(claude, { type: 'plan', mountPoint: C.mountPoint, id: 'claude-x', on: true });
+    // Then the search's own map, older, arrives.
+    const ended = run(ticked, { type: 'dupsEnded', mountPoint: C.mountPoint, run: 1, outcome: found });
+    const e = scanOf(ended, C.mountPoint);
+    expect(idsOf(ended)).toContain('claude-x');
+    expect(idsOf(ended)).toContain('duplicates');
+    expect(e.phase === 'done' && e.plan).toContain('claude-x');
+    expect(e.phase === 'done' && e.mapRevision).toBe(2);
+    // The search is done all the same: the duplicates panel gets its groups.
+    expect(e.phase === 'done' && e.duplicates).toEqual({ phase: 'done', found: found.duplicates });
+  });
+
+  it('never lets an older Claude map take out the duplicate proposal once the search is done', () => {
+    const s0 = run(start, ...scanned(C, 1));
+    // The search's map (revision 2) arrives first...
+    const ended = run(s0, { type: 'dupsEnded', mountPoint: C.mountPoint, run: 1, outcome: { ...found, revision: 2 } });
+    expect(idsOf(ended)).toContain('duplicates');
+    // ...then Claude's, made before the search added its proposal (revision 1): ignored.
+    const late = run(ended, {
+      type: 'claudeApplied',
+      mountPoint: C.mountPoint,
+      run: 1,
+      refreshed: withClaude(1, fixtures.windows.proposals),
+    });
+    expect(late).toBe(ended);
+    const l = scanOf(late, C.mountPoint);
+    expect(l.phase === 'done' && l.duplicates.phase).toBe('done');
+    // A Claude map made after it (revision 3) has the duplicate proposal and its own item.
+    const newer = run(late, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed: withClaude(3) });
+    expect(idsOf(newer)).toEqual(expect.arrayContaining(['duplicates', 'claude-x']));
   });
 
   it('keeps the groups the user unticks, and lets them be ticked again', () => {
@@ -457,7 +508,7 @@ describe('Claude’s answers on a drive’s scan', () => {
     const newer = { ...refreshed, revision: 3 };
     const shown = run(s0, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed: newer });
     const doneScan = scanOf(shown, C.mountPoint);
-    expect(doneScan.phase === 'done' && doneScan.claudeRevision).toBe(3);
+    expect(doneScan.phase === 'done' && doneScan.mapRevision).toBe(3);
     // Keep mine's reply, made before the newer answer, arrives late without Claude's item: nothing changes.
     const older = { ...refreshed, revision: 2, proposals: fixtures.windows.proposals };
     expect(run(shown, { type: 'claudeApplied', mountPoint: C.mountPoint, run: 1, refreshed: older })).toBe(shown);

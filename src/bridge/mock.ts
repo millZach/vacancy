@@ -215,7 +215,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
           }
           const t = total <= 0 ? 1 : Math.min(1, (elapsed - asking) / total);
           onUpdate(fast ? fastUpdate(map, t, elapsed) : { ...update(map, ticker, t, elapsed), fallback });
-          if (t >= 1) finish({ status: 'done', scan, overview: map, proposals, tidy });
+          if (t >= 1) finish({ status: 'done', scan, overview: map, proposals, tidy, revision: 0 });
         };
         running = { mountPoint, timer: window.setInterval(tick, total <= 0 && asking <= 0 ? 0 : 100), finish };
       });
@@ -264,6 +264,8 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
           }
           finish({
             status: 'done',
+            // One revision per scan, counted with Claude's maps (mockClaude's `refreshed`).
+            revision: ++scan.revision,
             overview: scan.map,
             proposals: scan.proposals,
             tidy: scan.tidy,

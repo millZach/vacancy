@@ -23,4 +23,8 @@ proposals: Array<Proposal>,
 /**
  * The folders Tidy up can sort (Windows; none on macOS, nor on a drive without the known folders).
  */
-tidy: Array<TidyProposal>, } | { "status": "cancelled" };
+tidy: Array<TidyProposal>, 
+/**
+ * This map's revision ([`ScannedVolume::next_revision`]): 0, the scan's own.
+ */
+revision: number, } | { "status": "cancelled" };

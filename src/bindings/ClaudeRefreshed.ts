@@ -8,8 +8,9 @@ import type { TidyProposal } from "./TidyProposal";
  */
 export type ClaudeRefreshed = { 
 /**
- * Goes up by one each time the scan's map is given out again: the UI shows only the newest, so a slow answer
- * never puts back a map that a later change replaced.
+ * Goes up by one each time the scan's map is given out again, here or by the duplicate search
+ * ([`ScannedVolume::next_revision`]): the UI shows only the newest, so a slow answer never puts back a map that
+ * a later change replaced.
  */
 revision: number, overview: Overview, proposals: Array<Proposal>, 
 /**
