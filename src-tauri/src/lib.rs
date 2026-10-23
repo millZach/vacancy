@@ -647,10 +647,19 @@ async fn claude_chat(
         None => {
             let session = app.state::<Session>();
             let _mode = lock(&session.claude_mode);
-            // A chat begins in the mode its calls run in: privacy mode on while reads are unavailable.
+            // A chat begins in the mode its calls run in: privacy mode on while reads are unavailable, here or on
+            // this scan (its rules wouldn't fit in the settings Claude Code takes).
             let privacy = claude::settings::load(&claude_home(&app)?).privacy
                 || claude_reads_unavailable(&session.mode).is_some();
+            let env = session.mode.env_for(&mount_point)?;
+            let access = claude::access(
+                &env,
+                &mount_point,
+                &claude_drives(&session.mode, &mount_point),
+            );
             on_scan(&session.scans, &mount_point, scan, |scanned| {
+                let privacy =
+                    privacy || claude::too_big_on(&scanned.volume, &env, &access).is_some();
                 Ok(scanned.volume.claude.chats.open(about, privacy))
             })?
         }
@@ -689,25 +698,19 @@ fn claude_job(
     let home = claude_home(app).map_err(Failure::error)?;
     let program = claude::discovery::locate().ok_or(Failure::NotFound)?;
     let env = session.mode.env_for(mount_point).map_err(Failure::error)?;
-    let drives: Vec<String> = match &session.mode {
-        Mode::Real => vacancy_core::list_volumes()
-            .map(|v| v.into_iter().map(|v| v.mount_point).collect())
-            .unwrap_or_else(|_| vec![mount_point.to_owned()]),
-        _ => Vec::new(),
-    };
-    let unavailable;
-    let (readable, prepared) = {
+    let drives = claude_drives(&session.mode, mount_point);
+    let (access, unavailable, prepared) = {
         let _mode = lock(&session.claude_mode);
         let settings = claude::settings::load(&home);
         if !settings.enabled {
             return Err(Failure::error("Claude is off. Turn it on first."));
         }
         // Privacy mode off, but no rule can keep Claude where it may read: it runs as if privacy mode were on.
-        unavailable = (!settings.privacy)
+        let global = (!settings.privacy)
             .then(|| claude_reads_unavailable(&session.mode))
             .flatten();
-        let readable =
-            (!settings.privacy && unavailable.is_none()).then(|| claude::readable(&env, &drives));
+        let wanted = (!settings.privacy && global.is_none())
+            .then(|| claude::access(&env, mount_point, &drives));
         let prepared = session.scans.with_last(mount_point, |last| {
             let scanned = last
                 .filter(|s| s.generation == scan && !s.spent)
@@ -717,16 +720,18 @@ fn claude_job(
                     "Vacancy is still looking for duplicate files. Ask Claude when it has finished.",
                 ));
             }
-            claude::prepare(job, &scanned.volume, &env, readable.as_deref(), cancel)
+            // This scan's rules wouldn't fit in the settings Claude Code takes: as if privacy mode were on too.
+            let (access, too_big) = claude::access_on(&scanned.volume, &env, wanted.clone());
+            let roots = access.roots();
+            let prepared = claude::prepare(job, &scanned.volume, &env, roots.as_deref(), cancel)?;
+            Ok((access, too_big, prepared))
         });
-        (readable, prepared?)
+        let (access, too_big, prepared) = prepared?;
+        (access, global.or(too_big), prepared)
     };
     let cli = ClaudeCode {
         program,
-        access: match readable {
-            None => claude::Access::Private,
-            Some(roots) => claude::Access::Read(roots),
-        },
+        access,
         work: home.join("claude-work"),
     };
     let reply = cli.call(
@@ -750,12 +755,25 @@ fn claude_job(
         claude::apply(prepared, reply, &mut scanned.volume, &env, cancel)
     })
     .map(|mut answer| {
-        // The answer's foot says why Claude didn't open files though privacy mode is off.
+        // The answer's foot says why Claude didn't open files though privacy mode is off, and so does the panel.
         if let Some(why) = unavailable {
-            answer.basis.text = why;
+            answer.basis.text = why.clone();
+            answer.basis.unavailable = Some(why);
         }
         answer
     })
+}
+
+/// The drives the drive list offers, by mount point, for a call about `mount_point`'s scan: with privacy mode off
+/// Claude may read only that drive, and the others are denied by name as well. None in fixture mode, where reads
+/// stay in the fixture folder.
+fn claude_drives(mode: &Mode, mount_point: &str) -> Vec<String> {
+    match mode {
+        Mode::Real => vacancy_core::list_volumes()
+            .map(|v| v.into_iter().map(|v| v.mount_point).collect())
+            .unwrap_or_else(|_| vec![mount_point.to_owned()]),
+        _ => Vec::new(),
+    }
 }
 
 /// Whether a job may add items to the scan's proposals.

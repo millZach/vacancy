@@ -335,6 +335,9 @@ pub struct Basis {
     pub opened: Vec<String>,
     /// Reads Claude Code refused: an always-hidden place, or somewhere Claude may not read.
     pub refused: Vec<String>,
+    /// Why Claude couldn't open files for this answer though privacy mode is off (then `privacy` is true and `text`
+    /// says the same): the panel's privacy row says it too, for the scan.
+    pub unavailable: Option<String>,
 }
 
 /// Something Claude suggested that Vacancy left out, and why.
@@ -532,13 +535,52 @@ pub enum Event {
     },
 }
 
-/// What Claude may read for a call with privacy mode off: every drive's root, or in fixture mode, the fixture
-/// folder only. `drives` are the mount points the drive list offers.
-pub fn readable(env: &Env, drives: &[String]) -> Vec<PathBuf> {
+/// What Claude may read for a call with privacy mode off about the scan of the drive at `mount_point`: that drive
+/// only, or in fixture mode the fixture folder only. `drives` are the mount points the drive list offers: the
+/// others are denied by name too ([`runner::off_drive_rules_in`]).
+pub fn access(env: &Env, mount_point: &str, drives: &[String]) -> Access {
     match &env.confined_to {
-        Some(root) => vec![root.clone()],
-        None => drives.iter().map(PathBuf::from).collect(),
+        Some(root) => Access::Read(vec![root.clone()]),
+        None => Access::Drive(runner::Drive {
+            root: PathBuf::from(mount_point),
+            others: drives
+                .iter()
+                .filter(|d| d.as_str() != mount_point)
+                .map(PathBuf::from)
+                .collect(),
+        }),
     }
+}
+
+/// What a call about `scanned` may read: `wanted` (from [`access`], with privacy mode off; `None` with it on), unless
+/// this scan's rules wouldn't fit in the settings Claude Code takes ([`too_big_on`]). Then nothing, as with privacy
+/// mode on, with why for the answer and the panel. Rules are never left out to make them fit.
+pub fn access_on(
+    scanned: &ScannedVolume,
+    env: &Env,
+    wanted: Option<Access>,
+) -> (Access, Option<String>) {
+    match wanted {
+        None => (Access::Private, None),
+        Some(access) => match too_big_on(scanned, env, &access) {
+            Some(why) => (Access::Private, Some(why)),
+            None => (access, None),
+        },
+    }
+}
+
+/// Why privacy mode off can't let Claude open files on `scanned`: the rules that keep its browser profiles and the
+/// other hidden places from Claude wouldn't fit in the settings Claude Code takes ([`runner::settings_too_big`]).
+/// Then the call runs as if privacy mode were on, and its answer says why. `None` when they fit, or for
+/// [`Access::Private`].
+pub fn too_big_on(scanned: &ScannedVolume, env: &Env, access: &Access) -> Option<String> {
+    if *access == Access::Private {
+        return None;
+    }
+    runner::settings_too_big(
+        &hidden::Hider::of(&scanned.snapshot, env).deny_rules(),
+        access,
+    )
 }
 
 /// Whether a proposal is Claude's.

@@ -23,15 +23,17 @@
 //! of the allowed names instead ([`complement`]): a set of patterns, from a tree of the allowed names, that matches
 //! every name but those, made of literal characters, `?`, `*` and character classes of plain ranges. It holds for
 //! children made after the scan too. The same folders feed the prompt filter and refuse Claude's suggestions in them
-//! ([`Browsers::hides`], [`Browsers::holds`]).
+//! ([`Browsers::hides`], [`Browsers::holds`]). A Chromium root's profiles with the names Chromium gives share one set
+//! of rules ([`profile_names_rules_in`]), so the settings stay small however many profiles a root holds.
 //!
 //! The scan keeps only the names of files of 1 MiB or more, but notes these markers for every folder
-//! ([`Markers`]), so finding profiles costs nothing extra.
+//! ([`Markers`]), so finding profiles costs nothing extra. Every name of a hard-linked file marks its folder (hard
+//! links are merged for the byte totals only), so a profile backed up with hard links is a profile too.
 
 use std::path::{Component, Path, PathBuf};
 
 use super::hidden::keyed;
-use super::runner::{Style, cover_path_in, rule_literal};
+use super::runner::{Style, cover_path_in, rule_cover, rule_literal};
 use crate::categorize::{Env, Platform};
 use crate::snapshot::{DirId, Markers, Snapshot};
 
@@ -242,6 +244,24 @@ pub fn profile_rules_in(dir: &str, allow: &[&str], style: Style) -> Option<Vec<S
     )
 }
 
+/// The deny rules that hide every child but the caches in each folder of the Chromium root `root` (in `style`)
+/// whose name Chromium gives a profile (`Default`, `Profile *`, `Guest Profile`, `System Profile`): one set of
+/// rules for all of a root's profiles, those made after the scan included, in place of one set each. A child of
+/// another kind whose name matches (`Profile Backup`) is hidden the same way: more, never less. `None` when `root`
+/// isn't absolute in `style`.
+pub fn profile_names_rules_in(root: &str, style: Style) -> Option<Vec<String>> {
+    let at = cover_path_in(root, style)?;
+    let patterns = complement(CHROMIUM_CACHES);
+    let mut out = Vec::new();
+    for name in CHROMIUM_PROFILE_NAMES.iter().map(|n| rule_cover(n)) {
+        for p in &patterns {
+            out.push(format!("Read(/{at}/{name}/{p})"));
+            out.push(format!("Read(/{at}/{name}/{p}/**)"));
+        }
+    }
+    Some(out)
+}
+
 /// The deny rules that hide the folder `dir` (in `style`) whole, or `None` when it isn't absolute in `style`.
 pub fn whole_rules_in(dir: &str, style: Style) -> Option<Vec<String>> {
     let at = cover_path_in(dir, style)?;
@@ -261,6 +281,9 @@ pub struct Walled {
 pub struct Browsers {
     walled: Vec<Walled>,
     whole: Vec<(PathBuf, Vec<String>)>,
+    /// The Chromium roots found: the rules for their Chromium-named profiles are one set per root
+    /// ([`profile_names_rules_in`]).
+    roots: Vec<(PathBuf, Vec<String>)>,
 }
 
 /// A path's components with their lower-cased key ([`keyed`]), in step: the drive (if any), then each name.
@@ -289,6 +312,13 @@ impl Browsers {
     /// The browser profiles and roots of `snap`, with `env`'s default roots.
     pub fn of(snap: &Snapshot, env: &Env) -> Self {
         let mut walls = Walls::default();
+        let mut roots: Vec<(PathBuf, Vec<String>)> = Vec::new();
+        let mut root = |path: PathBuf| {
+            let key = keyed(&path);
+            if !roots.iter().any(|(_, k)| *k == key) {
+                roots.push((path, key));
+            }
+        };
         let name_is = |d: DirId, name: &str| {
             snap.name(d)
                 .to_str()
@@ -313,6 +343,7 @@ impl Browsers {
                     && snap.markers(p).contains(Markers::LOCAL_STATE)
                 {
                     walls.add(snap.path(p), CHROMIUM_CACHES);
+                    root(snap.path(p));
                     profiles_in(&mut walls, p);
                 }
             }
@@ -321,24 +352,26 @@ impl Browsers {
             }
         }
         let mut whole = Vec::new();
-        for (root, kind) in known_roots(env) {
-            match snap.find(&root) {
+        for (dir, kind) in known_roots(env) {
+            match snap.find(&dir) {
                 Some(d) => match kind {
                     Kind::Chromium => {
-                        walls.add(root, CHROMIUM_CACHES);
+                        walls.add(dir.clone(), CHROMIUM_CACHES);
+                        root(dir);
                         profiles_in(&mut walls, d);
                     }
-                    Kind::Firefox => walls.add(root, &[]),
+                    Kind::Firefox => walls.add(dir, &[]),
                 },
                 None => {
-                    let key = keyed(&root);
-                    whole.push((root, key));
+                    let key = keyed(&dir);
+                    whole.push((dir, key));
                 }
             }
         }
         Self {
             walled: walls.through(),
             whole,
+            roots,
         }
     }
 
@@ -371,6 +404,25 @@ impl Browsers {
         })
     }
 
+    /// Whether the walled folder `w`'s rules are its root's shared ones: it is a child of a Chromium root found, with
+    /// a name Chromium gives a profile, and keeps exactly the caches readable.
+    fn shared(&self, w: &Walled) -> bool {
+        let names = named(&w.path);
+        let Some(last) = names.last() else {
+            return false;
+        };
+        names.len() == w.key.len()
+            && is_profile_name(last)
+            && self
+                .roots
+                .iter()
+                .any(|(_, k)| k.len() + 1 == w.key.len() && starts(&w.key, k))
+            && w.allow.len() == CHROMIUM_CACHES.len()
+            && w.allow
+                .iter()
+                .all(|a| CHROMIUM_CACHES.iter().any(|c| c.eq_ignore_ascii_case(a)))
+    }
+
     /// Whether `path` is, or holds, a browser profile or root: deleting it would delete what is hidden in it.
     pub fn holds(&self, path: &Path) -> bool {
         let key = keyed(path);
@@ -382,10 +434,17 @@ impl Browsers {
     }
 
     /// Claude Code's deny rules for them, on this system. A path a rule can't start from (a share) gets none: the
-    /// by-name rules still hold there.
+    /// by-name rules still hold there. A Chromium root's profiles named as Chromium names them share one set of
+    /// rules ([`profile_names_rules_in`]), so a root with many profiles costs about as much as one; a profile that
+    /// keeps more readable than its caches (the way down to another profile inside it) keeps its own.
     pub fn deny_rules(&self) -> Vec<String> {
         let mut out = Vec::new();
-        for w in &self.walled {
+        for (root, _) in &self.roots {
+            out.extend(
+                profile_names_rules_in(&root.to_string_lossy(), Style::HOST).unwrap_or_default(),
+            );
+        }
+        for w in self.walled.iter().filter(|w| !self.shared(w)) {
             let allow: Vec<&str> = w.allow.iter().map(String::as_str).collect();
             out.extend(
                 profile_rules_in(&w.path.to_string_lossy(), &allow, Style::HOST)

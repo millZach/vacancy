@@ -22,7 +22,7 @@ const PRIVACY_ON: [string, string][] = [
   ['What it can do', 'Propose only. Its suggestions pass the Guard and your review, and nothing runs until you confirm.'],
 ];
 const PRIVACY_OFF: [string, string][] = [
-  ['What Claude sees', 'The scan’s names, sizes, counts and dates, and what’s inside files it opens on this PC.'],
+  ['What Claude sees', 'The scan’s names, sizes, counts and dates, and what’s inside files it opens on the drive you scanned. Your other drives stay closed to it.'],
   ['Where it goes', 'To Anthropic, through your own Claude Code and its account, including the contents of files it reads.'],
   ['Never', 'The places that always stay hidden. It can’t write, delete, run commands or go online.'],
   ['What it can do', 'Propose only. Its suggestions pass the Guard and your review, and nothing runs until you confirm.'],
@@ -111,7 +111,7 @@ export function PrivacyRow({
               ? 'Off, but Claude can’t open files for now: names, sizes, counts and dates only. Remembered.'
               : fixture
                 ? 'Off: Claude can read files in the fixture folder, except hidden places. Remembered.'
-                : 'Off: Claude can read files, except hidden places. Remembered.'}
+                : 'Off: Claude can read files on the drive you scanned, except hidden places. Remembered.'}
         </span>
       </div>
       <button
@@ -186,7 +186,8 @@ export function PrivacyConfirm({ claude }: { claude: Claude }) {
       >
         <h2 id={title}>Let Claude read your files?</h2>
         <p className="dialog-lead">
-          With privacy mode off, Claude can open and read files {status?.fixture ? 'in the fixture folder' : 'anywhere on this PC'}.{' '}
+          With privacy mode off, Claude can open and read files{' '}
+          {status?.fixture ? 'in the fixture folder' : 'on the drive you scanned, but not on your other drives'}.{' '}
           <b>What’s inside them goes to Anthropic through your Claude Code.</b>
         </p>
         <p>It still can’t write, delete, run commands or go online, and it still only proposes. Nothing runs until you confirm.</p>
@@ -301,7 +302,18 @@ export function Dropped({ items, heading = 'Vacancy left out' }: { items: Claude
  * The header's control: "Rules only" while Claude is off; Claude's state once it's on. A click unfolds the Claude
  * panel beside the map; before there's a map it only says where Claude is.
  */
-export function ClaudeTrigger({ busy, failed, onOpen }: { busy: boolean; failed: boolean; onOpen: (() => void) | null }) {
+export function ClaudeTrigger({
+  busy,
+  failed,
+  closed = false,
+  onOpen,
+}: {
+  busy: boolean;
+  failed: boolean;
+  /** Claude can't open files on this scan though privacy mode is off (its answers say why). */
+  closed?: boolean;
+  onOpen: (() => void) | null;
+}) {
   const claude = useClaude();
   const status = claude?.status.phase === 'ready' ? claude.status.status : null;
   const on = isOn(claude);
@@ -315,7 +327,7 @@ export function ClaudeTrigger({ busy, failed, onOpen }: { busy: boolean; failed:
         ? 'Claude is working'
         : failed
           ? 'Claude · didn’t answer'
-          : !readsFiles(status)
+          : !readsFiles(status) || closed
             ? 'Claude on'
             : 'Claude on · reads files';
   const icon = busy ? <LoaderCircle size={12} className="tray-spin" aria-hidden /> : on ? <Mark size={12} /> : <Sparkles size={12} strokeWidth={2.2} aria-hidden />;

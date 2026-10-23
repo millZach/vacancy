@@ -219,6 +219,19 @@ export function readsFiles(status: ClaudeStatus): boolean {
   return !status.privacy && status.readsUnavailable === null;
 }
 
+/**
+ * Why Claude couldn't open files on this drive scan though privacy mode is off, from its answers: the core says so
+ * per scan when the rules that keep its hidden places from Claude are too many for Claude Code's settings.
+ */
+export function scanUnavailable(c: Conversation): string | null {
+  for (const e of c.entries) {
+    const bases = e.kind === 'job' ? [e.answer?.basis] : e.turns.map((t) => t.basis);
+    const why = bases.find((b) => b?.unavailable)?.unavailable;
+    if (why) return why;
+  }
+  return null;
+}
+
 /** Claude is on and signed in: jobs can run. */
 export function isOn(claude: Claude | null): boolean {
   return claude?.status.phase === 'ready' && claude.status.status.state === 'on';

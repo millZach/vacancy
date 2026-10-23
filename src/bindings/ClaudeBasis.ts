@@ -20,4 +20,9 @@ opened: Array<string>,
 /**
  * Reads Claude Code refused: an always-hidden place, or somewhere Claude may not read.
  */
-refused: Array<string>, };
+refused: Array<string>, 
+/**
+ * Why Claude couldn't open files for this answer though privacy mode is off (then `privacy` is true and `text`
+ * says the same): the panel's privacy row says it too, for the scan.
+ */
+unavailable: string | null, };

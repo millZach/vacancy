@@ -3,7 +3,8 @@
 // Pick the state with `&claude=off|notfound|signedout|checktimeout|checkerror|on|slow|error|timeout` (`checktimeout`
 // and `checkerror`: Claude is on, but asking Claude Code whether it's signed in timed out, or failed) and privacy mode with
 // `&privacy=on|off` (`&reads=unavailable`: privacy mode off can't let Claude open files, so calls run as if it were
-// on, saying why); `&claudeMs=` sets how long an answer takes (default 900 ms; `slow` takes 8 s, saying it's
+// on, saying why; `&reads=toobig`: the same for this scan only, because its rules are too many for Claude Code's
+// settings, which the panel learns from the first answer); `&claudeMs=` sets how long an answer takes (default 900 ms; `slow` takes 8 s, saying it's
 // slow after 1.5 s). The answers follow the approved prototype's (prototype/ai-advisor, variant B).
 import type {
   ClaudeAbout,
@@ -55,9 +56,10 @@ export interface MockClaudeOptions {
   claudeMs?: number;
   /**
    * `unavailable`: privacy mode off can't let Claude open files here (the core's `readsUnavailable`), so every call
-   * runs as if it were on, and says why.
+   * runs as if it were on, and says why. `toobig`: the same for the scans only (the core's `too_big_on`), so the
+   * status says nothing and each answer says why.
    */
-  reads?: 'unavailable';
+  reads?: 'unavailable' | 'toobig';
 }
 
 /** One chat, as the core keeps it: what it's about, the privacy mode it began in, its turns, and whether it ended. */
@@ -125,6 +127,9 @@ const BASIS_ON = 'From names, sizes and dates only. Claude didn’t open any fil
 /** What the core says when no rule can keep a moved Claude Code folder hidden (`runner::reads_unavailable_in`). */
 export const READS_UNAVAILABLE =
   'Claude can’t open files for now: Vacancy can’t name the folder \\\\nas\\home\\claude in a rule that keeps it hidden from Claude, so Claude gets names, sizes, counts and dates only.';
+/** What the core says when a scan's rules would be too big for Claude Code's settings (`runner::settings_too_big`). */
+export const READS_TOO_BIG =
+  'Claude can’t open files on this scan: the rules that keep this drive’s browser profiles and other hidden places from Claude would be 2148 KB, more than Claude Code takes (1536 KB), so Claude gets names, sizes, counts and dates only.';
 
 /** One of Claude's own items, before the mock adds it: where its tile is carved from, and what it says. */
 interface Item {
@@ -360,8 +365,10 @@ export function createMockClaude(
   let setting = options.privacy !== 'off';
   /** As the core, when no rule could keep Claude where it may read (`&reads=unavailable`): why. */
   const unavailable = options.reads === 'unavailable' ? READS_UNAVAILABLE : null;
+  /** As the core, when the scan's rules wouldn't fit in Claude Code's settings (`&reads=toobig`): why, per answer. */
+  const tooBig = options.reads === 'toobig' ? READS_TOO_BIG : null;
   /** Privacy mode for a call: on, or off with reads unavailable, when the core runs it as if it were on. */
-  const calls = () => setting || unavailable !== null;
+  const calls = () => setting || unavailable !== null || tooBig !== null;
   const canned = platform === 'windows' ? windows() : macos();
   const requests = new Map<string, { timers: number[]; finish: (failure: ClaudeFailure) => void }>();
   let next = 0;
@@ -387,15 +394,23 @@ export function createMockClaude(
     hidden: structuredClone(HIDDEN),
   });
 
-  const basis = (opened: string[]): ClaudeBasis =>
-    calls()
-      ? { privacy: true, text: !setting && unavailable !== null ? unavailable : BASIS_ON, opened: [], refused: [] }
+  const basis = (opened: string[]): ClaudeBasis => {
+    const why = setting ? null : (unavailable ?? tooBig);
+    return calls()
+      ? { privacy: true, text: why ?? BASIS_ON, opened: [], refused: [], unavailable: why }
       : {
           privacy: false,
-          text: opened.length === 0 ? 'Claude could open files, but opened none for this answer.' : `Claude opened ${opened[0]}.`,
+          text:
+            opened.length === 0
+              ? 'Claude could open files on the drive you scanned, but opened none for this answer.'
+              : opened.length === 1
+                ? `Claude opened ${opened[0]}, from the drive you scanned.`
+                : `Claude opened ${opened.length} files from the drive you scanned, like ${opened[0]}.`,
           opened,
           refused: [],
+          unavailable: null,
         };
+  };
 
   const refreshed = (scan: MockClaudeScan): ClaudeRefreshed => ({
     revision: ++scan.revision,

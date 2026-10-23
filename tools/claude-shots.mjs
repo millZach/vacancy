@@ -8,7 +8,8 @@
 // Past runs, then each other state on a fresh page (not found, not signed in, a sign-in check that timed out or
 // failed, slow with Cancel, cancelled, an error and a timeout in Claude's words, off again with Claude's items still
 // in the plan and the panel folded again, a pick set aside because the plan changed while Claude picked, and one
-// settled by a later edit, and privacy mode off with reads unavailable, saying why), a macOS pass (no Tidy up
+// settled by a later edit, and privacy mode off with reads unavailable, or with a scan whose rules are too many for
+// Claude Code's settings, each saying why), a macOS pass (no Tidy up
 // layouts) and a 1024x700 pass.
 //
 //   npm run dev                       (the UI on the mock bridge, http://localhost:1420)
@@ -215,6 +216,11 @@ async function windows() {
   await confirm.waitFor();
   await settle(page, 300);
   check(await has(confirm.getByText('Keys and sign-ins')), 'privacy confirm: lists what always stays hidden');
+  check(
+    await has(confirm.getByText('Claude can open and read files on the drive you scanned, but not on your other drives', { exact: false })),
+    'privacy confirm: Claude reads the drive you scanned only',
+  );
+  check(!(await has(confirm.getByText('anywhere', { exact: false }))), 'privacy confirm: never "anywhere"');
   await shot(page, '20-privacy-confirm');
   await confirm.getByRole('button', { name: 'Turn privacy mode off' }).click();
   await settle(page);
@@ -223,8 +229,14 @@ async function windows() {
   check((await p.locator('.cp-entry').count()) === 0, 'privacy: nothing of the conversation is left');
   await shot(page, '20b-privacy-ended');
   check(await has(page.getByRole('button', { name: /^Claude on · reads files/ })), 'privacy off: the header says so');
+  check(
+    await has(p.getByText('Off: Claude can read files on the drive you scanned, except hidden places.', { exact: false })),
+    'privacy off: the privacy row says the drive you scanned',
+  );
+  check(await has(p.getByText('I can open files on the drive you scanned', { exact: false })), 'privacy off: the panel says the drive you scanned');
   const review2 = await job(page, 'Review my plan', 'reviewPlan');
   check(await has(review2.locator('.cl-basis.is-open')), 'privacy off: the answer says which files Claude opened');
+  check(await has(review2.locator('.cl-basis').getByText('from the drive you scanned', { exact: false })), 'privacy off: the answer says it read the drive you scanned');
   await into(review2.locator('.cl-basis'));
   await shot(page, '21-review-privacy-off');
   await p.getByRole('switch', { name: 'Privacy mode' }).click();
@@ -383,6 +395,21 @@ async function states() {
     check(await has(review.getByText('Claude gets names, sizes, counts and dates only', { exact: false })), 'reads unavailable: the answer says why');
     check(!(await has(review.getByText('Claude opened', { exact: false }))), 'reads unavailable: Claude opened nothing');
     await shot(page, '39b-reads-unavailable');
+    await page.close();
+  }
+  {
+    // Privacy mode off, but this scan's rules are too many for Claude Code's settings: the answer says why, and from
+    // then on the panel's privacy row does too.
+    const page = await open('fixture=windows&claude=on&privacy=off&reads=toobig&claudeMs=300');
+    await page.getByRole('button', { name: 'Build a plan' }).click();
+    check(await has(panel(page).getByText('Off: Claude can read files on the drive you scanned', { exact: false })), 'too big: off until an answer says otherwise');
+    const review = await job(page, 'Review my plan', 'reviewPlan');
+    check(await has(review.getByText('Claude can’t open files on this scan', { exact: false })), 'too big: the answer says why');
+    check(!(await has(review.getByText('Claude opened', { exact: false }))), 'too big: Claude opened nothing');
+    check(await has(panel(page).getByText('Off, but Claude can’t open files for now', { exact: false })), 'too big: the privacy row says so');
+    check(await has(panel(page).getByRole('note').getByText('Claude can’t open files on this scan', { exact: false })), 'too big: the panel says why');
+    check(await has(page.getByRole('button', { name: /^Claude on: show/ })), 'too big: the header no longer says Claude reads files');
+    await shot(page, '39c-reads-too-big');
     await page.close();
   }
 }

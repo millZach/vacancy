@@ -6,19 +6,21 @@
 //! claude -p --setting-sources "" --strict-mcp-config --disable-slash-commands --no-session-persistence
 //!        --permission-prompts none --output-format json --json-schema <schema> --system-prompt <Vacancy's>
 //!        --tools "" --settings <file: deny rules>                                         (privacy mode on)
-//!        --tools Read,Glob,Grep --settings <file: deny and allow rules> --add-dir <roots...> (privacy mode off)
+//!        --tools Read,Glob,Grep --settings <file: deny and allow rules> --add-dir <root>   (privacy mode off)
 //! ```
 //!
 //! The prompt goes over standard input: `--add-dir` and `--tools` take any number of values and would swallow a
 //! prompt given after them, and a command line has a length limit a prompt mustn't meet. The settings go in a file
 //! Vacancy writes for the call (`--settings` takes a file's path or JSON), beside the call's empty folder and
 //! removed with it, for the same reason: the rules grow with long config paths and with each browser profile a
-//! scan finds. The file denies itself, because privacy mode off's roots are whole drives. A command still longer
-//! than [`MAX_COMMAND_UNITS`] isn't started. No `--model`: the account's default applies. The always-hidden places
-//! are `permissions.deny` rules Claude Code enforces (see [`super::hidden`]) in both modes, with the scan's browser
-//! profiles ([`Call::deny`]): with privacy mode on Claude has no tool to read with, so they are defence in depth
-//! there. With privacy mode off, reads are allowed on every drive, or in fixture mode only in the fixture
-//! folder: anything else would need a permission prompt, which `--permission-prompts none` refuses. In both modes
+//! scan finds. The file denies itself, because privacy mode off's root is a whole drive. A command still longer
+//! than [`MAX_COMMAND_UNITS`] isn't started, and neither is one whose settings fail [`check_settings`] (over
+//! [`MAX_SETTINGS_BYTES`], or anything Claude Code might drop without a word). No `--model`: the account's default
+//! applies. The always-hidden places are `permissions.deny` rules Claude Code enforces (see [`super::hidden`]) in
+//! both modes, with the scan's browser profiles ([`Call::deny`]): with privacy mode on Claude has no tool to read
+//! with, so they are defence in depth there. With privacy mode off, reads are allowed on the scanned drive only
+//! ([`Access::Drive`]: every other drive is denied), or in fixture mode only in the fixture folder: anything else
+//! would need a permission prompt, which `--permission-prompts none` refuses. In both modes
 //! Claude Code expands no `@` file mention and attaches nothing (`CLAUDE_CODE_DISABLE_ATTACHMENTS`,
 //! `CLAUDE_CODE_DISABLE_FILE_MENTIONS`), so a path the person types in a chat stays text.
 
@@ -31,7 +33,7 @@ use serde::Serialize;
 use serde_json::Value;
 use ts_rs::TS;
 
-use super::hidden;
+use super::{browsers, hidden};
 use crate::CancelToken;
 use crate::tools::{Limits, Status, run_contained};
 
@@ -61,10 +63,39 @@ pub const ENV_REMOVE: [&str; 1] = ["ANTHROPIC_API_KEY"];
 pub enum Access {
     /// Privacy mode on: no tools at all. Names, sizes, counts and dates come in the prompt.
     Private,
-    /// Privacy mode off: Read, Glob and Grep, anywhere under these folders (every drive's root, or in fixture mode
-    /// the fixture folder), except the always-hidden places.
+    /// Privacy mode off in fixture mode (and the probes): Read, Glob and Grep under these folders only, except the
+    /// always-hidden places. Reads anywhere else would need a permission prompt, which nobody answers.
     Read(Vec<PathBuf>),
+    /// Privacy mode off: Read, Glob and Grep on the drive that was scanned only, except the always-hidden places.
+    /// Every other drive is denied too ([`off_drive_rules_in`]).
+    Drive(Drive),
 }
+
+impl Access {
+    /// The folders Claude may read under, or `None` with privacy mode on.
+    pub fn roots(&self) -> Option<Vec<PathBuf>> {
+        match self {
+            Access::Private => None,
+            Access::Read(roots) => Some(roots.clone()),
+            Access::Drive(drive) => Some(vec![drive.root.clone()]),
+        }
+    }
+}
+
+/// The drive a call may read: the scan's, by its mount point (`C:\`, `/`, `/Volumes/USB`), and the other drives the
+/// drive list offers, which are denied by their mount points as well as by [`off_drive_rules_in`]'s own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Drive {
+    pub root: PathBuf,
+    pub others: Vec<PathBuf>,
+}
+
+/// The most bytes of settings Vacancy hands Claude Code, well below the 2 MiB Claude Code takes (a bigger
+/// `--settings` file makes it stop at startup). A call whose settings would be bigger runs as if privacy mode were
+/// on ([`settings_too_big`]), and one that still gets here isn't started. A `-p` call given a file that fails
+/// validation goes on without it, deny rules and all, without a word (`docs/proof/t12-invalid-settings-probe/`),
+/// and nothing in its output says so: [`check_settings`] is the guard.
+pub const MAX_SETTINGS_BYTES: usize = 1536 * 1024;
 
 /// One request: Vacancy's system prompt, the prompt, the JSON schema the answer must match, and the deny rules its
 /// scan adds to the always-hidden ones (the browser profiles it found: [`hidden::Hider::deny_rules`]).
@@ -302,6 +333,104 @@ pub fn read_settings_in(roots: &[PathBuf], config: &[PathBuf]) -> Value {
     })
 }
 
+/// The deny rules that keep Claude's reads on the drive at `root` (in `style`), with `others` the other drives'
+/// mount points. Deny rules win over the allow rule and `--add-dir`, and Claude Code checks them against a link's
+/// target too, so a junction or symlink on the drive that leads to another drive is refused as well.
+///
+/// - **Windows:** every other drive letter, whole (`//d`, `//d/**`): the drives plugged in after the scan too.
+/// - **A Mac's startup disk (`/`):** the scan covers the system volume and the Data volume, which firmlinks show
+///   inside `/` (`/Users`, `/Applications`). Every other volume is mounted under `/Volumes` (an external disk,
+///   and `Macintosh HD` itself, a link back to `/`) or `/System/Volumes` (the Data volume's own mount point,
+///   Preboot, VM and the rest of the container), so both are denied whole. That also hides the Data volume
+///   under its second name, `/System/Volumes/Data/Users/...`, where the rules built from the scan's paths (a
+///   browser profile at `/Users/alex/...`) wouldn't match: Claude reads it by the paths Vacancy shows.
+/// - **A drive mounted in a folder (`/Volumes/USB`, `C:\Mounts\USB`):** at each folder above it, every child but
+///   the next one on the way down ([`browsers::profile_rules_in`]), as far as the names are plain
+///   ([`browsers::plain`]); below a name that isn't, the reads there still need a prompt nobody answers.
+/// - **Every other drive the drive list offers,** by its mount point, wherever it is (unless it holds the drive).
+pub fn off_drive_rules_in(root: &str, others: &[String], style: Style) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |rules: Vec<String>| {
+        for rule in rules {
+            if !out.contains(&rule) {
+                out.push(rule);
+            }
+        }
+    };
+    let Some((drive, names)) = absolute_names(root, style) else {
+        return out;
+    };
+    let sep = if style == Style::Windows { "\\" } else { "/" };
+    let top = match drive {
+        Some(d) => format!("{d}:{sep}"),
+        None => "/".to_owned(),
+    };
+    if let Some(d) = drive {
+        for other in ('a'..='z').filter(|c| *c != d) {
+            push(vec![
+                format!("Read(//{other})"),
+                format!("Read(//{other}/**)"),
+            ]);
+        }
+    }
+    if drive.is_none() && names.is_empty() {
+        for dir in ["/Volumes", "/System/Volumes"] {
+            push(browsers::whole_rules_in(dir, style).unwrap_or_default());
+        }
+    }
+    let mut at = top.clone();
+    for name in &names {
+        if !browsers::plain(name) {
+            break;
+        }
+        push(browsers::profile_rules_in(&at, &[name], style).unwrap_or_default());
+        if !at.ends_with(sep) {
+            at.push_str(sep);
+        }
+        at.push_str(name);
+    }
+    let key = |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_lowercase()).collect() };
+    let here = (drive, key(&names));
+    for other in others {
+        let Some((d, n)) = absolute_names(other, style) else {
+            continue;
+        };
+        let n = key(&n);
+        let holds = d == here.0 && n.len() <= here.1.len() && n[..] == here.1[..n.len()];
+        if !holds {
+            push(browsers::whole_rules_in(other, style).unwrap_or_default());
+        }
+    }
+    out
+}
+
+/// The `--settings` JSON for privacy mode off in normal mode: Read allowed on the scanned drive only, every other
+/// drive denied ([`off_drive_rules_in`]), reads outside the working directories refused by Claude Code itself
+/// (`blockReadsOutsideWorkingDirectories`: the drive is the one `--add-dir` names), and the always-hidden places
+/// denied, Claude Code's and Codex's own folders where `config` puts them among them.
+pub fn drive_settings_in(drive: &Drive, config: &[PathBuf]) -> Value {
+    let root = drive.root.to_string_lossy();
+    let allow: Vec<String> = allow_rule_in(&root, Style::HOST).into_iter().collect();
+    let others: Vec<String> = drive
+        .others
+        .iter()
+        .map(|o| o.to_string_lossy().into_owned())
+        .collect();
+    let mut deny = hidden::deny_rules_in(config);
+    for rule in off_drive_rules_in(&root, &others, Style::HOST) {
+        if !deny.contains(&rule) {
+            deny.push(rule);
+        }
+    }
+    serde_json::json!({
+        "permissions": {
+            "allow": allow,
+            "deny": deny,
+            "blockReadsOutsideWorkingDirectories": true,
+        }
+    })
+}
+
 /// Why privacy mode off can't give Claude Read, Glob and Grep, in the panel's words, or `None` when it can: a moved
 /// Claude Code or Codex folder (`config`) no deny rule can name, or in fixture mode a fixture folder (`fixture`)
 /// no allow rule can spell exactly, so Claude couldn't be kept inside it. Every call then runs as if privacy mode
@@ -353,24 +482,115 @@ pub fn invocation(program: &Path, call: &Call, access: &Access, settings: &Path)
 
 /// The settings `call` runs with, in the file `file`: privacy mode's ([`private_settings_in`] or
 /// [`read_settings_in`]), with the call's own deny rules ([`Call::deny`]) and one for the file itself added.
+///
+/// With privacy mode on Claude has no tool to read with, so every deny rule is defence in depth there: when the
+/// call's own rules would push the settings over [`MAX_SETTINGS_BYTES`], they are left out and the always-hidden
+/// places' rules stay. With privacy mode off nothing is ever left out: settings over the cap aren't started
+/// ([`run_in`]), and the caller runs such a call as if privacy mode were on first ([`settings_too_big`]).
 pub fn call_settings_in(call: &Call, access: &Access, config: &[PathBuf], file: &Path) -> Value {
+    let settings = with_rules(access, &call.deny, config, file);
+    if *access == Access::Private && settings.to_string().len() > MAX_SETTINGS_BYTES {
+        return with_rules(access, &[], config, file);
+    }
+    settings
+}
+
+/// `access`'s settings with the deny rules `deny` and one for the settings file `file` added.
+fn with_rules(access: &Access, deny: &[String], config: &[PathBuf], file: &Path) -> Value {
     let mut settings = match access {
         Access::Private => private_settings_in(config),
         Access::Read(roots) => read_settings_in(roots, config),
+        Access::Drive(drive) => drive_settings_in(drive, config),
     };
     let own = cover_path_in(&file.to_string_lossy(), Style::HOST).map(|at| format!("Read(/{at})"));
-    if let Some(deny) = settings["permissions"]["deny"].as_array_mut() {
-        let mut have: std::collections::HashSet<String> = deny
+    if let Some(list) = settings["permissions"]["deny"].as_array_mut() {
+        let mut have: std::collections::HashSet<String> = list
             .iter()
             .filter_map(|r| r.as_str().map(str::to_owned))
             .collect();
-        for rule in call.deny.iter().cloned().chain(own) {
+        for rule in deny.iter().cloned().chain(own) {
             if have.insert(rule.clone()) {
-                deny.push(Value::String(rule));
+                list.push(Value::String(rule));
             }
         }
     }
     settings
+}
+
+/// Why `access`'s settings, with the deny rules `deny` (a scan's: [`hidden::Hider::deny_rules`]), would be too big
+/// for Claude Code, in the panel's words, or `None` when they fit under [`MAX_SETTINGS_BYTES`]. Then the call runs
+/// as if privacy mode were on, like any other reason reads are unavailable. Rules are never left out to fit.
+pub fn settings_too_big(deny: &[String], access: &Access) -> Option<String> {
+    settings_too_big_in(deny, access, hidden::config_dirs())
+}
+
+/// [`settings_too_big`] with Claude Code's and Codex's own folders where `config` puts them.
+pub fn settings_too_big_in(deny: &[String], access: &Access, config: &[PathBuf]) -> Option<String> {
+    if *access == Access::Private {
+        return None;
+    }
+    // The call's settings file is named for the call, under the app's data folder: a long name stands in for it.
+    let file = PathBuf::from(if cfg!(windows) { r"C:\" } else { "/" }).join("f".repeat(400));
+    let bytes = with_rules(access, deny, config, &file).to_string().len();
+    (bytes > MAX_SETTINGS_BYTES).then(|| too_big_words(bytes))
+}
+
+fn too_big_words(bytes: usize) -> String {
+    format!(
+        "Claude can't open files on this scan: the rules that keep this drive's browser profiles and other hidden \
+         places from Claude would be {} KB, more than Claude Code takes ({} KB), so Claude gets names, sizes, \
+         counts and dates only.",
+        bytes / 1024,
+        MAX_SETTINGS_BYTES / 1024
+    )
+}
+
+/// Checks the settings JSON `json` before Claude Code gets it, because a `-p` call drops a file that fails Claude
+/// Code's validation without a word, and its deny rules with it (`docs/proof/t12-invalid-settings-probe/`): at most
+/// [`MAX_SETTINGS_BYTES`], an object holding only `permissions`, which holds only `allow` and `deny` (lists of
+/// `Read(/...)` rules, each on one line) and `blockReadsOutsideWorkingDirectories` (`true`), and at least one deny
+/// rule. Vacancy writes nothing else, so anything else is a mistake of its own, and the call isn't started.
+pub fn check_settings(json: &str) -> Result<(), String> {
+    if json.len() > MAX_SETTINGS_BYTES {
+        return Err(too_big_words(json.len()));
+    }
+    let wrong = |why: &str| {
+        Err(format!(
+            "Vacancy didn't start Claude Code: its settings {why}."
+        ))
+    };
+    let Ok(Value::Object(top)) = serde_json::from_str::<Value>(json) else {
+        return wrong("aren't a JSON object");
+    };
+    if top.len() != 1 {
+        return wrong("hold more than permissions");
+    }
+    let Some(Value::Object(permissions)) = top.get("permissions") else {
+        return wrong("hold no permissions");
+    };
+    let rule = |r: &Value| {
+        r.as_str().is_some_and(|r| {
+            r.starts_with("Read(/") && r.ends_with(')') && !r.contains(['\n', '\r'])
+        })
+    };
+    for (key, value) in permissions {
+        let ok = match key.as_str() {
+            "allow" | "deny" => value.as_array().is_some_and(|list| list.iter().all(rule)),
+            "blockReadsOutsideWorkingDirectories" => *value == Value::Bool(true),
+            _ => false,
+        };
+        if !ok {
+            return wrong(&format!("have a {key} Claude Code may not take"));
+        }
+    }
+    if permissions
+        .get("deny")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty)
+    {
+        return wrong("deny nothing");
+    }
+    Ok(())
 }
 
 /// [`invocation`], with Claude Code's and Codex's own folders where `config` puts them.
@@ -390,7 +610,7 @@ pub fn invocation_in(
             "--settings".to_owned(),
             file,
         ]),
-        Access::Read(roots) => {
+        Access::Read(_) | Access::Drive(_) => {
             args.extend([
                 "--tools".to_owned(),
                 "Read,Glob,Grep".to_owned(),
@@ -398,7 +618,13 @@ pub fn invocation_in(
                 file,
                 "--add-dir".to_owned(),
             ]);
-            args.extend(roots.iter().map(|r| r.display().to_string()));
+            args.extend(
+                access
+                    .roots()
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|r| r.display().to_string()),
+            );
         }
     }
     Invocation {
@@ -617,6 +843,7 @@ fn run_in(
         )));
     }
     if let Some((path, json)) = &invocation.settings {
+        check_settings(json).map_err(Failure::error)?;
         let failed = |e: std::io::Error| {
             Failure::error(format!("Vacancy couldn't write Claude's settings: {e}"))
         };
@@ -957,18 +1184,26 @@ mod tests {
         }
     }
 
+    /// Privacy mode off in normal mode: Claude may read the scanned drive only. `--add-dir` and the one allow rule
+    /// name it; every other drive is denied (Windows: each other letter; a Mac's startup disk: `/Volumes` and
+    /// `/System/Volumes`; and the other drives the list offers by name), Claude Code refuses reads outside its
+    /// working directories itself, and the always-hidden places stay denied.
     #[test]
-    fn privacy_off_pins_the_exact_argv_and_env_with_read_tools_and_deny_rules() {
+    fn privacy_off_pins_the_exact_argv_and_env_with_the_scanned_drive_only() {
         let program = PathBuf::from("claude");
-        let roots = if cfg!(windows) {
-            vec![PathBuf::from(r"C:\"), PathBuf::from(r"D:\")]
+        let (root, other) = if cfg!(windows) {
+            (PathBuf::from(r"D:\"), PathBuf::from(r"C:\"))
         } else {
-            vec![PathBuf::from("/")]
+            (PathBuf::from("/"), PathBuf::from("/Volumes/USB"))
+        };
+        let drive = Drive {
+            root: root.clone(),
+            others: vec![other.clone()],
         };
         let inv = invocation(
             &program,
             &call(),
-            &Access::Read(roots.clone()),
+            &Access::Drive(drive.clone()),
             &settings_file(),
         );
         let mut expected: Vec<String> = LOCKED.iter().map(|s| (*s).to_owned()).collect();
@@ -976,32 +1211,190 @@ mod tests {
         expected.push("--settings".into());
         expected.push(settings_file().display().to_string());
         expected.push("--add-dir".into());
-        expected.extend(roots.iter().map(|r| r.display().to_string()));
-        assert_eq!(inv.args, expected);
+        expected.push(root.display().to_string());
+        assert_eq!(
+            inv.args, expected,
+            "the scanned drive is the only folder added"
+        );
         env_pinned(&inv);
         let settings = settings_of(&inv);
-        let mut want = read_settings(&roots);
+        let mut want = drive_settings_in(&drive, hidden::config_dirs());
         let deny = want["permissions"]["deny"].as_array_mut().unwrap();
         deny.push(json("Read(//d/BrowserData/Work/?*)"));
         deny.push(json(&own_rule()));
         assert_eq!(settings, want);
+        assert_eq!(
+            settings["permissions"]["blockReadsOutsideWorkingDirectories"],
+            Value::Bool(true)
+        );
         let allow: Vec<&str> = settings["permissions"]["allow"]
             .as_array()
             .unwrap()
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        if cfg!(windows) {
-            assert_eq!(allow, ["Read(//c/**)", "Read(//d/**)"]);
+        let deny: Vec<&str> = settings["permissions"]["deny"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        let off: Vec<String> = if cfg!(windows) {
+            assert_eq!(allow, ["Read(//d/**)"]);
+            ('a'..='z')
+                .filter(|c| *c != 'd')
+                .flat_map(|c| [format!("Read(//{c})"), format!("Read(//{c}/**)")])
+                .collect()
         } else {
             assert_eq!(allow, ["Read(//**)"]);
+            [
+                "Read(//Volumes)",
+                "Read(//Volumes/**)",
+                "Read(//System/Volumes)",
+                "Read(//System/Volumes/**)",
+                "Read(//Volumes/USB)",
+                "Read(//Volumes/USB/**)",
+            ]
+            .map(str::to_owned)
+            .to_vec()
+        };
+        for rule in &off {
+            assert!(deny.contains(&rule.as_str()), "{rule} in {deny:?}");
         }
-        let deny = settings["permissions"]["deny"].as_array().unwrap();
-        assert_eq!(deny.len(), hidden::deny_rules().len() + 2);
-        assert!(deny.iter().any(|d| d == "Read(//**/.ssh/**)"));
+        assert_eq!(deny.len(), hidden::deny_rules().len() + off.len() + 2);
+        assert!(deny.contains(&"Read(//**/.ssh/**)"));
         // Only Read, Glob and Grep: never a tool that writes, runs commands or goes online.
         let tools = &inv.args[inv.args.iter().position(|a| a == "--tools").unwrap() + 1];
         assert_eq!(tools, "Read,Glob,Grep");
+        assert!(check_settings(&settings.to_string()).is_ok());
+    }
+
+    /// A drive mounted in a folder (an external disk under `/Volumes`): at each folder above it, every child but
+    /// the next on the way down is denied, and other drives the list offers by name; a drive that holds it isn't.
+    #[test]
+    fn a_drive_in_a_folder_denies_everything_beside_the_way_down() {
+        let rules = off_drive_rules_in(
+            "/Volumes/USB",
+            &["/".into(), "/Volumes/Other".into()],
+            Style::Unix,
+        );
+        let mut want = browsers::profile_rules_in("/", &["Volumes"], Style::Unix).unwrap();
+        want.extend(browsers::profile_rules_in("/Volumes", &["USB"], Style::Unix).unwrap());
+        want.extend(browsers::whole_rules_in("/Volumes/Other", Style::Unix).unwrap());
+        assert_eq!(rules, want);
+        assert!(
+            !rules
+                .iter()
+                .any(|r| r == "Read(//**)" || r == "Read(//Volumes/**)")
+        );
+        // A name the complement can't spell stops the way down there: no rule can hide less than it means.
+        let rules = off_drive_rules_in("/Volumes/Zoë", &[], Style::Unix);
+        assert_eq!(
+            rules,
+            browsers::profile_rules_in("/", &["Volumes"], Style::Unix).unwrap()
+        );
+        // On Windows the letters, and the way down to a folder mount.
+        let rules = off_drive_rules_in(
+            r"C:\Mounts\USB",
+            &[r"C:\".into(), r"E:\".into()],
+            Style::Windows,
+        );
+        assert!(
+            rules.contains(&"Read(//e/**)".to_owned())
+                && rules.contains(&"Read(//d/**)".to_owned())
+        );
+        assert!(!rules.iter().any(|r| r == "Read(//c/**)"));
+        assert!(rules.iter().any(|r| r.starts_with("Read(//c/[")));
+        assert!(rules.iter().any(|r| r.starts_with("Read(//c/Mounts/[")));
+    }
+
+    /// The settings check: what Vacancy writes passes; something Claude Code would drop without a word doesn't, and
+    /// neither does a file over the cap.
+    #[test]
+    fn the_settings_check_refuses_what_claude_code_would_drop() {
+        let ok = private_settings_in(&[]).to_string();
+        assert!(check_settings(&ok).is_ok());
+        for bad in [
+            "[]",
+            "{",
+            r#"{"permissions":{"deny":["Read(//**/.ssh/**)"]},"model":"x"}"#,
+            r#"{"permissions":{"deny":["Read(//**/.ssh/**)"],"defaultMode":12345}}"#,
+            r#"{"permissions":{"deny":["Read(//**/.ssh/**)", 42]}}"#,
+            r#"{"permissions":{"deny":["Bash(rm -rf /)"]}}"#,
+            r#"{"permissions":{"deny":["Read(//a\nb)"]}}"#,
+            r#"{"permissions":{"deny":[]}}"#,
+            r#"{"permissions":{"allow":["Read(//**)"]}}"#,
+            r#"{"permissions":{"deny":["Read(//x)"],"blockReadsOutsideWorkingDirectories":false}}"#,
+        ] {
+            assert!(check_settings(bad).is_err(), "{bad}");
+        }
+        let big = serde_json::json!({"permissions": {"deny": vec!["Read(//x/y)"; MAX_SETTINGS_BYTES / 10]}})
+            .to_string();
+        assert!(big.len() > MAX_SETTINGS_BYTES);
+        let why = check_settings(&big).unwrap_err();
+        assert!(why.contains("more than Claude Code takes"), "{why}");
+    }
+
+    /// Settings over the cap: with privacy mode off the call runs as if it were on (the caller's choice, from
+    /// [`settings_too_big`]), and one that still gets here isn't started; with privacy mode on (no tools) the scan's
+    /// own rules are left out and the always-hidden ones stay.
+    #[test]
+    fn settings_over_the_cap_fail_closed() {
+        let mut huge = call();
+        huge.deny = (0..40_000)
+            .map(|i| format!("Read(//d/BrowserData/Profile {i}/?*)"))
+            .collect();
+        let drive = Access::Drive(Drive {
+            root: PathBuf::from(if cfg!(windows) { r"D:\" } else { "/" }),
+            others: Vec::new(),
+        });
+        let why = settings_too_big_in(&huge.deny, &drive, &[]).expect("over the cap");
+        assert!(
+            why.starts_with("Claude can't open files on this scan"),
+            "{why}"
+        );
+        assert!(settings_too_big_in(&call().deny, &drive, &[]).is_none());
+        assert!(settings_too_big_in(&huge.deny, &Access::Private, &[]).is_none());
+        // Privacy mode off: nothing left out, so the launch check refuses it before anything starts.
+        let inv = invocation_in(Path::new("claude"), &huge, &drive, &[], &settings_file());
+        let (_, text) = inv.settings.as_ref().unwrap();
+        assert!(text.len() > MAX_SETTINGS_BYTES);
+        assert!(text.contains("Profile 39999"), "never truncated");
+        assert!(check_settings(text).is_err());
+        let work = tempfile::tempdir().unwrap();
+        let cli = ClaudeCode {
+            program: work.path().join("no-such-claude.exe"),
+            access: drive,
+            work: work.path().to_path_buf(),
+        };
+        let (result, _) =
+            cli.call_recorded_in(&huge, &[], &Control::new(CancelToken::new()), &mut |_| {});
+        match result {
+            Err(Failure::Error { message }) => {
+                assert!(message.contains("more than Claude Code takes"), "{message}")
+            }
+            other => panic!("not started: {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_dir(work.path()).unwrap().count(),
+            0,
+            "no settings file was written"
+        );
+        // Privacy mode on: the scan's rules go, the always-hidden places' stay.
+        let inv = invocation_in(
+            Path::new("claude"),
+            &huge,
+            &Access::Private,
+            &[],
+            &settings_file(),
+        );
+        let settings = settings_of(&inv);
+        let mut want = private_settings_in(&[]);
+        want["permissions"]["deny"]
+            .as_array_mut()
+            .unwrap()
+            .push(json(&own_rule()));
+        assert_eq!(settings, want);
     }
 
     /// The rules never go on the command line, so it stays short however long the config folders' paths are and

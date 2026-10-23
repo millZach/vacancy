@@ -13,7 +13,7 @@ import {
   type MockOptions,
   type RunListing,
 } from '../bridge';
-import { READS_UNAVAILABLE } from '../bridge/mockClaude';
+import { READS_TOO_BIG, READS_UNAVAILABLE } from '../bridge/mockClaude';
 import { FIRST_QUESTION, PANEL_KEY } from './ClaudeProvider';
 import { pickOffer, type Conversation, type JobEntry } from './context';
 import { DrivesProvider } from '../drives/DrivesProvider';
@@ -263,6 +263,33 @@ describe('privacy mode', () => {
     const review = await job('Review my plan', 'reviewPlan');
     expect(within(review).getByText(READS_UNAVAILABLE)).toBeInTheDocument();
     expect(within(review).queryByText(/Claude opened/)).toBeNull();
+  });
+
+  it('with privacy mode off, says Claude reads the drive you scanned only, in the confirm, the panel and each answer', async () => {
+    await toMap(windows({ claude: 'on' }));
+    await openPlan();
+    await userEvent.click(within(panel()).getByRole('switch', { name: 'Privacy mode' }));
+    const ask = screen.getByRole('alertdialog', { name: 'Let Claude read your files?' });
+    expect(ask).toHaveTextContent('Claude can open and read files on the drive you scanned, but not on your other drives.');
+    expect(ask).not.toHaveTextContent(/anywhere/);
+    await userEvent.click(within(ask).getByRole('button', { name: 'Turn privacy mode off' }));
+    expect(await within(panel()).findByText(/Off: Claude can read files on the drive you scanned, except hidden places/)).toBeInTheDocument();
+    expect(within(panel()).getByText(/I can open files on the drive you scanned/)).toBeInTheDocument();
+    const review = await job('Review my plan', 'reviewPlan');
+    expect(within(review).getByText(/from the drive you scanned/)).toBeInTheDocument();
+  });
+
+  it('when a scan’s rules are too many for Claude Code, its answers and then the privacy row say why', async () => {
+    await toMap(windows({ claude: 'on', privacy: 'off', reads: 'toobig' }));
+    await openPlan();
+    expect(within(panel()).getByText(/Off: Claude can read files on the drive you scanned/)).toBeInTheDocument();
+    const review = await job('Review my plan', 'reviewPlan');
+    expect(within(review).getByText(READS_TOO_BIG)).toBeInTheDocument();
+    expect(within(review).queryByText(/Claude opened/)).toBeNull();
+    expect(await within(panel()).findByText(/Off, but Claude can’t open files for now/)).toBeInTheDocument();
+    expect(within(panel()).getByRole('note')).toHaveTextContent(READS_TOO_BIG);
+    expect(within(panel()).getByText(/I can see the names, sizes, counts and dates from this scan/)).toBeInTheDocument();
+    expect(within(header()).getByText('Claude on')).toBeInTheDocument();
   });
 
   it('every answer says what it was based on; changing the mode ends the conversation, and says so', async () => {
@@ -639,7 +666,7 @@ describe('the jobs', () => {
     // The old scan's answer comes anyway, with an item of Claude's: nothing is taken out of the new scan.
     const answer: ClaudeAnswer = {
       job: 'pickPlan',
-      basis: { privacy: true, text: 'From names, sizes and dates only.', opened: [], refused: [] },
+      basis: { privacy: true, text: 'From names, sizes and dates only.', opened: [], refused: [], unavailable: null },
       result: {
         kind: 'pick',
         summary: 'A pick.',
@@ -691,7 +718,7 @@ describe('the jobs', () => {
     await waitFor(() => expect(listeners).toHaveLength(2));
     const answer = (text: string): ClaudeAnswer => ({
       job: 'ask',
-      basis: { privacy: true, text: 'From names, sizes and dates only.', opened: [], refused: [] },
+      basis: { privacy: true, text: 'From names, sizes and dates only.', opened: [], refused: [], unavailable: null },
       result: { kind: 'ask', reply: text, followUps: [] },
       dropped: [],
       refreshed: null,
@@ -733,7 +760,7 @@ describe('the jobs', () => {
         requestId: 'claude-r1',
         answer: {
           job: 'ask',
-          basis: { privacy: true, text: 'From names, sizes and dates only.', opened: [], refused: [] },
+          basis: { privacy: true, text: 'From names, sizes and dates only.', opened: [], refused: [], unavailable: null },
           result: { kind: 'ask', reply: 'Build output; it comes back.', followUps: [] },
           dropped: [],
           refreshed: null,
@@ -767,7 +794,7 @@ describe('the jobs', () => {
       requestId: `claude-r${listeners.length}`,
       answer: {
         job: 'ask',
-        basis: { privacy: true, text: 'From names, sizes and dates only.', opened: [], refused: [] },
+        basis: { privacy: true, text: 'From names, sizes and dates only.', opened: [], refused: [], unavailable: null },
         result: { kind: 'ask', reply: text, followUps: ['Is it safe?'] },
         dropped: [],
         refreshed: null,

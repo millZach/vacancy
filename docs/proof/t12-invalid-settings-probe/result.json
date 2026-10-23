@@ -1,0 +1,55 @@
+{
+  "claudeCode": "2.1.309",
+  "date": "2026-10-23",
+  "exitCode": 0,
+  "stderr": "",
+  "settingsFile": {
+    "permissions": {
+      "allow": [
+        "Read(//d/tmp/claude-invalid-settings-probe-1/data/**)"
+      ],
+      "deny": [
+        "Read(//d/tmp/claude-invalid-settings-probe-1/data/canary.txt)",
+        "Read(//d/tmp/claude-invalid-settings-probe-1/settings.json)"
+      ],
+      "defaultMode": 12345
+    }
+  },
+  "canary": "CANARY-INVALID-SETTINGS-1792769524",
+  "canaryLeaked": true,
+  "is_error": false,
+  "subtype": "success",
+  "result": "Both reads succeeded.\n\n**canary.txt:**\n```\n1\tCANARY-INVALID-SETTINGS-1792769524\n2\t\n```\n\n**control.txt:**\n```\n1\tcontrol line: readable\n2\t\n```",
+  "permission_denials": [],
+  "model": [
+    "claude-haiku-5-5"
+  ],
+  "outputKeys": [
+    "api_error_status",
+    "duration_api_ms",
+    "duration_ms",
+    "fast_mode_disabled_reason",
+    "fast_mode_state",
+    "first_content_frame_ms",
+    "is_error",
+    "modelUsage",
+    "num_turns",
+    "permission_denials",
+    "queued_turn_count",
+    "result",
+    "result_index",
+    "safety_stops",
+    "session_id",
+    "stop_reason",
+    "subagent_stats",
+    "subtype",
+    "terminal_reason",
+    "time_to_request_ms",
+    "total_cost_usd",
+    "ttft_ms",
+    "ttft_stream_ms",
+    "type",
+    "usage",
+    "uuid"
+  ]
+}

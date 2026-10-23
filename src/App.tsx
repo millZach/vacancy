@@ -4,7 +4,7 @@ import { Atlas } from './atlas/Atlas';
 import { DrivesPending } from './atlas/DrivesPending';
 import { ClaudeNote, ClaudeTrigger, PrivacyConfirm } from './claude/bits';
 import { ClaudeProvider } from './claude/ClaudeProvider';
-import { useClaude } from './claude/context';
+import { scanUnavailable, useClaude } from './claude/context';
 import { useDrives } from './drives/context';
 import { DriveMenu } from './drives/DriveMenu';
 import { reclaimableOf, reportOf } from './drives/session';
@@ -63,13 +63,14 @@ function Screens() {
   const busy = entries.some((e) => e.phase === 'working' || e.phase === 'slow');
   const last = entries.at(-1);
   const failed = last?.phase === 'failed' && last.failure?.kind !== 'cancelled';
+  const closed = where && claude ? scanUnavailable(claude.conversation(where)) !== null : false;
 
   return (
     <>
       <Shell
         platform={bridge.platform}
         drive={ready && <DriveMenu drives={ready} />}
-        advisor={<ClaudeTrigger busy={busy} failed={failed} onOpen={where && claude ? () => claude.setFolded(false) : null} />}
+        advisor={<ClaudeTrigger busy={busy} failed={failed} closed={closed} onOpen={where && claude ? () => claude.setFolded(false) : null} />}
         reclaimable={onMap && scan && planning ? reclaimableOf(scan) : null}
         lit={(!!report && report.freedBytes > 0) || (!!past && past.freedBytes > 0)}
         history={ready && <HistoryMenu locked={ready.locked} onOpen={setPast} {...(bridge.platform === 'windows' ? { onUndo: undoTidy } : {})} />}

@@ -13,7 +13,8 @@
 // mock: `&claude=off` (the default: off until turned on), `notfound`, `signedout`, `on`, `slow` (answers take 8 s,
 // slow after 1.5 s), `error` (a rate limit) or `timeout`; `&privacy=off` starts with privacy mode off; and
 // `&claudeMs=3000` makes answers take three seconds (default 0.9); `&reads=unavailable` says privacy mode off can't
-// let Claude open files, so calls run as if it were on. The mock never calls Claude.
+// let Claude open files, so calls run as if it were on, and `&reads=toobig` says the same of the scan only (its rules
+// are too many for Claude Code's settings), in each answer. The mock never calls Claude.
 import { isTauri } from '@tauri-apps/api/core';
 import { fixtures, isFixtureName } from './fixtures';
 import { createMockBridge } from './mock';
@@ -68,6 +69,6 @@ export function defaultBridge(search = window.location.search): Bridge {
     ...(claude ? { claude } : {}),
     ...(privacy === 'on' || privacy === 'off' ? { privacy } : {}),
     ...(claudeMs !== null && Number.isFinite(Number(claudeMs)) ? { claudeMs: Number(claudeMs) } : {}),
-    ...(reads === 'unavailable' ? { reads } : {}),
+    ...(reads === 'unavailable' || reads === 'toobig' ? { reads } : {}),
   });
 }

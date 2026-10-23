@@ -859,19 +859,127 @@ fn status_reads_off_until_turned_on_and_asks_sign_in_only_when_on() {
     assert!(!ready.privacy && ready.fixture);
 }
 
+/// With privacy mode off Claude may read the fixture folder only in fixture mode, and otherwise only the drive that
+/// was scanned, with every other drive the list offers denied by name.
 #[test]
-fn fixture_mode_lets_claude_read_only_the_fixture() {
+fn claude_reads_only_the_fixture_or_the_scanned_drive() {
     let case = case();
-    assert_eq!(
-        claude::readable(&case.env, &["C:\\".into(), "D:\\".into()]),
-        vec![case.root.clone()]
-    );
+    let drives: Vec<String> = vec!["C:\\".into(), "D:\\".into(), "E:\\".into()];
+    let fixture = claude::access(&case.env, "D:\\", &drives);
+    assert_eq!(fixture, Access::Read(vec![case.root.clone()]));
+    assert_eq!(fixture.roots(), Some(vec![case.root.clone()]));
     let mut real = case.env.clone();
     real.confined_to = None;
+    let drive = claude::access(&real, "D:\\", &drives);
     assert_eq!(
-        claude::readable(&real, &["C:\\".into(), "D:\\".into()]),
-        vec![PathBuf::from("C:\\"), PathBuf::from("D:\\")]
+        drive,
+        Access::Drive(claude::runner::Drive {
+            root: PathBuf::from("D:\\"),
+            others: vec![PathBuf::from("C:\\"), PathBuf::from("E:\\")],
+        })
     );
+    assert_eq!(drive.roots(), Some(vec![PathBuf::from("D:\\")]));
+    assert_eq!(Access::Private.roots(), None);
+}
+
+/// A scan with many browser profiles. 84 profiles in one Chromium root share their root's rules, so the settings
+/// stay small and Claude may read; hundreds of apps that are each a profile of their own (Electron apps keep that
+/// layout) would need settings bigger than Claude Code takes, so the call runs as if privacy mode were on, with
+/// why, and no rule is left out of a call that reads.
+#[test]
+fn many_profiles_share_their_roots_rules_or_fail_closed() {
+    let case = case();
+    let mut env = case.env.clone();
+    env.confined_to = None;
+    let mount = if cfg!(windows) { r"D:\" } else { "/" };
+    let wanted = claude::access(&env, mount, &[]);
+    let profiles = case.root.join("Many").join("User Data");
+    support::write_file(&profiles.join("Local State"), 16);
+    for i in 1..=84 {
+        let p = profiles.join(format!("Profile {i}"));
+        for f in ["Preferences", "History", "Cache/data_0"] {
+            support::write_file(&p.join(f), 16);
+        }
+    }
+    let scanned = scan(&case.root, &env);
+    let rules = claude::hidden::Hider::of(&scanned.snapshot, &env).deny_rules();
+    let bytes: usize = rules.iter().map(String::len).sum();
+    let one: usize = claude::browsers::profile_rules_in(
+        &profiles.join("Profile 1").to_string_lossy(),
+        claude::browsers::CHROMIUM_CACHES,
+        claude::runner::Style::HOST,
+    )
+    .unwrap()
+    .iter()
+    .map(String::len)
+    .sum();
+    assert!(
+        bytes < 20 * one,
+        "84 profiles in one root cost {bytes} bytes, one profile's own rules {one}"
+    );
+    assert!(
+        !rules.iter().any(|r| r.contains("Profile 7/")),
+        "no profile's own rules"
+    );
+    let (access, why) = claude::access_on(&scanned, &env, Some(wanted.clone()));
+    assert_eq!((access, why), (wanted.clone(), None));
+    println!("84 profiles in one root: {bytes} bytes of rules (one profile's own: {one})");
+
+    // Apps that are each a profile of their own: one set of rules each.
+    for i in 1..=400 {
+        let p = case.root.join("Apps").join(format!("App {i}"));
+        for f in ["Preferences", "History"] {
+            support::write_file(&p.join(f), 16);
+        }
+    }
+    let scanned = scan(&case.root, &env);
+    let rules = claude::hidden::Hider::of(&scanned.snapshot, &env).deny_rules();
+    let (access, why) = claude::access_on(&scanned, &env, Some(wanted.clone()));
+    assert_eq!(access, Access::Private, "as if privacy mode were on");
+    let why = why.expect("says why");
+    assert!(
+        why.starts_with("Claude can't open files on this scan"),
+        "{why}"
+    );
+    assert!(claude::too_big_on(&scanned, &env, &Access::Private).is_none());
+    assert_eq!(
+        claude::access_on(&scanned, &env, None),
+        (Access::Private, None)
+    );
+    // The call it makes then: no tools and no folder to read, and settings Claude Code takes.
+    let prepared = claude::prepare(
+        &Job::ExplainFolders,
+        &scanned,
+        &env,
+        access.roots().as_deref(),
+        &CancelToken::new(),
+    )
+    .unwrap();
+    assert!(prepared.call().prompt.contains("Privacy mode is on"));
+    let work = tempfile::tempdir().unwrap();
+    let file = work.path().join("call.settings.json");
+    let inv = claude::runner::invocation(Path::new("claude"), prepared.call(), &access, &file);
+    let tools = &inv.args[inv.args.iter().position(|a| a == "--tools").unwrap() + 1];
+    assert_eq!(tools, "");
+    assert!(!inv.args.iter().any(|a| a == "--add-dir"));
+    let (_, json) = inv.settings.as_ref().unwrap();
+    assert!(claude::runner::check_settings(json).is_ok());
+    // With privacy mode off, the same rules would be over the cap, whole: the call would never start.
+    let reading = claude::runner::invocation(Path::new("claude"), prepared.call(), &wanted, &file);
+    let (_, json) = reading.settings.as_ref().unwrap();
+    assert!(json.len() > claude::runner::MAX_SETTINGS_BYTES);
+    let parsed: Value = serde_json::from_str(json).unwrap();
+    let deny: std::collections::HashSet<&str> = parsed["permissions"]["deny"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(
+        rules.iter().all(|r| deny.contains(r.as_str())),
+        "no rule left out"
+    );
+    assert!(claude::runner::check_settings(json).is_err());
 }
 
 // ---------------------------------------------------------------------------------------------------------------

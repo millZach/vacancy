@@ -945,6 +945,178 @@ fn scanned_profile_checks(checks: &mut Checks) -> usize {
     dummy.hidden.len()
 }
 
+/// A Chromium root's shared rules for its profiles (`claude::browsers::profile_names_rules_in`): every profile
+/// Chromium names (`Default`, `Profile *`, `Guest Profile`, `System Profile`), those made after the scan too, is
+/// hidden but its caches, at every adversarial root name; the profile itself, the root's own children and a
+/// profile of another name are left to their own rules.
+fn shared_profile_checks(style: Style, checks: &mut Checks) {
+    let b = base(style);
+    // Every sixth adversarial name: each root's rules are long, and the checks file has to fit in one string.
+    let mut roots: Vec<String> = names(style)
+        .iter()
+        .step_by(6)
+        .map(|n| path(style, b, &[n, "User Data"]))
+        .collect();
+    roots.push(path(style, b, &["BrowserData"]));
+    for root in &roots {
+        let rules = browsers::profile_names_rules_in(root, style)
+            .unwrap_or_else(|| panic!("{root:?} has rules"));
+        for (child, expect) in [
+            (&["Profile 7", "History"][..], true),
+            (&["Profile 12", "Sessions", "Session_1"], true),
+            (&["Profile 99", "Preferences"], true),
+            (&["PROFILE 3", "Service Worker", "CacheStorage", "x"], true),
+            (&["Default", "Login Data"], true),
+            (&["Guest Profile", "Cookies"], true),
+            (&["System Profile", "Web Data"], true),
+            (&["Profile 7", "Cache", "Cache_Data", "f_0001"], false),
+            (&["Profile 7", "Code Cache", "js", "x"], false),
+            (&["Default", "GPUCache", "data_0"], false),
+            (&["Profile 7"], false),
+            (&["ShaderCache", "x"], false),
+            (&["Local State"], false),
+            (&["Work", "History"], false),
+        ] {
+            checks.add(
+                style,
+                "deny",
+                &rules,
+                path(style, root, child),
+                expect,
+                "a root's profiles, by the names Chromium gives them",
+            );
+        }
+    }
+}
+
+/// With privacy mode off in normal mode Claude may read the scanned drive only (`runner::off_drive_rules_in`): a
+/// browser profile on another drive (the review's `C:\BrowserData\Work` with `D:\` scanned) is denied whole, and so
+/// is every other drive; on a Mac, scanning `/` denies `/Volumes` and `/System/Volumes` (other disks, and the Data
+/// volume's second name), and scanning `/Volumes/X` allows `/Volumes/X` only.
+fn drive_scope_checks(style: Style, checks: &mut Checks) -> usize {
+    let mut n = 0;
+    let mut case = |root: &str, others: &[&str], deny: &[(&str, bool)], allow: &[(&str, bool)]| {
+        let others: Vec<String> = others.iter().map(|s| (*s).to_owned()).collect();
+        let rules = runner::off_drive_rules_in(root, &others, style);
+        let allowed = vec![allow_rule_in(root, style).expect("a drive's root is spelled exactly")];
+        for (p, expect) in deny {
+            checks.add(
+                style,
+                "deny",
+                &rules,
+                (*p).to_owned(),
+                *expect,
+                "the scanned drive only",
+            );
+            n += 1;
+        }
+        for (p, expect) in allow {
+            checks.add(
+                style,
+                "allow",
+                &allowed,
+                (*p).to_owned(),
+                *expect,
+                "the scanned drive's allow rule",
+            );
+            n += 1;
+        }
+    };
+    match style {
+        Style::Windows => {
+            case(
+                r"D:\",
+                &[r"C:\", r"E:\"],
+                &[
+                    (r"C:\BrowserData\Work\Preferences", true),
+                    (r"C:\BrowserData\Work\Sessions\Session_1", true),
+                    (r"C:\BrowserData\Work\Cache\data_0", true),
+                    (r"C:\Users\alex\Documents\notes.txt", true),
+                    (r"c:\users\alex\x", true),
+                    (r"E:\x", true),
+                    (r"Z:\a\b", true),
+                    (r"D:\Users\alex\Documents\notes.txt", false),
+                    (r"D:\BrowserData\Work\Cache\data_0", false),
+                    (r"d:\x", false),
+                ],
+                &[(r"D:\x\y", true), (r"C:\x", false), (r"E:\D\x", false)],
+            );
+            case(
+                r"C:\Mounts\USB",
+                &[r"C:\", r"E:\"],
+                &[
+                    (r"C:\Users\alex\x", true),
+                    (r"C:\Mounts\Other\x", true),
+                    (r"C:\Mounts\USBx\a", true),
+                    (r"C:\Mounts\x.txt", true),
+                    (r"C:\x.txt", true),
+                    (r"E:\x", true),
+                    (r"C:\Mounts\USB\x", false),
+                    (r"C:\mounts\usb\x", false),
+                    (r"C:\Mounts\USB\Users\alex\x", false),
+                ],
+                &[
+                    (r"C:\Mounts\USB\x", true),
+                    (r"C:\Mounts\x", false),
+                    (r"C:\Users\x", false),
+                ],
+            );
+        }
+        Style::Unix => {
+            case(
+                "/",
+                &["/Volumes/USB", "/Volumes/Backup"],
+                &[
+                    ("/Volumes/USB/x", true),
+                    ("/Volumes/Macintosh HD/Users/alex/x", true),
+                    ("/Volumes/new disk/x", true),
+                    ("/Volumes", true),
+                    ("/volumes/usb/x", true),
+                    (
+                        "/System/Volumes/Data/Users/alex/Library/Application Support/Google/Chrome/Default/Preferences",
+                        true,
+                    ),
+                    ("/System/Volumes/Data/Volumes/USB/x", true),
+                    ("/System/Volumes/Preboot/x", true),
+                    ("/Users/alex/Documents/notes.txt", false),
+                    ("/Applications/App.app/Contents/Info.plist", false),
+                    ("/System/Library/x", false),
+                    ("/VolumesX/a", false),
+                    ("/private/tmp/x", false),
+                ],
+                &[("/Users/alex/x", true), ("/Volumes/USB/x", true)],
+            );
+            case(
+                "/Volumes/USB",
+                &["/", "/Volumes/Backup"],
+                &[
+                    (
+                        "/Users/alex/Library/Application Support/Google/Chrome/Default/Preferences",
+                        true,
+                    ),
+                    ("/Users/alex/Documents/notes.txt", true),
+                    ("/Volumes/Backup/x", true),
+                    ("/Volumes/Other/x", true),
+                    ("/Volumes/USBx/a", true),
+                    ("/Volumes/x.txt", true),
+                    ("/System/Volumes/Data/Volumes/USB/x", true),
+                    ("/x", true),
+                    ("/Volumes/USB/x", false),
+                    ("/Volumes/usb/x", false),
+                    ("/Volumes/USB/Users/alex/x", false),
+                    ("/Volumes/USB", false),
+                ],
+                &[
+                    ("/Volumes/USB/x", true),
+                    ("/Users/alex/x", false),
+                    ("/Volumes/USBx/a", false),
+                ],
+            );
+        }
+    }
+    n
+}
+
 /// Allow rules exist only for roots they spell exactly, and match inside them only.
 fn allow_checks(style: Style, checks: &mut Checks) -> usize {
     let b = base(style);
@@ -1081,6 +1253,8 @@ fn claude_codes_matcher_gives_each_rule_exactly_its_meaning() {
         named_place_checks(style, &mut checks);
         browser_profile_checks(style, &mut checks);
         browser_wall_checks(style, &mut checks);
+        shared_profile_checks(style, &mut checks);
+        assert!(drive_scope_checks(style, &mut checks) > 20);
         spelled += allow_checks(style, &mut checks);
     }
     host_checks(&mut checks);
