@@ -438,6 +438,26 @@ describe('privacy mode', () => {
     expect(within(panel()).queryByText(/Off: Claude can read files/)).toBeNull();
   });
 
+  it('a Check again still out when Claude is turned off is dropped, so the panel stays off', async () => {
+    const bridge = windows({ claude: 'signedout', privacy: 'off' });
+    await toMap(bridge);
+    expect(within(panel()).getByRole('heading', { name: 'Sign in to Claude Code first.' })).toBeInTheDocument();
+    const signedIn = { ...(await bridge.claudeStatus()), state: 'on', privacy: false, check: { kind: 'passed' } } as const;
+    let answer: (s: typeof signedIn) => void = () => {};
+    const status = vi.spyOn(bridge, 'claudeStatus').mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Check again' }));
+    await waitFor(() => expect(status).toHaveBeenCalled());
+    // The person turns Claude off while that read is still out; it then answers for the mode that has ended.
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Turn off Claude' }));
+    expect(await within(panel()).findByRole('button', { name: 'Show Claude' })).toBeInTheDocument();
+    await act(async () => {
+      answer(signedIn);
+      await Promise.resolve();
+    });
+    expect(within(panel()).getByRole('button', { name: 'Show Claude' })).toBeInTheDocument();
+    expect(within(header()).queryByText('Claude on · reads files')).toBeNull();
+  });
+
   it('every answer says what it was based on; changing the mode ends the conversation, and says so', async () => {
     await toMap(windows({ claude: 'on' }));
     await openPlan();

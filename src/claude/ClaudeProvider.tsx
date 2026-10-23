@@ -177,27 +177,32 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     [edit],
   );
 
-  const recheck = useCallback(() => {
-    setChecking(true);
-    bridge
-      .claudeStatus()
-      .then(
-        (s) => {
-          ready(s);
-          // Back from not signed in (or a sign-in check that failed) with privacy mode off: Claude Code is checked
-          // before Claude opens files, if it hasn't passed already.
-          if (s.state === 'on' && !s.privacy && s.check.kind === 'unchecked') verify(false);
-        },
-        (error: unknown) => setStatus({ phase: 'error', message: errorMessage(error) }),
-      )
-      .finally(() => setChecking(false));
-  }, [bridge, verify]);
-
   /**
    * Goes up whenever Claude's mode changes (privacy mode either way, Claude on or off): a status read begun before
    * then answers for a mode that has ended, and is dropped.
    */
   const modeGen = useRef(0);
+
+  const recheck = useCallback(() => {
+    setChecking(true);
+    const gen = modeGen.current;
+    bridge
+      .claudeStatus()
+      .then(
+        (s) => {
+          if (gen !== modeGen.current) return;
+          ready(s);
+          // Back from not signed in (or a sign-in check that failed) with privacy mode off: Claude Code is checked
+          // before Claude opens files, if it hasn't passed already.
+          if (s.state === 'on' && !s.privacy && s.check.kind === 'unchecked') verify(false);
+        },
+        (error: unknown) => {
+          if (gen === modeGen.current) setStatus({ phase: 'error', message: errorMessage(error) });
+        },
+      )
+      .finally(() => setChecking(false));
+  }, [bridge, verify]);
+
   const newMode = () => {
     modeGen.current++;
   };
