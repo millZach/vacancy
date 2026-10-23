@@ -105,26 +105,77 @@ fn locked(call: &Call) -> Vec<String> {
     .collect()
 }
 
-/// A folder as Claude Code's permission rules spell it: from the file system's root, with forward slashes, a
-/// Windows drive as `/c`. `D:\tmp\fx` is `/d/tmp/fx`; `/Users/alex` stays as it is.
+/// One real name (a folder's or a file's) as a literal in a Claude Code permission rule. Rules you write yourself
+/// are gitignore patterns that Claude Code doesn't escape (its permissions docs, "Special characters"), so a folder
+/// called `[work]` would be a character class matching `w`, `o`, `r` or `k`, and a deny rule would miss it. Each
+/// gitignore special character gets a backslash: `\`, `[`, `]`, `*`, `{`, `}`, `!` and `#` (the last two mean
+/// something only at a pattern's start, but escaping them anywhere is harmless), and a trailing space, which
+/// gitignore would trim. Parentheses need no escaping (the docs again).
+///
+/// `?` stays as it is: in the gitignore matcher Claude Code uses (the `ignore` package) `\?` matches nothing, not
+/// even a `?`, so the escaped form would make a deny rule miss. As it is, `?` matches any one character: a deny
+/// rule then hides a little more, never less, and [`read_settings_in`] gives no allow rule for a path with one
+/// (`--add-dir` still lets Claude read it). Windows names can't hold `?`, `*` or `\` at all.
+pub fn rule_literal(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 4);
+    for c in name.chars() {
+        if matches!(c, '\\' | '[' | ']' | '*' | '{' | '}' | '!' | '#') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    let kept = out.trim_end_matches(' ');
+    let spaces = out.len() - kept.len();
+    let mut escaped = kept.to_owned();
+    for _ in 0..spaces {
+        escaped.push_str("\\ ");
+    }
+    escaped
+}
+
+/// A folder as Claude Code's permission rules spell it, as a literal: from the file system's root, with forward
+/// slashes, a Windows drive as `/c`, and each name escaped ([`rule_literal`]). `D:\tmp\fx` is `/d/tmp/fx`,
+/// `D:\AI\[work]` is `/d/AI/\[work\]`; `/Users/alex` stays as it is. The caller adds the wildcards it means
+/// (`/**`) after it.
 pub fn rule_path(path: &Path) -> String {
-    let text = path.to_string_lossy().replace('\\', "/");
-    let bytes = text.as_bytes();
-    let posix = if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
-        format!("/{}{}", (bytes[0] as char).to_ascii_lowercase(), &text[2..])
+    let text = path.to_string_lossy();
+    // A backslash separates names only on Windows; elsewhere it is part of a name, and escaped as one.
+    let text = if cfg!(windows) {
+        text.replace('\\', "/")
     } else {
-        text
+        text.into_owned()
     };
-    posix.trim_end_matches('/').to_owned()
+    let bytes = text.as_bytes();
+    let (drive, rest) = if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        (
+            format!("/{}", (bytes[0] as char).to_ascii_lowercase()),
+            &text[2..],
+        )
+    } else {
+        (String::new(), text.as_str())
+    };
+    let names: Vec<String> = rest
+        .split('/')
+        .filter(|n| !n.is_empty())
+        .map(rule_literal)
+        .collect();
+    if names.is_empty() {
+        drive
+    } else {
+        format!("{drive}/{}", names.join("/"))
+    }
 }
 
 /// The `--settings` JSON for privacy mode off: Read allowed under `roots`, and the always-hidden places denied
 /// (deny rules win over allow rules in Claude Code), Claude Code's and Codex's own folders where `config` puts them
-/// among them.
+/// among them. A root whose path holds a `?` gets no allow rule (see [`rule_literal`]): `--add-dir` alone lets
+/// Claude read it, and nothing beside it is allowed by accident.
 pub fn read_settings_in(roots: &[PathBuf], config: &[PathBuf]) -> Value {
     let allow: Vec<String> = roots
         .iter()
-        .map(|root| format!("Read(/{}/**)", rule_path(root)))
+        .map(|root| rule_path(root))
+        .filter(|at| !at.contains('?'))
+        .map(|at| format!("Read(/{at}/**)"))
         .collect();
     serde_json::json!({
         "permissions": {
@@ -297,7 +348,20 @@ impl ClaudeCode {
         control: &Control,
         progress: &mut dyn FnMut(Progress),
     ) -> (Result<Reply, Failure>, String) {
-        let invocation = invocation(&self.program, call, &self.access);
+        self.call_recorded_in(call, hidden::config_dirs(), control, progress)
+    }
+
+    /// [`ClaudeCode::call_recorded`] with Claude Code's and Codex's own folders where `config` puts them, not where
+    /// the app's environment does: for a probe of the deny rules on a made-up folder. The environment Claude Code
+    /// runs with is the app's either way.
+    pub fn call_recorded_in(
+        &self,
+        call: &Call,
+        config: &[PathBuf],
+        control: &Control,
+        progress: &mut dyn FnMut(Progress),
+    ) -> (Result<Reply, Failure>, String) {
+        let invocation = invocation_in(&self.program, call, &self.access, config);
         let output = match run_in_empty_folder(&self.work, &invocation, control, progress) {
             Ok(output) => output,
             Err(failure) => return (Err(failure), String::new()),
@@ -689,10 +753,101 @@ mod tests {
 
     #[test]
     fn rule_paths_are_posix_from_the_root() {
-        assert_eq!(rule_path(Path::new(r"D:\tmp\fx")), "/d/tmp/fx");
-        assert_eq!(rule_path(Path::new(r"C:\")), "/c");
+        if cfg!(windows) {
+            assert_eq!(rule_path(Path::new(r"D:\tmp\fx")), "/d/tmp/fx");
+            assert_eq!(rule_path(Path::new(r"C:\")), "/c");
+            assert_eq!(rule_path(Path::new(r"D:\tmp\fx\")), "/d/tmp/fx");
+        }
         assert_eq!(rule_path(Path::new("/Users/alex")), "/Users/alex");
+        assert_eq!(rule_path(Path::new("/Users/alex/")), "/Users/alex");
         assert_eq!(rule_path(Path::new("/")), "");
+    }
+
+    /// Every gitignore special character in a real name is escaped, so a rule names the place as it is spelled and
+    /// only the wildcards the caller adds (`/**`) are wildcards.
+    #[test]
+    fn real_names_are_literals_in_a_rule() {
+        for (name, literal) in [
+            ("claude-config", "claude-config"),
+            ("[work]", r"\[work\]"),
+            ("a]b", r"a\]b"),
+            ("a*b", r"a\*b"),
+            ("**", r"\*\*"),
+            ("{a,b}", r"\{a,b\}"),
+            ("!x", r"\!x"),
+            ("#x", r"\#x"),
+            ("a\\b", r"a\\b"),
+            ("x ", r"x\ "),
+            ("x  ", r"x\ \ "),
+            ("a b", "a b"),
+            // Parentheses need no escaping; `?` stays a one-character wildcard (see rule_literal).
+            ("Finance (2024)", "Finance (2024)"),
+            ("a?b", "a?b"),
+        ] {
+            assert_eq!(rule_literal(name), literal, "{name}");
+        }
+        if cfg!(windows) {
+            assert_eq!(
+                rule_path(Path::new(r"D:\AI\[work]\claude-config")),
+                r"/d/AI/\[work\]/claude-config"
+            );
+            assert_eq!(
+                rule_path(Path::new(r"E:\{a,b}\x!y\#z")),
+                r"/e/\{a,b\}/x\!y/\#z"
+            );
+        } else {
+            assert_eq!(
+                rule_path(Path::new("/Volumes/[work]/*/{a,b}/a\\b")),
+                r"/Volumes/\[work\]/\*/\{a,b\}/a\\b"
+            );
+        }
+    }
+
+    /// The fixture folder's allow rule is a literal too, and a root with a `?` in it gets no allow rule at all, so a
+    /// name one letter off is never allowed by accident (`--add-dir` still names the root itself).
+    #[test]
+    fn allow_rules_escape_the_roots_and_skip_a_root_with_a_question_mark() {
+        let root = if cfg!(windows) {
+            PathBuf::from(r"D:\tmp\[fx]{1}")
+        } else {
+            PathBuf::from("/tmp/[fx]{1}*")
+        };
+        let settings = read_settings_in(std::slice::from_ref(&root), &[]);
+        let allow = settings["permissions"]["allow"].as_array().unwrap();
+        if cfg!(windows) {
+            assert_eq!(allow, &[json(r"Read(//d/tmp/\[fx\]\{1\}/**)")]);
+        } else {
+            assert_eq!(allow, &[json(r"Read(//tmp/\[fx\]\{1\}\*/**)")]);
+            let odd = PathBuf::from("/tmp/fx?");
+            let settings = read_settings_in(std::slice::from_ref(&odd), &[]);
+            assert!(
+                settings["permissions"]["allow"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            let inv = invocation_in(Path::new("claude"), &call(), &Access::Read(vec![odd]), &[]);
+            assert_eq!(
+                inv.args.last().unwrap(),
+                "/tmp/fx?",
+                "--add-dir takes the path as it is"
+            );
+        }
+        let inv = invocation_in(
+            Path::new("claude"),
+            &call(),
+            &Access::Read(vec![root.clone()]),
+            &[],
+        );
+        assert_eq!(
+            inv.args.last().unwrap(),
+            &root.display().to_string(),
+            "--add-dir takes a path, not a pattern: it is never escaped"
+        );
+    }
+
+    fn json(s: &str) -> Value {
+        Value::String(s.to_owned())
     }
 
     #[test]

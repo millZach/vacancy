@@ -1,0 +1,11 @@
+false  before the fix: [work] as written: "d/tmp/claude-glob-probe-1/[work]/cfg/**" vs d/tmp/claude-glob-probe-1/[work]/cfg/canary.txt
+true   before the fix: what it matched instead: "d/tmp/claude-glob-probe-1/[work]/cfg/**" vs d/tmp/claude-glob-probe-1/w/cfg/canary.txt
+true   after the fix: \[work\]: "d/tmp/claude-glob-probe-1/\\[work\\]/cfg/**" vs d/tmp/claude-glob-probe-1/[work]/cfg/canary.txt
+false  after the fix: no longer a class: "d/tmp/claude-glob-probe-1/\\[work\\]/cfg/**" vs d/tmp/claude-glob-probe-1/w/cfg/canary.txt
+true   \* is a literal star: "d/a\\*b/**" vs d/a*b/x
+false  \* matches no other name: "d/a\\*b/**" vs d/axxb/x
+true   {a,b} needs no escape, \{ \} harmless: "d/\\{a,b\\}/**" vs d/{a,b}/x
+true   \! mid-pattern is a literal: "d/x\\!y/**" vs d/x!y/x
+true   parentheses need no escape: "d/Finance (2024)/**" vs d/Finance (2024)/x
+false  \? matches nothing (kept as ?): "d/a\\?b/**" vs d/a?b/x
+true   ? stays a one-character wildcard: "d/a?b/**" vs d/a?b/x

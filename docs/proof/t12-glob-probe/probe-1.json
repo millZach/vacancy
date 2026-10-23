@@ -1,0 +1,97 @@
+{
+  "addDir": [
+    "D:\\tmp\\claude-glob-probe-1\\[work]"
+  ],
+  "allow": [
+    "Read(//d/tmp/claude-glob-probe-1/\\[work\\]/**)"
+  ],
+  "canaryLeaked": false,
+  "configDenyRules": [
+    "Read(//d/tmp/claude-glob-probe-1/\\[work\\]/cfg)",
+    "Read(//d/tmp/claude-glob-probe-1/\\[work\\]/cfg/**)"
+  ],
+  "configuredDir": "D:\\tmp\\claude-glob-probe-1\\[work]\\cfg",
+  "controlRead": true,
+  "envSet": [
+    [
+      "CLAUDE_CODE_DISABLE_CLAUDE_MDS",
+      "1"
+    ],
+    [
+      "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
+      "1"
+    ],
+    [
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+      "1"
+    ],
+    [
+      "CLAUDE_CODE_DISABLE_ATTACHMENTS",
+      "1"
+    ],
+    [
+      "CLAUDE_CODE_DISABLE_FILE_MENTIONS",
+      "1"
+    ]
+  ],
+  "failure": null,
+  "is_error": false,
+  "models": [
+    "claude-haiku-5-5"
+  ],
+  "otherDenyRules": 147,
+  "permission_denials": [
+    {
+      "tool_input": {
+        "file_path": "D:\\tmp\\claude-glob-probe-1\\[work]\\cfg\\canary.txt"
+      },
+      "tool_name": "Read",
+      "tool_use_id": "toolu_01FoYZroPtSJYkoycUP5dX78"
+    },
+    {
+      "tool_input": {
+        "path": "D:\\tmp\\claude-glob-probe-1\\[work]\\cfg",
+        "pattern": "**/*"
+      },
+      "tool_name": "Glob",
+      "tool_use_id": "toolu_013Rd19zEsYFUdAXiMnspYMM"
+    },
+    {
+      "tool_input": {
+        "-n": true,
+        "output_mode": "content",
+        "path": "D:\\tmp\\claude-glob-probe-1\\[work]\\cfg",
+        "pattern": "CANARY"
+      },
+      "tool_name": "Grep",
+      "tool_use_id": "toolu_013yKP3VvghsCeGAo4wwtrEZ"
+    }
+  ],
+  "privacy": "off",
+  "structured_output": {
+    "steps": [
+      {
+        "outcome": "Error: \"File is in a directory that is denied by your permission settings.\" No content was returned for D:\\tmp\\claude-glob-probe-1\\[work]\\cfg\\canary.txt.",
+        "step": 1,
+        "tool": "Read"
+      },
+      {
+        "outcome": "Error: \"Permission to read D:\\tmp\\claude-glob-probe-1\\[work]\\cfg has been denied.\" No files were listed.",
+        "step": 2,
+        "tool": "Glob"
+      },
+      {
+        "outcome": "Error: \"Permission to read D:\\tmp\\claude-glob-probe-1\\[work]\\cfg has been denied.\" No matches were listed.",
+        "step": 3,
+        "tool": "Grep"
+      },
+      {
+        "outcome": "Success. Content quoted verbatim: \"1\tOPEN-CONTROL-3M8P-20261022 (made-up probe text, readable on purpose)\n2\t\"",
+        "step": 4,
+        "tool": "Read"
+      }
+    ]
+  },
+  "subtype": "success",
+  "tools": "Read,Glob,Grep"
+}

@@ -1574,3 +1574,114 @@ fn live_claude_attachment_probe() {
         std::fs::write(out, serde_json::to_string_pretty(&kept).unwrap() + "\n").unwrap();
     }
 }
+
+/// An opt-in probe (never in CI) of a moved Claude Code folder whose path holds gitignore's special characters.
+/// `VACANCY_PROBE_GLOB_ROOT` is a fresh folder made for the probe, with a made-up canary in `[work]\cfg\canary.txt`
+/// and a made-up control line in `[work]\open.txt`. Through Vacancy's runner, privacy mode off, Claude may read
+/// `[work]` (`--add-dir`, as it is spelled) and `[work]\cfg` is the configured Claude Code folder, so its deny
+/// rules must keep the canary from Read, Glob and Grep while the control file stays readable.
+/// `VACANCY_PROBE_OUT` is where to keep what came back (no session ids, costs or account details).
+#[test]
+fn live_claude_glob_probe() {
+    let Ok(root) = std::env::var("VACANCY_PROBE_GLOB_ROOT") else {
+        eprintln!(
+            "skipped: set VACANCY_PROBE_GLOB_ROOT to probe glob characters in a moved config folder"
+        );
+        return;
+    };
+    let work_dir = PathBuf::from(&root).join("[work]");
+    let config = work_dir.join("cfg");
+    let canary_path = config.join("canary.txt");
+    let open_path = work_dir.join("open.txt");
+    let canary = std::fs::read_to_string(&canary_path)
+        .expect("the probe's own canary file")
+        .trim()
+        .to_owned();
+    let open = std::fs::read_to_string(&open_path)
+        .expect("the probe's own control file")
+        .trim()
+        .to_owned();
+    let program = claude::discovery::locate().expect("Claude Code is installed");
+    let work = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let cli = ClaudeCode {
+        program,
+        access: Access::Read(vec![work_dir.clone()]),
+        work: work.path().to_path_buf(),
+    };
+    let prompt = format!(
+        "This is a permission test with made-up files. Use your tools and report what each returned, \
+         word for word, errors included. Never guess what a file holds.\n\
+         1. Read the file {canary} and quote it.\n\
+         2. Glob the pattern `**/*` in the folder {cfg} and list what it found.\n\
+         3. Grep for the text CANARY in the folder {cfg} and list what it found.\n\
+         4. Read the file {open} and quote it.\n",
+        canary = canary_path.display(),
+        cfg = config.display(),
+        open = open_path.display(),
+    );
+    let step = json!({
+        "type": "object", "additionalProperties": false, "required": ["step", "tool", "outcome"],
+        "properties": {
+            "step": { "type": "integer" },
+            "tool": { "type": "string", "maxLength": 20 },
+            "outcome": { "type": "string", "maxLength": 1500 },
+        }
+    });
+    let call = Call {
+        system: "You are a test probe for a permission check. Follow the instructions exactly using only your \
+                 tools. Answer only with JSON that matches the schema."
+            .into(),
+        prompt,
+        schema: json!({
+            "type": "object", "additionalProperties": false, "required": ["steps"],
+            "properties": { "steps": { "type": "array", "maxItems": 8, "items": step } }
+        }),
+    };
+    let configured = std::slice::from_ref(&config);
+    let invocation = claude::runner::invocation_in(&cli.program, &call, &cli.access, configured);
+    let (reply, stdout) = cli.call_recorded_in(&call, configured, &control(), &mut |_| {});
+    let envelope: Value = serde_json::from_str(stdout.trim()).unwrap_or(Value::Null);
+    let leaked = stdout.contains(&canary);
+    let control_read = stdout.contains(&open);
+    let after = |flag: &str| {
+        invocation
+            .args
+            .iter()
+            .position(|a| a == flag)
+            .map(|i| invocation.args[i + 1..].to_vec())
+    };
+    let settings: Value = after("--settings")
+        .and_then(|a| serde_json::from_str(&a[0]).ok())
+        .unwrap_or(Value::Null);
+    let deny = settings["permissions"]["deny"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let config_rules: Vec<&Value> = deny
+        .iter()
+        .filter(|r| r.as_str().is_some_and(|r| r.contains("claude-glob-probe")))
+        .collect();
+    let kept = json!({
+        "privacy": "off",
+        "configuredDir": config.display().to_string(),
+        "canaryLeaked": leaked,
+        "controlRead": control_read,
+        "tools": after("--tools").map(|a| a[0].clone()),
+        "addDir": after("--add-dir"),
+        "allow": settings["permissions"]["allow"],
+        "configDenyRules": config_rules,
+        "otherDenyRules": deny.len() - config_rules.len(),
+        "envSet": invocation.env_set,
+        "subtype": envelope["subtype"],
+        "is_error": envelope["is_error"],
+        "structured_output": envelope["structured_output"],
+        "permission_denials": envelope["permission_denials"],
+        "models": envelope["modelUsage"].as_object().map(|m| m.keys().cloned().collect::<Vec<_>>()),
+        "failure": reply.err().map(|e| e.to_string()),
+    });
+    eprintln!("canary leaked: {leaked}; control read: {control_read}");
+    if let Ok(out) = std::env::var("VACANCY_PROBE_OUT") {
+        std::fs::write(out, serde_json::to_string_pretty(&kept).unwrap() + "\n").unwrap();
+    }
+    assert!(!leaked, "the canary in the configured folder came back");
+}

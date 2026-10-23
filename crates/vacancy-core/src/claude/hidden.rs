@@ -403,7 +403,9 @@ fn spellings(parts: &[&str]) -> Vec<String> {
 /// Claude Code's `permissions.deny` rules for the whole list, with Claude Code's and Codex's own folders where
 /// `config` puts them: `Read(...)` rules, which Claude Code applies to Read, Glob and Grep alike (see the module
 /// docs). Named places are gitignore-style patterns from the file system's root (`//**/`), so they hold on every
-/// drive and in every home; a moved folder is its own path from the root (`//c/Users/alex/.claude-work`).
+/// drive and in every home; a moved folder is its own path from the root (`//c/Users/alex/.claude-work`), each of
+/// its names escaped as a literal ([`super::runner::rule_literal`]) before the rule's own `/**` goes on, so a
+/// folder called `[work]` or `{a,b}` is denied as it is spelled.
 pub fn deny_rules_in(config: &[PathBuf]) -> Vec<String> {
     let mut rules = Vec::new();
     let mut push = |rule: String| {
@@ -426,7 +428,11 @@ pub fn deny_rules_in(config: &[PathBuf]) -> Vec<String> {
         let at = if dir.is_absolute() {
             format!("/{}", super::runner::rule_path(dir))
         } else {
-            let rest: Vec<String> = names(dir).into_iter().filter(|n| n != "~").collect();
+            let rest: Vec<String> = names(dir)
+                .into_iter()
+                .filter(|n| n != "~")
+                .map(|n| super::runner::rule_literal(&n))
+                .collect();
             if rest.is_empty() {
                 continue;
             }
@@ -700,6 +706,61 @@ mod tests {
         // Unset or empty: only the defaults (.claude, .claude.json, .codex), by name.
         assert!(config_dirs_from(|_| Some(OsString::new())).is_empty());
         assert!(config_dirs_from(|_| None).is_empty());
+    }
+
+    /// A moved folder with gitignore's special characters in its path (`[work]` would be a character class, `*` and
+    /// `{a,b}` wildcards) is denied as it is spelled: as set, and as the file system resolves it.
+    #[test]
+    fn moved_config_folders_with_glob_characters_are_denied_as_spelled() {
+        let set = if cfg!(windows) {
+            vec![
+                (
+                    r"D:\AI\[work]\claude-config",
+                    r"Read(//d/AI/\[work\]/claude-config",
+                ),
+                (r"E:\{a,b}\codex!", r"Read(//e/\{a,b\}/codex\!"),
+            ]
+        } else {
+            vec![
+                (
+                    "/Volumes/AI/[work]/claude-config",
+                    r"Read(//Volumes/AI/\[work\]/claude-config",
+                ),
+                ("/opt/*/{a,b}/codex", r"Read(//opt/\*/\{a,b\}/codex"),
+            ]
+        };
+        for (dir, rule) in set {
+            let config = config_dirs_from(|name| (name == "CLAUDE_CONFIG_DIR").then(|| dir.into()));
+            let rules = deny_rules_in(&config);
+            assert!(rules.contains(&format!("{rule})")), "{dir}: {rules:?}");
+            assert!(rules.contains(&format!("{rule}/**)")), "{dir}: {rules:?}");
+            // The prompt filter takes the name as it is too.
+            assert!(hides_in(&PathBuf::from(dir).join("x"), &config).is_some());
+        }
+        // A relative one, by its names anywhere.
+        let relative = config_dirs_from(|name| (name == "CODEX_HOME").then(|| "~/[codex]*".into()));
+        assert!(deny_rules_in(&relative).contains(&r"Read(//**/\[codex\]\*/**)".to_owned()));
+
+        // Resolved: a real folder reached through `..`, so the resolved path differs from the one set; both are
+        // denied, each escaped.
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("[work]").join("cfg");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(tmp.path().join("[work]").join("x")).unwrap();
+        let via = tmp.path().join("[work]").join("x").join("..").join("cfg");
+        let config =
+            config_dirs_from(|name| (name == "CLAUDE_CONFIG_DIR").then(|| via.clone().into()));
+        let resolved = plain(&std::fs::canonicalize(&real).unwrap());
+        assert!(config.contains(&resolved), "{config:?}");
+        let rules = deny_rules_in(&config);
+        let at = format!("Read(/{}/**)", super::super::runner::rule_path(&resolved));
+        assert!(at.contains(r"/\[work\]/cfg/**)"), "{at}");
+        assert!(rules.contains(&at), "{rules:?}");
+        assert!(
+            !rules.iter().any(|r| r.contains("/[work]/")),
+            "no rule spells [work] as a character class: {rules:?}"
+        );
+        assert!(hides_in(&resolved.join("canary.txt"), &config).is_some());
     }
 
     #[test]
