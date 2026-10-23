@@ -295,7 +295,12 @@ fn explain_folders_sends_metadata_only_and_admits_only_safe_nodes_of_the_folder_
     assert!(why("Dot-dot").contains("didn't see"));
     assert!(why("Not scanned").contains("didn't see"));
     assert!(why("Keys").contains("hidden"));
+    // A Windows junction is a folder the scan saw and flagged as a link; Unix reports every symlink as a
+    // file link, which the scan doesn't keep as a node, so Claude named something it didn't see.
+    #[cfg(windows)]
     assert!(why("A link").contains("link"));
+    #[cfg(not(windows))]
+    assert!(why("A link").contains("link") || why("A link").contains("didn't see"));
     assert!(why("Another folder").contains("isn't inside"));
     assert!(why("Twice").contains("already") || why("Twice").contains("twice"));
     assert!(why("The root itself").contains("isn't inside"));
