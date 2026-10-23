@@ -49,10 +49,12 @@ fn big(root: &Path, rel: &str, len: u64) -> PathBuf {
 fn link_dir(link: &Path, to: &Path) {
     #[cfg(windows)]
     {
+        // CI's target folder can be spelled with forward slashes, which cmd reads as switches.
+        let back = |p: &Path| p.display().to_string().replace('/', "\\");
         let status = std::process::Command::new("cmd")
             .args(["/C", "mklink", "/J"])
-            .arg(link)
-            .arg(to)
+            .arg(back(link))
+            .arg(back(to))
             .stdout(std::process::Stdio::null())
             .status()
             .unwrap();
