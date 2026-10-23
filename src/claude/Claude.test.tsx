@@ -474,6 +474,36 @@ describe('the jobs', () => {
     expect(within(first).queryByRole('button', { name: 'Use Claude’s plan' })).toBeNull();
   });
 
+  it('a slow Keep mine never puts its plan back over a newer pick the person used', async () => {
+    const bridge = windows({ claude: 'on' });
+    // The core takes the items out at once; its reply is slow.
+    const real = bridge.claudeRemoveItems.bind(bridge);
+    let release = () => {};
+    vi.spyOn(bridge, 'claudeRemoveItems').mockImplementationOnce((m, s, ids) => {
+      const removed = real(m, s, ids);
+      return new Promise((resolve, reject) => {
+        release = () => void removed.then(resolve, reject);
+      });
+    });
+    await toMap(bridge);
+    await openPlan();
+    const a = await job('Let Claude pick', 'pickPlan');
+    expect(checked('Old installers in Downloads')).toBe(false);
+    await userEvent.click(within(a).getByRole('button', { name: 'Keep mine' }));
+    // While Keep mine waits, Claude picks again (the same ticks, so the plan's version stays) and the person uses it.
+    const b = await job('Let Claude pick', 'pickPlan');
+    await userEvent.click(within(b).getByRole('button', { name: 'Use Claude’s plan' }));
+    expect(within(b).getByText(/You’re using my plan/)).toBeInTheDocument();
+
+    // Pick A's Keep mine comes back late: the plan stays B's, and B's items stay in the tray.
+    act(() => release());
+    expect(await within(a).findByText('Claude picked again meanwhile, so Vacancy left your plan as it is.')).toBeInTheDocument();
+    expect(checked('Old installers in Downloads')).toBe(false);
+    expect(within(tray()).getByRole('checkbox', { name: 'Remind me: Cyberpunk 2077 (not played for 430 days)' })).toHaveAttribute('aria-checked', 'true');
+    expect(within(tray()).getByText('Android emulator images')).toBeInTheDocument();
+    expect(within(b).getByText(/You’re using my plan/)).toBeInTheDocument();
+  });
+
   it('never takes Claude’s items out of a scan that replaced the one it picked on', async () => {
     const bridge = windows({ claude: 'on' });
     const listeners: ((e: ClaudeEvent) => void)[] = [];

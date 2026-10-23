@@ -88,9 +88,11 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   const [ended, setEnded] = useState<boolean | null>(null);
   const [convos, setConvos] = useState<Record<string, Conversation>>({});
   const drivesRef = useRef(drives);
+  const convosRef = useRef(convos);
   const statusRef = useRef(status);
   useEffect(() => {
     drivesRef.current = drives;
+    convosRef.current = convos;
     statusRef.current = status;
   });
   /** Privacy mode is changing, at once (state comes a render later): no request starts until the core has the new mode. */
@@ -392,6 +394,11 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     return pickOffer(c, entry, scope.plan, scope.planVersion) === 'open' ? entry : null;
   };
 
+  /**
+   * Keep mine: takes the pick's own items back out of the scan it was made on, then puts the plan back. The plan goes
+   * back only if, when that is done, this card would still offer Keep mine: the newest pick, with the plan as its
+   * answer left it. A newer pick accepted meanwhile, or an edit, stays as it is.
+   */
   const keepMine = (scope: Scope, entryId: string) => {
     const pick = openPick(scope, entryId)?.pick;
     const scan = scanOf(scope);
@@ -400,10 +407,21 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       editEntry<JobEntry>(scope, entryId, (e) => (e.pick ? { ...e, pick: { ...e.pick, ...p } } : e));
     setPick({ busy: true, error: null });
     const back = () => {
-      // Only over the plan as Claude's answer left it: an edit made meanwhile stays.
-      const moved = scanOf(scope)?.planVersion !== pick.version;
-      drivesRef.current?.setPlan(scope.mountPoint, scope.run, pick.before, pick.version);
-      setPick({ busy: false, choice: 'kept', error: moved ? 'Your plan changed meanwhile, so Vacancy left your ticks as they are.' : null });
+      const now = scanOf(scope);
+      const c = convosRef.current[keyOf(scope)] ?? EMPTY;
+      const entry = c.entries.find((e): e is JobEntry => e.id === entryId && e.kind === 'job');
+      const offer = entry && now ? pickOffer(c, entry, now.plan, now.planVersion) : null;
+      if (offer === 'open') drivesRef.current?.setPlan(scope.mountPoint, scope.run, pick.before, pick.version);
+      setPick({
+        busy: false,
+        choice: 'kept',
+        error:
+          offer === 'open'
+            ? null
+            : offer === 'replaced'
+              ? 'Claude picked again meanwhile, so Vacancy left your plan as it is.'
+              : 'Your plan changed meanwhile, so Vacancy left your ticks as they are.',
+      });
     };
     if (pick.added.length === 0) return back();
     bridge.claudeRemoveItems(scope.mountPoint, scan.scan, pick.added).then(
