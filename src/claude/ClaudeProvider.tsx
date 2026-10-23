@@ -122,8 +122,6 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     setStatus({ phase: 'ready', status: s });
     setSettingError(null);
   };
-  const setting = (p: Promise<ClaudeStatus>) =>
-    p.then(ready, (error: unknown) => setSettingError(errorMessage(error)));
 
   /**
    * Checks this Claude Code before privacy mode off lets Claude open files ("Checking Claude Code…"), when the check
@@ -203,6 +201,15 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   const newMode = () => {
     modeGen.current++;
   };
+  /** A change of mode the core keeps: once it has (a refused one changes nothing), status reads still out are dropped. */
+  const modeSetting = (p: Promise<ClaudeStatus>) =>
+    p.then(
+      (s) => {
+        newMode();
+        ready(s);
+      },
+      (error: unknown) => setSettingError(errorMessage(error)),
+    );
 
   /**
    * A request with privacy mode off has ended: its own check of Claude Code may have run, found it changed, or kept
@@ -569,7 +576,6 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
    * answered, nothing new is asked, so no request starts in the mode that is ending.
    */
   const changePrivacy = (on: boolean) => {
-    newMode();
     if (statusNow?.privacy !== on && endAll()) setEnded(on);
     changing.current = true;
     setPrivacyChanging(true);
@@ -582,6 +588,8 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       .claudeSetPrivacy(on)
       .then(
         (s) => {
+          // The mode changed (only now: a change the core refused leaves a status read still out valid).
+          newMode();
           ready(s);
           // Privacy mode off: Claude Code is checked first, if it hasn't passed already.
           checkIfDue(s);
@@ -614,13 +622,13 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     privacyChanging,
     ended,
     turnOn: () => {
-      newMode();
       const token = ++turnOnToken.current;
       setTurningOn(true);
       setSettingError(null);
       bridge.claudeSetEnabled(true).then(
         (s) => {
           if (token !== turnOnToken.current) return;
+          newMode();
           setTurningOn(false);
           ready(s);
           checkIfDue(s);
@@ -633,19 +641,17 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       );
     },
     cancelTurnOn: () => {
-      newMode();
       turnOnToken.current++;
       setTurningOn(false);
-      void setting(bridge.claudeSetEnabled(false));
+      void modeSetting(bridge.claudeSetEnabled(false));
     },
     turnOff: () => {
-      newMode();
       endAll();
       setEnded(null);
       setPrivacyAsk(false);
       verifyToken.current++;
       setVerifying(false);
-      void setting(bridge.claudeSetEnabled(false));
+      void modeSetting(bridge.claudeSetEnabled(false));
     },
     recheck,
     setPrivacy: (on) => {

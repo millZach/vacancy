@@ -414,6 +414,30 @@ describe('privacy mode', () => {
     expect(within(header()).queryByText('Claude on · reads files')).toBeNull();
   });
 
+  it('a privacy change the core refuses keeps a status read still out, so the row doesn’t stay on a stale pass', async () => {
+    const bridge = windows({ claude: 'error', privacy: 'off' });
+    await toMap(bridge);
+    await openPlan();
+    const newer = { ...(await bridge.claudeStatus()), check: { kind: 'failed', message: CHECK_UNVERIFIED } as const };
+    let answer: (s: typeof newer) => void = () => {};
+    const status = vi.spyOn(bridge, 'claudeStatus').mockImplementationOnce(() => new Promise((resolve) => (answer = resolve)));
+    vi.spyOn(bridge, 'claudeSetPrivacy').mockRejectedValueOnce(new Error('Vacancy couldn’t keep the setting: Access is denied.'));
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Review my plan' }));
+    expect(await within(panel()).findByRole('alert')).toHaveTextContent('Claude Code stopped with an error.');
+    await waitFor(() => expect(status).toHaveBeenCalled());
+    // Turning privacy mode on fails: the mode stays off.
+    await userEvent.click(within(panel()).getByRole('switch', { name: 'Privacy mode' }));
+    expect(await within(panel()).findByText(/Vacancy couldn’t keep the setting/)).toBeInTheDocument();
+    expect(within(panel()).getByRole('switch', { name: 'Privacy mode' })).toHaveAttribute('aria-checked', 'false');
+    // The read that was out answers for the mode that still holds, and the row takes it.
+    await act(async () => {
+      answer(newer);
+      await Promise.resolve();
+    });
+    expect(await within(panel()).findByRole('note')).toHaveTextContent(CHECK_UNVERIFIED);
+    expect(within(panel()).queryByText(/Off: Claude can read files/)).toBeNull();
+  });
+
   it('every answer says what it was based on; changing the mode ends the conversation, and says so', async () => {
     await toMap(windows({ claude: 'on' }));
     await openPlan();

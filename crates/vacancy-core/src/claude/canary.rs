@@ -199,12 +199,18 @@ pub const REVOKED: &str = "claude-check.revoked";
 /// The kept result, if any. A missing or damaged file is none, and so is any result while [`REVOKED`] exists: the
 /// check is due.
 pub fn load(app_data: &Path) -> Option<Record> {
-    if std::fs::symlink_metadata(app_data.join(REVOKED)).is_ok() {
+    if revoked(&std::fs::symlink_metadata(app_data.join(REVOKED)).map(|_| ())) {
         return None;
     }
     std::fs::read(path(app_data))
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+}
+
+/// Whether the kept result is revoked, from what looking for [`REVOKED`] gave: only "not found" lets it be trusted.
+/// Found, or any other error (the marker might be there but can't be seen), revokes it: fail closed.
+pub fn revoked(marker: &io::Result<()>) -> bool {
+    !matches!(marker, Err(e) if e.kind() == io::ErrorKind::NotFound)
 }
 
 /// Keeps `record`, replacing the file whole (written beside it, then renamed over it).
@@ -576,6 +582,35 @@ fn random_words() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only a marker that isn't there lets a kept result be trusted: one that is there, or one that can't be looked
+    /// for, revokes it.
+    #[test]
+    fn only_a_missing_marker_trusts_the_kept_result() {
+        use io::ErrorKind::{InvalidFilename, NotFound, Other, PermissionDenied};
+        assert!(!revoked(&Err(NotFound.into())));
+        assert!(revoked(&Ok(())));
+        for kind in [PermissionDenied, InvalidFilename, Other] {
+            assert!(revoked(&Err(kind.into())), "{kind:?}");
+        }
+        // And through the loader: a kept pass is read while no marker is there, and not once one is.
+        let dir = tempfile::tempdir().unwrap();
+        let record = Record {
+            identity: Identity {
+                path: "claude".into(),
+                size: 1,
+                modified: None,
+                sha256: "00".into(),
+                version: "x".into(),
+            },
+            passed: true,
+            why: None,
+        };
+        save(dir.path(), &record).unwrap();
+        assert_eq!(load(dir.path()), Some(record));
+        std::fs::write(dir.path().join(REVOKED), b"").unwrap();
+        assert_eq!(load(dir.path()), None);
+    }
 
     #[test]
     fn random_words_differ_each_time() {
