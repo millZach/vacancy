@@ -7,9 +7,13 @@
 //! - each deny rule matches its target, everything in it, and its target spelled in other case;
 //! - the always-hidden places stay denied under folders with any of those names;
 //! - an allow rule exists only for a root it spells exactly, and then matches inside the root and nothing beside it
-//!   (a sibling one character off, a longer name, the folder above, a folder named like the root elsewhere);
+//!   (a sibling one character off, a longer name, the folder above, a folder named like the root elsewhere), except
+//!   a sibling spelled like the root in other case (the known limit in ADR 0008);
 //! - a root no allow rule spells makes fixture mode refuse reads, and a moved folder no deny rule names makes reads
 //!   unavailable.
+//!
+//! Verified against Claude Code 2.1.309. When Claude Code updates its matcher, recheck the model in
+//! `tools/rule-matcher.mjs` (there is no runtime version check, by Zach's choice).
 //!
 //! Needs Node and `npm ci` (CI runs it before the Rust tests).
 
@@ -410,6 +414,10 @@ fn allow_checks(style: Style, checks: &mut Checks) -> usize {
                 path(style, b, &["tmp", "fx", "outside.txt"]),
             ];
             for other in &all {
+                // A sibling whose name differs from the root's only in case is left out on purpose: the matcher
+                // compares case-insensitively, so the allow rule covers it too. That matters only on a
+                // case-sensitive Mac volume in fixture mode with privacy mode off, a limit Zach accepted (ADR 0008,
+                // "Known limit"); normal mode's allow rules are whole drives.
                 if !same_name(other, last) {
                     outside.push(path(style, parent, &[other, "a"]));
                 }
