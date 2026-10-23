@@ -193,6 +193,14 @@ export function isEnabled(state: ClaudeStatus['state']): boolean {
   return state === 'on' || state === 'signedOut' || state === 'checkTimedOut' || state === 'checkFailed';
 }
 
+/**
+ * Claude may open files: privacy mode is off, and the core can keep Claude where it may read. With privacy mode off
+ * but reads unavailable (`readsUnavailable`), every call runs as if privacy mode were on.
+ */
+export function readsFiles(status: ClaudeStatus): boolean {
+  return !status.privacy && status.readsUnavailable === null;
+}
+
 /** Claude is on and signed in: jobs can run. */
 export function isOn(claude: Claude | null): boolean {
   return claude?.status.phase === 'ready' && claude.status.status.state === 'on';

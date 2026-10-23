@@ -12,7 +12,8 @@
 // native fixture bypass; `&advisor=error` fails only the advisor status read (the old status dialog). Live Claude's
 // mock: `&claude=off` (the default: off until turned on), `notfound`, `signedout`, `on`, `slow` (answers take 8 s,
 // slow after 1.5 s), `error` (a rate limit) or `timeout`; `&privacy=off` starts with privacy mode off; and
-// `&claudeMs=3000` makes answers take three seconds (default 0.9). The mock never calls Claude.
+// `&claudeMs=3000` makes answers take three seconds (default 0.9); `&reads=unavailable` says privacy mode off can't
+// let Claude open files, so calls run as if it were on. The mock never calls Claude.
 import { isTauri } from '@tauri-apps/api/core';
 import { fixtures, isFixtureName } from './fixtures';
 import { createMockBridge } from './mock';
@@ -49,6 +50,7 @@ export function defaultBridge(search = window.location.search): Bridge {
   const claude = MOCK_CLAUDE_STATES.find((s) => s === q.get('claude'));
   const privacy = q.get('privacy');
   const claudeMs = q.get('claudeMs');
+  const reads = q.get('reads');
   return createMockBridge(fixtures[isFixtureName(name) ? name : 'windows'], {
     ...(delay > 0 ? { delayMs: delay } : {}),
     ...(fail !== null ? { fail } : {}),
@@ -66,5 +68,6 @@ export function defaultBridge(search = window.location.search): Bridge {
     ...(claude ? { claude } : {}),
     ...(privacy === 'on' || privacy === 'off' ? { privacy } : {}),
     ...(claudeMs !== null && Number.isFinite(Number(claudeMs)) ? { claudeMs: Number(claudeMs) } : {}),
+    ...(reads === 'unavailable' ? { reads } : {}),
   });
 }

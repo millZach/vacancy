@@ -13,6 +13,7 @@ import {
   type MockOptions,
   type RunListing,
 } from '../bridge';
+import { READS_UNAVAILABLE } from '../bridge/mockClaude';
 import { FIRST_QUESTION, PANEL_KEY } from './ClaudeProvider';
 import { DrivesProvider } from '../drives/DrivesProvider';
 import { HistoryMenu } from '../history/HistoryMenu';
@@ -248,6 +249,19 @@ describe('privacy mode', () => {
     await userEvent.click(toggle);
     await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'true'));
     expect(set).toHaveBeenLastCalledWith(true);
+  });
+
+  it('with privacy mode off but reads unavailable, says why, and every answer is from names, sizes and dates', async () => {
+    const bridge = windows({ claude: 'on', privacy: 'off', reads: 'unavailable' });
+    await toMap(bridge);
+    await openPlan();
+    expect(within(panel()).getByRole('switch', { name: 'Privacy mode' })).toHaveAttribute('aria-checked', 'false');
+    expect(within(panel()).getByText(/Off, but Claude can’t open files for now/)).toBeInTheDocument();
+    expect(within(panel()).getByRole('note')).toHaveTextContent(READS_UNAVAILABLE);
+    expect(within(panel()).getByText(/I can see the names, sizes, counts and dates from this scan/)).toBeInTheDocument();
+    const review = await job('Review my plan', 'reviewPlan');
+    expect(within(review).getByText(READS_UNAVAILABLE)).toBeInTheDocument();
+    expect(within(review).queryByText(/Claude opened/)).toBeNull();
   });
 
   it('every answer says what it was based on; changing the mode ends the conversation, and says so', async () => {

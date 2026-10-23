@@ -3,7 +3,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent
 import { createPortal } from 'react-dom';
 import type { ClaudeBasis, ClaudeDropped, ClaudeFailure, ClaudeFolderNote, ClaudeHidden, Proposal } from '../bridge';
 import { formatBytes } from '../format';
-import { failureText, isOn, useClaude, type Claude, type Phase } from './context';
+import { failureText, isOn, readsFiles, useClaude, type Claude, type Phase } from './context';
 import './claude.css';
 
 /** Claude's mark, in its lilac. */
@@ -83,8 +83,21 @@ export function HiddenFold({ hidden }: { hidden: ClaudeHidden[] }) {
 }
 
 /** Privacy mode's switch: on is the default; turning it off asks first, and the choice is remembered. */
-export function PrivacyRow({ claude, privacy, fixture }: { claude: Claude; privacy: boolean; fixture: boolean }) {
+export function PrivacyRow({
+  claude,
+  privacy,
+  fixture,
+  unavailable,
+}: {
+  claude: Claude;
+  privacy: boolean;
+  fixture: boolean;
+  /** Why Claude can't open files though privacy mode is off (the core's `readsUnavailable`). */
+  unavailable: string | null;
+}) {
+  const closed = !privacy && unavailable !== null;
   return (
+    <>
     <div className="cl-provider cl-privacy-row">
       <span className="cl-provider-icon" aria-hidden>
         {privacy ? <Lock size={14} /> : <Eye size={14} />}
@@ -94,9 +107,11 @@ export function PrivacyRow({ claude, privacy, fixture }: { claude: Claude; priva
         <span>
           {privacy
             ? 'On: names, sizes, counts and dates only'
-            : fixture
-              ? 'Off: Claude can read files in the fixture folder, except hidden places. Remembered.'
-              : 'Off: Claude can read files, except hidden places. Remembered.'}
+            : closed
+              ? 'Off, but Claude can’t open files for now: names, sizes, counts and dates only. Remembered.'
+              : fixture
+                ? 'Off: Claude can read files in the fixture folder, except hidden places. Remembered.'
+                : 'Off: Claude can read files, except hidden places. Remembered.'}
         </span>
       </div>
       <button
@@ -112,6 +127,12 @@ export function PrivacyRow({ claude, privacy, fixture }: { claude: Claude; priva
         <i />
       </button>
     </div>
+    {closed && (
+      <p className="cl-job is-slow cl-unavailable" role="note">
+        <EyeOff size={13} aria-hidden /> <span>{unavailable}</span>
+      </p>
+    )}
+    </>
   );
 }
 
@@ -291,7 +312,7 @@ export function ClaudeTrigger({ busy, failed, onOpen }: { busy: boolean; failed:
         ? 'Claude is working'
         : failed
           ? 'Claude · didn’t answer'
-          : status.privacy
+          : !readsFiles(status)
             ? 'Claude on'
             : 'Claude on · reads files';
   const icon = busy ? <LoaderCircle size={12} className="tray-spin" aria-hidden /> : on ? <Mark size={12} /> : <Sparkles size={12} strokeWidth={2.2} aria-hidden />;
@@ -329,7 +350,9 @@ export function ClaudeNote() {
               'Built-in rules, and Claude beside the map.',
               status.privacy
                 ? 'Privacy mode is on: Claude gets names, sizes, counts and dates only.'
-                : 'Privacy mode is off: Claude can read files, except the places that always stay hidden.',
+                : !readsFiles(status)
+                  ? 'Privacy mode is off, but Claude can’t open files for now: it gets names, sizes, counts and dates only.'
+                  : 'Privacy mode is off: Claude can read files, except the places that always stay hidden.',
             ];
   return (
     <div className="advisor-note" data-no-ripple>

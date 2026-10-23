@@ -2,7 +2,8 @@
 // what the core sends (src-tauri's claude_* commands). Nothing here calls Claude, reads a disk or moves a file.
 // Pick the state with `&claude=off|notfound|signedout|checktimeout|checkerror|on|slow|error|timeout` (`checktimeout`
 // and `checkerror`: Claude is on, but asking Claude Code whether it's signed in timed out, or failed) and privacy mode with
-// `&privacy=on|off`; `&claudeMs=` sets how long an answer takes (default 900 ms; `slow` takes 8 s, saying it's
+// `&privacy=on|off` (`&reads=unavailable`: privacy mode off can't let Claude open files, so calls run as if it were
+// on, saying why); `&claudeMs=` sets how long an answer takes (default 900 ms; `slow` takes 8 s, saying it's
 // slow after 1.5 s). The answers follow the approved prototype's (prototype/ai-advisor, variant B).
 import type {
   ClaudeAbout,
@@ -52,6 +53,11 @@ export interface MockClaudeOptions {
   privacy?: 'on' | 'off';
   /** How long an answer takes. Default 900 ms (`slow`: 8 s). */
   claudeMs?: number;
+  /**
+   * `unavailable`: privacy mode off can't let Claude open files here (the core's `readsUnavailable`), so every call
+   * runs as if it were on, and says why.
+   */
+  reads?: 'unavailable';
 }
 
 /** One chat, as the core keeps it: what it's about, the privacy mode it began in, its turns, and whether it ended. */
@@ -116,6 +122,9 @@ export const HIDDEN: ClaudeHidden[] = [
 ];
 
 const BASIS_ON = 'From names, sizes and dates only. Claude didn’t open any files.';
+/** What the core says when no rule can keep a moved Claude Code folder hidden (`runner::reads_unavailable_in`). */
+export const READS_UNAVAILABLE =
+  'Claude can’t open files for now: Vacancy can’t name the folder \\\\nas\\home\\claude in a rule that keeps it hidden from Claude, so Claude gets names, sizes, counts and dates only.';
 
 /** One of Claude's own items, before the mock adds it: where its tile is carved from, and what it says. */
 interface Item {
@@ -348,7 +357,11 @@ export function createMockClaude(
 ) {
   const state = options.claude ?? 'off';
   let enabled = state !== 'off' && state !== 'notfound';
-  let privacy = options.privacy !== 'off';
+  let setting = options.privacy !== 'off';
+  /** As the core, when no rule could keep Claude where it may read (`&reads=unavailable`): why. */
+  const unavailable = options.reads === 'unavailable' ? READS_UNAVAILABLE : null;
+  /** Privacy mode for a call: on, or off with reads unavailable, when the core runs it as if it were on. */
+  const calls = () => setting || unavailable !== null;
   const canned = platform === 'windows' ? windows() : macos();
   const requests = new Map<string, { timers: number[]; finish: (failure: ClaudeFailure) => void }>();
   let next = 0;
@@ -368,14 +381,15 @@ export function createMockClaude(
                 ? 'checkFailed'
                 : 'on',
     message: !enabled ? null : state === 'checktimeout' ? CHECK_TIMED_OUT : state === 'checkerror' ? CHECK_FAILED : null,
-    privacy,
+    privacy: setting,
     fixture: false,
+    readsUnavailable: unavailable,
     hidden: structuredClone(HIDDEN),
   });
 
   const basis = (opened: string[]): ClaudeBasis =>
-    privacy
-      ? { privacy: true, text: BASIS_ON, opened: [], refused: [] }
+    calls()
+      ? { privacy: true, text: !setting && unavailable !== null ? unavailable : BASIS_ON, opened: [], refused: [] }
       : {
           privacy: false,
           text: opened.length === 0 ? 'Claude could open files, but opened none for this answer.' : `Claude opened ${opened[0]}.`,
@@ -412,7 +426,7 @@ export function createMockClaude(
     switch (job.job) {
       case 'reviewPlan': {
         if (job.ids.length === 0) return { kind: 'error', message: 'Tick something in the plan first: there’s nothing for Claude to review.' };
-        const flags = [...canned.flags, ...(privacy || !canned.openFlag ? [] : [canned.openFlag])]
+        const flags = [...canned.flags, ...(calls() || !canned.openFlag ? [] : [canned.openFlag])]
           .filter((f) => job.ids.includes(f.id))
           .map((f) => ({ ...f, title: title(scan, f.id) }));
         const fine = job.ids
@@ -424,7 +438,7 @@ export function createMockClaude(
           flags,
           fine,
         };
-        return { job: 'reviewPlan', basis: basis(privacy ? [] : Object.values(canned.opened).slice(0, 2)), result, dropped: [], refreshed: null };
+        return { job: 'reviewPlan', basis: basis(calls() ? [] : Object.values(canned.opened).slice(0, 2)), result, dropped: [], refreshed: null };
       }
       case 'pickPlan': {
         const changes: ClaudeChange[] = [];
@@ -472,13 +486,13 @@ export function createMockClaude(
             bytes: tile.bytes,
             files: tile.files,
             short: e.short,
-            explanation: privacy ? e.explanation : e.deep,
+            explanation: calls() ? e.explanation : e.deep,
             suggested: e.suggests ? [e.suggests] : [],
           });
         }
         add(scan, suggestions);
         const result: ClaudeResult = { kind: 'explain', folders };
-        const opened = privacy ? [] : folders.slice(0, 2).map((f) => `${f.path}${platform === 'windows' ? '\\' : '/'}…`);
+        const opened = calls() ? [] : folders.slice(0, 2).map((f) => `${f.path}${platform === 'windows' ? '\\' : '/'}…`);
         return { job: 'explainFolders', basis: basis(opened), result, dropped: structuredClone(canned.refused), refreshed: refreshed(scan) };
       }
       case 'tidyLayout': {
@@ -498,7 +512,7 @@ export function createMockClaude(
   const ask = (scan: MockClaudeScan, conversation: string, text: string): ClaudeAnswer | ClaudeFailure => {
     // As the core: only a chat begun in this privacy mode, and not ended since by a privacy change, is asked in.
     const chat = scan.chats.get(conversation);
-    if (!chat || chat.ended || chat.privacy !== privacy) return { kind: 'chatEnded' };
+    if (!chat || chat.ended || chat.privacy !== calls()) return { kind: 'chatEnded' };
     if (!text.trim()) return { kind: 'error', message: 'Type a question for Claude first.' };
     const about = chat.about;
     const last = { from: 'person' as const, text: text.trim() };
@@ -513,18 +527,18 @@ export function createMockClaude(
         lose: p.regenerable ? 'Not much: it comes back on its own.' : 'What’s in it, for good.',
         back: p.regenerable ? 'Yes, on its own.' : 'No. Vacancy deletes permanently.',
       };
-      if (!privacy && canned.opened[p.id]) opened = [canned.opened[p.id]!];
+      if (!calls() && canned.opened[p.id]) opened = [canned.opened[p.id]!];
       reply =
         messages.length === 1
           ? `${first.what}\nWhat you’d lose: ${first.lose}\nDoes it come back? ${first.back}`
           : /back|undo|restore|recycle|trash/i.test(last.text)
             ? 'Deleting is permanent: it skips the Recycle Bin and the Trash, and Vacancy can’t undo it. Only Tidy up’s moves can be undone.'
-            : `From ${privacy ? 'the names, sizes and dates I can see' : (opened[0] ?? 'the files I opened')}: ${first.lose}`;
+            : `From ${calls() ? 'the names, sizes and dates I can see' : (opened[0] ?? 'the files I opened')}: ${first.lose}`;
     } else {
       const e = canned.explain.find((x) => x.path === about.path);
       const name = about.path.split(/[\\/]/).at(-1) ?? about.path;
-      reply = e ? (privacy ? e.explanation : e.deep) : `A ${name} folder I don’t recognise from its name alone. Nothing in it is in your plan.`;
-      if (!privacy && e) opened = [`${about.path}${platform === 'windows' ? '\\' : '/'}…`];
+      reply = e ? (calls() ? e.explanation : e.deep) : `A ${name} folder I don’t recognise from its name alone. Nothing in it is in your plan.`;
+      if (!calls() && e) opened = [`${about.path}${platform === 'windows' ? '\\' : '/'}…`];
     }
     chat.turns.push(last, { from: 'claude', text: reply });
     return {
@@ -586,7 +600,7 @@ export function createMockClaude(
     },
     setPrivacy: (on: boolean) => {
       // As the core: the new mode and the end of every chat in one step.
-      privacy = on;
+      setting = on;
       endChats();
       return Promise.resolve(status());
     },
@@ -604,7 +618,7 @@ export function createMockClaude(
         const scan = scanOf(mountPoint, scanId);
         if (!scan) return Promise.reject(new Error(SCAN_GONE));
         id = `chat-${++chats}`;
-        scan.chats.set(id, { about, privacy, turns: [], ended: false });
+        scan.chats.set(id, { about, privacy: calls(), turns: [], ended: false });
       }
       const chat = id;
       return start(mountPoint, scanId, { job: 'ask', conversation: chat, text }, onEvent).then((requestId) => ({

@@ -22,7 +22,7 @@ import { RiskChip, SourceTag } from '../plan/bits';
 import { activeMoves, kindFolders } from '../tidy/model';
 import { Basis, Dropped, HiddenFold, JobLine, Mark, PrivacyNotice, PrivacyRow } from './bits';
 import { FIRST_QUESTION } from './ClaudeProvider';
-import { pickOffer, tileAt, useClaude, type ChatEntry, type Claude, type Conversation, type JobEntry, type JobKind, type Scope } from './context';
+import { pickOffer, readsFiles, tileAt, useClaude, type ChatEntry, type Claude, type Conversation, type JobEntry, type JobKind, type Scope } from './context';
 import './claude.css';
 
 interface Props {
@@ -213,7 +213,7 @@ function PanelOn(p: OnProps) {
   return (
     <>
       <div className="cp-status">
-        <PrivacyRow claude={claude} privacy={status.privacy} fixture={status.fixture} />
+        <PrivacyRow claude={claude} privacy={status.privacy} fixture={status.fixture} unavailable={status.readsUnavailable} />
         <button type="button" className="link-button cp-off" onClick={claude.turnOff}>
           Turn off Claude
         </button>
@@ -227,7 +227,7 @@ function PanelOn(p: OnProps) {
         <div className="cp-msg is-claude">
           <p>
             <Mark size={12} />{' '}
-            {status.privacy
+            {!readsFiles(status)
               ? 'I can see the names, sizes, counts and dates from this scan. Nothing inside your files.'
               : 'I can see this scan, and I can open files on this PC, except the places that always stay hidden.'}{' '}
             I only propose: nothing changes until you confirm.

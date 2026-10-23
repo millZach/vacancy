@@ -482,16 +482,27 @@ fn claude_status_now(app: &AppHandle) -> Result<claude::Status, String> {
     let home = claude_home(app)?;
     let settings = claude::settings::load(&home);
     let found = claude::discovery::locate();
-    let fixture = !matches!(app.state::<Session>().mode, Mode::Real);
-    Ok(claude::Status::of(
-        settings,
-        found.is_some(),
-        fixture,
-        || match found.as_deref() {
+    let mode = &app.state::<Session>().mode;
+    let fixture = !matches!(mode, Mode::Real);
+    let mut status = claude::Status::of(settings, found.is_some(), fixture, || {
+        match found.as_deref() {
             Some(exe) => claude::runner::signed_in(exe, &home.join("claude-work")),
             None => Err(Failure::NotFound),
-        },
-    ))
+        }
+    });
+    status.reads_unavailable = claude_reads_unavailable(mode);
+    Ok(status)
+}
+
+/// Why privacy mode off can't let Claude open files in this mode, in words, or `None` when it can: a moved Claude
+/// Code or Codex folder no deny rule can name, or a fixture folder no allow rule can spell exactly. Every call then
+/// runs as if privacy mode were on (ADR 0008).
+fn claude_reads_unavailable(mode: &Mode) -> Option<String> {
+    let fixture = match mode {
+        Mode::Fixture { root, .. } => Some(root.as_path()),
+        _ => None,
+    };
+    claude::runner::reads_unavailable(fixture)
 }
 
 /// Claude's status: not found, signed out, off or on, with privacy mode and the always-hidden places.
@@ -525,6 +536,14 @@ async fn claude_set_enabled(on: bool, app: AppHandle) -> Result<claude::Status, 
 #[tauri::command]
 async fn claude_set_privacy(on: bool, app: AppHandle) -> Result<claude::Status, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        // In fixture mode, a fixture folder no allow rule can spell exactly refuses privacy mode off: Claude
+        // couldn't be kept inside it.
+        if let Mode::Fixture { root, .. } = &app.state::<Session>().mode
+            && !on
+            && let Some(why) = claude::runner::reads_unavailable_in(Some(root), &[])
+        {
+            return Err(why);
+        }
         claude_change_settings(&app, |settings| settings.privacy = on)?;
         claude_status_now(&app)
     })
@@ -628,7 +647,9 @@ async fn claude_chat(
         None => {
             let session = app.state::<Session>();
             let _mode = lock(&session.claude_mode);
-            let privacy = claude::settings::load(&claude_home(&app)?).privacy;
+            // A chat begins in the mode its calls run in: privacy mode on while reads are unavailable.
+            let privacy = claude::settings::load(&claude_home(&app)?).privacy
+                || claude_reads_unavailable(&session.mode).is_some();
             on_scan(&session.scans, &mount_point, scan, |scanned| {
                 Ok(scanned.volume.claude.chats.open(about, privacy))
             })?
@@ -674,13 +695,19 @@ fn claude_job(
             .unwrap_or_else(|_| vec![mount_point.to_owned()]),
         _ => Vec::new(),
     };
+    let unavailable;
     let (readable, prepared) = {
         let _mode = lock(&session.claude_mode);
         let settings = claude::settings::load(&home);
         if !settings.enabled {
             return Err(Failure::error("Claude is off. Turn it on first."));
         }
-        let readable = (!settings.privacy).then(|| claude::readable(&env, &drives));
+        // Privacy mode off, but no rule can keep Claude where it may read: it runs as if privacy mode were on.
+        unavailable = (!settings.privacy)
+            .then(|| claude_reads_unavailable(&session.mode))
+            .flatten();
+        let readable =
+            (!settings.privacy && unavailable.is_none()).then(|| claude::readable(&env, &drives));
         let prepared = session.scans.with_last(mount_point, |last| {
             let scanned = last
                 .filter(|s| s.generation == scan && !s.spent)
@@ -721,6 +748,13 @@ fn claude_job(
             ));
         }
         claude::apply(prepared, reply, &mut scanned.volume, &env, cancel)
+    })
+    .map(|mut answer| {
+        // The answer's foot says why Claude didn't open files though privacy mode is off.
+        if let Some(why) = unavailable {
+            answer.basis.text = why;
+        }
+        answer
     })
 }
 

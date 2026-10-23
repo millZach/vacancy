@@ -14,6 +14,7 @@ import {
   ClaudeContext,
   isEnabled,
   pickOffer,
+  readsFiles,
   type ChatEntry,
   type Claude,
   type Conversation,
@@ -203,7 +204,7 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     const id = `job-${++seq}`;
     const token = ++seq;
     const entry: JobEntry = {
-      kind: 'job', id, job, phase: 'working', answer: null, failure: null, privacy: statusNow.privacy, kept: [], pick: null,
+      kind: 'job', id, job, phase: 'working', answer: null, failure: null, privacy: !readsFiles(statusNow), kept: [], pick: null,
     };
     edit(scope, (c) => ({ ...c, entries: [...c.entries, entry] }));
     const arg: ClaudeJob =
@@ -308,7 +309,7 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       finished(rkey, token, event);
       if (event.kind === 'failed' && event.failure.kind === 'chatEnded' && !restarted) {
         const now = statusRef.current;
-        const privacy = now.phase === 'ready' ? now.status.privacy : true;
+        const privacy = now.phase === 'ready' ? !readsFiles(now.status) : true;
         const fresh: ChatEntry = { ...chat, conversation: null, turns: [{ from: 'person', text, privacy }], phase: 'working', failure: null };
         editEntry<ChatEntry>(scope, chat.id, (e) => (e.phase === 'working' || e.phase === 'slow' ? fresh : e));
         return send(scope, fresh, text, true);
@@ -343,7 +344,7 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   const ask = (scope: Scope, about: ClaudeAbout, name: string, text?: string) => {
     if (!statusNow || changing.current || !scanOf(scope)) return;
     setEnded(null);
-    const privacy = statusNow.privacy;
+    const privacy = !readsFiles(statusNow);
     const c = convos[keyOf(scope)] ?? EMPTY;
     const had = c.entries.find((e): e is ChatEntry => e.kind === 'chat' && sameAbout(e.about, about));
     const busy = had?.phase === 'working' || had?.phase === 'slow';

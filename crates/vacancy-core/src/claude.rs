@@ -81,6 +81,9 @@ pub struct Status {
     /// Why the sign-in check didn't work, in words, for [`State::CheckTimedOut`] and [`State::CheckFailed`] (and
     /// [`State::NotFound`] when Claude Code went missing as it was checked).
     pub message: Option<String>,
+    /// Why privacy mode off can't let Claude open files here, in words ([`runner::reads_unavailable_in`]): then
+    /// every call runs as if privacy mode were on, and the panel says so. `None` when it can.
+    pub reads_unavailable: Option<String>,
 }
 
 impl Status {
@@ -126,6 +129,7 @@ impl Status {
             fixture,
             hidden: hidden::list(),
             message,
+            reads_unavailable: None,
         }
     }
 }

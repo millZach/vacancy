@@ -8,7 +8,8 @@
 // Past runs, then each other state on a fresh page (not found, not signed in, a sign-in check that timed out or
 // failed, slow with Cancel, cancelled, an error and a timeout in Claude's words, off again with Claude's items still
 // in the plan and the panel folded again, a pick set aside because the plan changed while Claude picked, and one
-// settled by a later edit), a macOS pass (no Tidy up layouts) and a 1024x700 pass.
+// settled by a later edit, and privacy mode off with reads unavailable, saying why), a macOS pass (no Tidy up
+// layouts) and a 1024x700 pass.
 //
 //   npm run dev                       (the UI on the mock bridge, http://localhost:1420)
 //   npm run claude-shots -- [options]
@@ -368,6 +369,20 @@ async function states() {
     check(!(await has(pick.getByRole('button', { name: 'Keep mine' }))), 'pick settled: no Keep mine');
     await into(pick.locator('.cl-diff-settled'));
     await shot(page, '39-pick-settled');
+    await page.close();
+  }
+  {
+    // Privacy mode off, but no rule could keep Claude where it may read: the panel says why, and answers are from
+    // names, sizes and dates.
+    const page = await open('fixture=windows&claude=on&privacy=off&reads=unavailable&claudeMs=300');
+    await page.getByRole('button', { name: 'Build a plan' }).click();
+    const note = panel(page).getByRole('note');
+    check(await has(note.getByText('Claude can’t open files for now', { exact: false })), 'reads unavailable: the panel says why');
+    check(await has(panel(page).getByText('Off, but Claude can’t open files for now', { exact: false })), 'reads unavailable: the privacy row says so');
+    const review = await job(page, 'Review my plan', 'reviewPlan');
+    check(await has(review.getByText('Claude gets names, sizes, counts and dates only', { exact: false })), 'reads unavailable: the answer says why');
+    check(!(await has(review.getByText('Claude opened', { exact: false }))), 'reads unavailable: Claude opened nothing');
+    await shot(page, '39b-reads-unavailable');
     await page.close();
   }
 }
