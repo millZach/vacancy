@@ -112,6 +112,30 @@ fn counts_hard_links_once() {
     assert_eq!(snap.tree(a).bytes + snap.tree(b).bytes, MIB);
 }
 
+/// A backup of a browser profile made with hard links: both folders are profiles by their markers, whichever the
+/// walk lists first, and the shared files count once.
+#[test]
+fn hard_linked_profile_markers_mark_both_folders() {
+    let fx = Fixture::new();
+    let prefs = fx.file("Work/Preferences", 4096);
+    let history = fx.file("Work/History", 4096);
+    fx.dir("Work-backup");
+    fs::hard_link(&prefs, fx.path("Work-backup/Preferences")).expect("hard link");
+    fs::hard_link(&history, fx.path("Work-backup/History")).expect("hard link");
+
+    let snap = fx.scan();
+    assert_eq!(snap.stats().hard_links_merged, 2);
+    for name in ["Work", "Work-backup"] {
+        let d = snap.find(&fx.path(name)).unwrap();
+        let m = snap.markers(d);
+        assert!(
+            m.contains(vacancy_core::Markers::PREFERENCES)
+                && m.contains(vacancy_core::Markers::CHROMIUM_STORE),
+            "{name} is a profile"
+        );
+    }
+}
+
 #[test]
 fn keeps_unicode_names_exactly() {
     let fx = Fixture::new();
