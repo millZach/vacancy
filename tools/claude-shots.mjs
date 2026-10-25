@@ -1,5 +1,9 @@
 // Screenshots the Claude panel (ADR 0008, prototype/ai-advisor variant B) in Edge, on the mock bridge's Claude, which
-// never calls Claude: off and folded to its rail (the map gets the room), opened with the privacy notice and what
+// never calls Claude: first beside the scan screen (prototype/claude-entry, variant A), folded and off, opened from
+// the header pill, on with its job chips and chat waiting for a scan, the model and reasoning picker, privacy mode off
+// before a scan, then a chat about the whole scan with "Answered by" (and a model change that applies to the next
+// answer only) and a row's Ask Claude still focusing the chat; then on the map: off and folded to its rail (the map
+// gets the room), opened with the privacy notice and what
 // always stays hidden, turning on, on, each job's answer
 // (Explain big folders with its hover card, a folder chat with a follow-up and a typed question, Review my plan, a
 // row's Ask Claude, Let Claude pick's changes with Keep mine and Use Claude's plan, Suggest Tidy up layouts with
@@ -21,7 +25,7 @@
 //   --out <dir>        where PNGs go               (default shots/claude)
 //   --name <prefix>    file name prefix            (default claude)
 //   --viewport <WxH>   browser viewport            (default 1280x800)
-//   --only <which>     all (default), win, states, mac or small
+//   --only <which>     all (default), entry, win, states, mac or small
 //
 // Fails on a page error, or a screen that doesn't say what it should.
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -52,17 +56,23 @@ function check(ok, what) {
   notes.push({ check: what });
 }
 
-async function open(query, viewport = { width: vw, height: vh }) {
+async function open(query, viewport = { width: vw, height: vh }, { scan = true } = {}) {
   const page = await browser.newPage({ viewport });
   page.on('pageerror', (e) => errors.push(`${query}: ${String(e)}`));
   page.on('console', (m) => m.type() === 'error' && errors.push(`${query}: ${m.text()}`));
   await page.goto(`${o.base}?${query}`);
-  const scan = page.locator('button.cta', { hasText: /^\s*Scan / });
-  await scan.waitFor({ timeout: 30_000 });
-  await scan.click();
+  const button = page.locator('button.cta', { hasText: /^\s*Scan / });
+  await button.waitFor({ timeout: 30_000 });
+  if (scan) await scanNow(page);
+  else await settle(page, 900);
+  return page;
+}
+
+/** Presses Scan on the plate and waits for the map. */
+async function scanNow(page) {
+  await page.locator('button.cta', { hasText: /^\s*Scan / }).click();
   await page.locator('.atlas.is-map').waitFor({ timeout: 60_000 });
   await settle(page, 900);
-  return page;
 }
 
 const shot = (page, step) => page.screenshot({ path: join(o.out, `${o.name}-${step}.png`) });
@@ -451,6 +461,112 @@ async function states() {
   }
 }
 
+// ---------------------------------------------------------------- Before a scan, the picker, the whole-scan chat
+// (prototype/claude-entry, variant A): the panel beside the scan screen, off and on; the job chips and the chat wait
+// for a scan; the model and reasoning picker; then, after the scan, a chat about the whole scan with "Answered by",
+// and Ask on a row still focusing the chat on that row.
+async function entry() {
+  const page = await open('fixture=windows&claudeMs=800', { width: vw, height: vh }, { scan: false });
+  const p = panel(page);
+  const note = page.locator('.advisor-note');
+  check(await has(page.locator('.atlas.is-scan')), 'before a scan: the scan screen is up');
+  check(await has(page.locator('.cp.is-folded')), 'before a scan, off: the panel is folded to its rail beside the scan screen');
+  check(await has(note.getByText('Turn it on in the Claude panel on the left', { exact: false })), 'before a scan, off: the plate says Claude is in the panel on the left');
+  const pill = page.getByRole('button', { name: /^Rules only: show the Claude panel/ });
+  check(await has(pill), 'before a scan: the header pill is a button');
+  await shot(page, 'p0-scan-off-folded');
+  await pill.click();
+  await settle(page);
+  check(await has(p.getByRole('heading', { name: 'Turn on Claude?' })), 'before a scan: the pill unfolds the turn-on step');
+  await shot(page, 'p1-scan-off-open');
+  await p.getByRole('button', { name: 'Turn on Claude' }).click();
+  await p.getByRole('button', { name: 'Turn off Claude' }).waitFor({ timeout: 10_000 });
+  await settle(page);
+  check(await has(p.getByRole('switch', { name: 'Privacy mode', checked: true })), 'before a scan, on: privacy mode is on');
+  for (const chip of ['Review my plan', 'Let Claude pick', 'Explain big folders', 'Suggest Tidy up layouts'])
+    check(await p.getByRole('button', { name: chip, exact: true }).isDisabled(), `before a scan: ${chip} waits for a scan`);
+  check(await has(p.getByText('Scan a drive first — Claude works from the scan.')), 'before a scan: the chips say why');
+  check(await p.getByRole('textbox', { name: 'Ask Claude, after the scan' }).isDisabled(), 'before a scan: the chat waits for a scan');
+  check(await has(note.getByText('Built-in rules, and Claude in the panel on the left.')), 'before a scan, on: the plate says Claude is on, on the left');
+  check((await p.locator('.cp-head p').innerText()) === 'On · through your Claude Code', 'before a scan: the head line with the defaults');
+  await shot(page, 'p2-scan-on');
+
+  // The picker: Opus and High, remembered by the core; the head line says it at once.
+  await p.getByRole('combobox', { name: 'Model' }).selectOption('opus');
+  await p.getByRole('combobox', { name: 'Reasoning' }).selectOption('high');
+  await settle(page);
+  check((await p.locator('.cp-head p').innerText()) === 'On · Opus · High, through your Claude Code', 'picker: the head line names the alias and the reasoning');
+  const models = await p.getByRole('combobox', { name: 'Model' }).locator('option').allInnerTexts();
+  check(models.join('|') === 'Your default|Opus|Sonnet|Haiku|Fable', `picker: the models are the aliases (${models.join(', ')})`);
+  const efforts = await p.getByRole('combobox', { name: 'Reasoning' }).locator('option').allInnerTexts();
+  check(efforts.join('|') === 'Default|Low|Medium|High|Extra high|Max', `picker: the reasoning levels (${efforts.join(', ')})`);
+  await shot(page, 'p3-picker');
+
+  // Privacy mode switches before a scan too (it asks first), and back on.
+  await p.getByRole('switch', { name: 'Privacy mode' }).click();
+  await page.getByRole('button', { name: 'Turn privacy mode off' }).click();
+  await p.getByRole('switch', { name: 'Privacy mode', checked: false }).waitFor({ timeout: 5_000 });
+  await settle(page);
+  check(await has(p.getByText('Off: Claude can read files on the drive you scanned', { exact: false })), 'before a scan: privacy mode goes off');
+  await shot(page, 'p4-scan-privacy-off');
+  await p.getByRole('switch', { name: 'Privacy mode' }).click();
+  await p.getByRole('switch', { name: 'Privacy mode', checked: true }).waitFor({ timeout: 5_000 });
+  await settle(page);
+
+  // After the scan: the jobs and the chat work; a question about the whole scan, no row picked first.
+  await scanNow(page);
+  check(!(await p.getByRole('button', { name: 'Review my plan', exact: true }).isDisabled()), 'after the scan: the chips work');
+  const box = p.getByRole('textbox', { name: 'Ask Claude about this scan' });
+  check(!(await box.isDisabled()), 'after the scan: the chat sends about the whole scan, no row picked first');
+  await shot(page, 'p5-map-on');
+  await box.fill('What should I clean up?');
+  await box.press('Enter');
+  const whole = p.locator('.cp-entry[data-chat="the whole scan"]');
+  await whole.locator('.cl-first').waitFor({ timeout: 20_000 });
+  await settle(page, 700);
+  check(await has(whole.getByText('What should I clean up?')), 'whole scan: the question is in the log');
+  check(await has(whole.getByText('The biggest things on', { exact: false })), 'whole scan: Claude answers about the drive');
+  check(await has(whole.locator('.cl-answered', { hasText: 'Answered by Opus 5.5 · High' })), 'whole scan: the answer says which model made it');
+  check((await p.locator('.cp-head p').innerText()) === 'On · Opus 5.5 · High, through your Claude Code', 'whole scan: the head line names the model once known');
+  check(!(await has(p.locator('.cp-about'))), 'whole scan: no row chip on the composer');
+  await into(whole.locator('.cp-you'));
+  await shot(page, 'p6-whole-scan-chat');
+
+  // Ask on a row still focuses the chat on it, with its chip and ×; the × goes back to the whole scan.
+  await page.getByRole('button', { name: 'Build a plan' }).click();
+  const tray = page.getByRole('complementary', { name: 'Plan' });
+  await tray.waitFor();
+  await settle(page);
+  await tray.locator('.tray-row', { hasText: 'Rust build output' }).getByRole('button', { name: 'Ask Claude' }).click();
+  const row = p.locator('.cp-entry[data-chat="Rust build output in 12 projects"]');
+  await row.locator('.cl-first').waitFor({ timeout: 20_000 });
+  await settle(page, 700);
+  check(await has(p.getByRole('textbox', { name: 'Ask about Rust build output in 12 projects' })), 'row: Ask focuses the chat on the row');
+  check(await has(p.locator('.cp-about', { hasText: 'Rust build output in 12 projects' })), 'row: the composer has the row chip');
+  check(await has(row.locator('.cl-answered', { hasText: 'Answered by Opus 5.5 · High' })), 'row: the answer says which model made it');
+  await shot(page, 'p7-row-chat');
+  await p.getByRole('button', { name: 'Stop asking about it' }).click();
+  await settle(page, 300);
+  const back = p.getByRole('textbox', { name: 'Ask Claude about this scan' });
+  check(await has(back), 'row: the × goes back to the whole scan');
+  // A change of model applies to the next question.
+  await p.getByRole('combobox', { name: 'Model' }).selectOption('sonnet');
+  await p.getByRole('combobox', { name: 'Reasoning' }).selectOption('default');
+  await settle(page, 300);
+  await back.fill('Can I get them back after?');
+  await back.press('Enter');
+  await page.waitForFunction(() => {
+    const c = document.querySelector('.cp-entry[data-chat="the whole scan"]');
+    return c && c.querySelectorAll('.cl-answered').length >= 2;
+  }, null, { timeout: 20_000 });
+  await settle(page, 700);
+  const lines = await whole.locator('.cl-answered').allInnerTexts();
+  check(lines.at(-1)?.trim() === 'Answered by Sonnet 5.5', `whole scan: the next answer is the new model's (${lines.join(' / ')})`);
+  check(lines[0]?.trim() === 'Answered by Opus 5.5 · High', 'whole scan: the earlier answer keeps its own');
+  await shot(page, 'p8-whole-scan-follow-up');
+  await page.close();
+}
+
 // ---------------------------------------------------------------- macOS: the same jobs, no Tidy up layouts
 async function mac() {
   const page = await open('fixture=macos&claude=on&claudeMs=400');
@@ -479,6 +595,7 @@ async function small() {
 }
 
 try {
+  if (want('entry')) await entry();
   if (want('win')) await windows();
   if (want('states')) await states();
   if (want('mac')) await mac();
