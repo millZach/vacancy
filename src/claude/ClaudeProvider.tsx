@@ -3,6 +3,7 @@ import {
   useBridge,
   type ClaudeAbout,
   type ClaudeAnswer,
+  type ClaudeEffort,
   type ClaudeEvent,
   type ClaudeJob,
   type ClaudeModel,
@@ -145,6 +146,8 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   const modesOut = useRef(0);
   /** Since the queue was last empty: the newest answer from a change the core kept, and the first refusal. */
   const modesKept = useRef<ClaudeStatus | null>(null);
+  /** The model and reasoning last asked for, while a change of them may still be out. */
+  const modelAsked = useRef<{ model: ClaudeModel; effort: ClaudeEffort } | null>(null);
   const modesRefused = useRef<string | null>(null);
 
   /**
@@ -731,9 +734,16 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     },
     cancelPrivacyOff: () => setPrivacyAsk(false),
     // In line with the changes of mode, so a question asked after it is prepared with it; it ends no conversation.
+    // A pick the same as the last one asked for is no change; compared with the core's last answer instead, picking
+    // back while an earlier pick is still out would be dropped, and the earlier pick would be the one kept.
     setModel: (model, effort) => {
-      if (statusNow?.model === model && statusNow.effort === effort) return;
-      void modeSetting(() => bridge.claudeSetModel(model, effort));
+      const last = modelAsked.current ?? (statusNow ? { model: statusNow.model, effort: statusNow.effort } : null);
+      if (last?.model === model && last.effort === effort) return;
+      modelAsked.current = { model, effort };
+      void modeSetting(() => bridge.claudeSetModel(model, effort)).then(() => {
+        // Every change asked for has answered: the status is the core's word from now on.
+        if (modesOut.current === 0) modelAsked.current = null;
+      });
     },
     modelName: (model) => names[model] ?? null,
     conversation: (w) => convos[keyOf(w)] ?? EMPTY,

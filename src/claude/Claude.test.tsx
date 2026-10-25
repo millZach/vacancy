@@ -1405,3 +1405,74 @@ describe('Claude before a scan, the model picker and the whole-scan chat', () =>
     expect(before.mock.calls.at(-1)!.slice(2, 5)).toEqual([first, { kind: 'scan' }, 'Can I get them back after?']);
   });
 });
+
+describe('the model and reasoning picker, with the core slow to answer', () => {
+  /** A bridge whose `claudeSetModel` answers only when the test lets it, one at a time, in order. */
+  function slowPicks() {
+    const bridge = windows({ claude: 'on' });
+    const real = bridge.claudeSetModel.bind(bridge);
+    const gates: (() => Promise<void>)[] = [];
+    const set = vi.spyOn(bridge, 'claudeSetModel').mockImplementation(
+      (model, effort) => new Promise((resolve, reject) => gates.push(() => real(model, effort).then(resolve, reject))),
+    );
+    /** Lets the next pick the core got answer, once it has got it. */
+    const answer = async (n: number) => {
+      await waitFor(() => expect(gates.length).toBeGreaterThanOrEqual(n));
+      await act(() => gates[n - 1]!());
+    };
+    return { bridge, set, answer };
+  }
+
+  it('keeps the last model picked when the user picks back before the first pick is kept', async () => {
+    const { bridge, set, answer } = slowPicks();
+    renderApp(bridge);
+    const model = await within(await screen.findByRole('complementary', { name: 'Claude' })).findByRole('combobox', { name: 'Model' });
+    await userEvent.selectOptions(model, 'opus');
+    await userEvent.selectOptions(model, 'default');
+    // The second pick shows at once, while the first is still out.
+    expect(model).toHaveValue('default');
+    await answer(1);
+    await answer(2);
+    expect(set.mock.calls).toEqual([
+      ['opus', 'default'],
+      ['default', 'default'],
+    ]);
+    expect(await bridge.claudeStatus()).toMatchObject({ model: 'default', effort: 'default' });
+    await waitFor(() => expect(within(panel()).getByRole('combobox', { name: 'Model' })).toHaveValue('default'));
+    expect(within(panel()).getByText('On · through your Claude Code')).toBeInTheDocument();
+  });
+
+  it('keeps the last reasoning picked when the user picks back before the first pick is kept', async () => {
+    const { bridge, set, answer } = slowPicks();
+    renderApp(bridge);
+    const reasoning = await within(await screen.findByRole('complementary', { name: 'Claude' })).findByRole('combobox', { name: 'Reasoning' });
+    await userEvent.selectOptions(reasoning, 'high');
+    await userEvent.selectOptions(reasoning, 'default');
+    expect(reasoning).toHaveValue('default');
+    await answer(1);
+    await answer(2);
+    expect(set.mock.calls).toEqual([
+      ['default', 'high'],
+      ['default', 'default'],
+    ]);
+    expect(await bridge.claudeStatus()).toMatchObject({ model: 'default', effort: 'default' });
+    await waitFor(() => expect(within(panel()).getByRole('combobox', { name: 'Reasoning' })).toHaveValue('default'));
+    expect(within(panel()).getByText('On · through your Claude Code')).toBeInTheDocument();
+  });
+
+  it('keeps the last of several quick picks, each one asked of the core in order', async () => {
+    const { bridge, set, answer } = slowPicks();
+    renderApp(bridge);
+    const model = await within(await screen.findByRole('complementary', { name: 'Claude' })).findByRole('combobox', { name: 'Model' });
+    await userEvent.selectOptions(model, 'opus');
+    await userEvent.selectOptions(model, 'sonnet');
+    await userEvent.selectOptions(model, 'opus');
+    await answer(1);
+    await answer(2);
+    await answer(3);
+    expect(set.mock.calls.map(([m]) => m)).toEqual(['opus', 'sonnet', 'opus']);
+    expect(await bridge.claudeStatus()).toMatchObject({ model: 'opus' });
+    await waitFor(() => expect(within(panel()).getByText('On · Opus, through your Claude Code')).toBeInTheDocument());
+    expect(model).toHaveValue('opus');
+  });
+});
