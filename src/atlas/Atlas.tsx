@@ -41,6 +41,7 @@ import { tileOf } from '../plan/totals';
 import { ConfirmDialog } from '../run/ConfirmDialog';
 import { TipSection } from '../claude/bits';
 import { ClaudePanel } from '../claude/ClaudePanel';
+import { ProtoGhostRail, ProtoPrescanPanel } from '../claude/prototype/ProtoPrescan';
 import { claudeNoteOf, explainedFolders, isOn, liveFlags, useClaude, type Scope } from '../claude/context';
 import type { StepView } from '../run/progress';
 import { RunPanel, type ShownRun } from '../run/RunPanel';
@@ -493,6 +494,13 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
   return (
     <>
       {panel}
+      {/* PROTOTYPE: before there's a map, ?claude=A docks the panel here and ?claude=C ghosts its rail. */}
+      {!overview && !summary && (
+        <>
+          <ProtoPrescanPanel />
+          <ProtoGhostRail />
+        </>
+      )}
       {/* Kept while the finish is up (hidden), so the map's size is still followed when it comes back. */}
       <main className={overview ? 'atlas is-map' : 'atlas is-scan'} hidden={!!summary}>
         {!overview && (

@@ -23,6 +23,7 @@ import { activeMoves, kindFolders } from '../tidy/model';
 import { Basis, Dropped, HiddenFold, JobLine, Mark, PrivacyNotice, PrivacyRow } from './bits';
 import { FIRST_QUESTION } from './ClaudeProvider';
 import { chatStarting, checkShown, jobRunning, pickOffer, readsFiles, scanUnavailable, tileAt, useClaude, type ChatEntry, type Claude, type Conversation, type JobEntry, type JobKind, type Scope } from './context';
+import { ProtoAnswered, ProtoHeadLine, ProtoModelPicker } from './prototype/ProtoModel';
 import './claude.css';
 
 interface Props {
@@ -90,7 +91,9 @@ export function ClaudePanel(props: Props) {
           <h2>
             <Mark size={15} /> Claude
           </h2>
-          <p>{headLine(status, c)}</p>
+          <p>
+            <ProtoHeadLine line={headLine(status, c)} />
+          </p>
         </div>
         <button type="button" className="icon-btn" onClick={() => claude.setFolded(true)} aria-label="Fold the Claude panel">
           <PanelLeftClose size={16} aria-hidden />
@@ -125,7 +128,7 @@ function headLine(status: ClaudeStatus | null, c: Conversation): string {
 }
 
 /** Off, not found or not signed in: the panel is the turn-on step, with the privacy notice. */
-function PanelOff({ claude, status }: { claude: Claude; status: ClaudeStatus }) {
+export function PanelOff({ claude, status }: { claude: Claude; status: ClaudeStatus }) {
   const checking = claude.checking || claude.turningOn;
   const [title, intro, row] =
     status.state === 'notFound'
@@ -221,6 +224,7 @@ function PanelOn(p: OnProps) {
           unavailable={unavailable}
           check={checkShown(status, claude.verifying)}
         />
+        <ProtoModelPicker />
         <button type="button" className="link-button cp-off" onClick={claude.turnOff}>
           Turn off Claude
         </button>
@@ -341,6 +345,7 @@ function JobItem({ e, ...p }: OnProps & { e: JobEntry }) {
           {a.result.kind === 'tidy' && <TidyReply e={e} {...p} />}
           {a.result.kind !== 'pick' && a.result.kind !== 'explain' && <Dropped items={a.dropped} />}
           <Basis basis={a.basis} />
+          <ProtoAnswered id={e.id} />
         </div>
       )}
     </div>
@@ -694,6 +699,7 @@ function ChatItem({ e, ...p }: OnProps & { e: ChatEntry }) {
                 </p>
                 {t.basis && i === 1 && <Basis basis={t.basis} />}
                 {t.basis && i > 1 && !t.basis.privacy && <Basis basis={t.basis} />}
+                <ProtoAnswered id={`${e.id}:${i}`} />
               </div>
             ),
           )}

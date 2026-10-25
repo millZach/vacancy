@@ -1,0 +1,176 @@
+/* PROTOTYPE (throwaway): where Claude lives before a scan, and the model picker. */
+
+/* ---------- the model and reasoning picker, and "Answered by" ---------- */
+.proto-model { align-items: flex-start; padding-top: 8px; }
+.proto-model-grid { display: grid !important; grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr); gap: 6px 8px !important; flex: 1; }
+.proto-model-grid label { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.proto-model-grid b { font-size: var(--text-xs) !important; color: var(--color-text-3) !important; font-weight: 600; }
+.proto-model-grid select {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--color-line-2);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font: 500 var(--text-xs) var(--font-sans);
+  cursor: pointer;
+}
+.proto-model-grid select:hover { border-color: var(--color-line-hover); }
+.proto-model-grid select:focus { outline: none; border-color: rgba(var(--ai-rgb), 0.6); }
+.proto-model-fine { grid-column: 1 / -1; color: var(--color-text-3); font-size: var(--text-2xs, 11px); line-height: 1.4; }
+.proto-answered {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 6px 0 0 !important;
+  font-size: var(--text-2xs, 11px);
+  color: var(--color-text-3);
+  letter-spacing: 0.01em;
+}
+.proto-answered svg { color: var(--color-ai); flex: none; }
+
+/* ---------- A: the panel beside the scan screen ---------- */
+.proto-wait {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 10px 11px;
+  border: 1px dashed rgba(var(--ai-rgb), 0.45);
+  border-radius: var(--radius-md);
+  color: var(--color-text-2);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+.proto-wait svg { flex: none; margin-top: 1px; color: var(--color-ai); }
+.proto-wait b { color: var(--color-text); }
+.proto-foot-note { margin: -2px 0 8px; font-size: var(--text-xs); color: var(--color-text-3); }
+.proto-note-act { flex: none; margin-left: auto; }
+
+/* ---------- B: the card under the header button ---------- */
+.proto-float {
+  position: fixed;
+  z-index: 80;
+  width: 300px;
+  border: 1px solid var(--color-line-2);
+  border-radius: var(--radius-card);
+  background: var(--color-panel);
+  box-shadow: var(--shadow-pop);
+}
+.proto-float.is-wide { width: 344px; max-height: calc(100vh - 90px); overflow-y: auto; }
+.proto-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 10px 10px 16px;
+  border-bottom: 1px solid var(--color-line);
+}
+.proto-card-head h2 { display: flex; align-items: center; gap: 7px; margin: 0; font: 700 16px/1.2 var(--font-sans); }
+.proto-card-body { padding: 4px 16px 12px; display: flex; flex-direction: column; }
+.proto-card-off .cp-off-body { padding: 12px 16px; }
+.proto-card-provider { border-bottom: 1px solid var(--color-line-2); }
+.proto-short {
+  list-style: none;
+  margin: 10px 0 2px;
+  padding: 0;
+  display: grid;
+  gap: 5px;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--color-text-2);
+}
+.proto-short li { display: grid; grid-template-columns: 42px minmax(0, 1fr); }
+.proto-short b { color: var(--color-text-3); font-weight: 600; }
+.proto-card-body .cp-on { margin-top: 12px; }
+.proto-card-body .cp-off { margin-top: 6px; }
+.proto-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 9px 16px 11px;
+  border-top: 1px solid var(--color-line);
+  font-size: var(--text-xs);
+  color: var(--color-text-3);
+}
+
+/* ---------- C: the ghosted rail, the plate row and the pill's bubble ---------- */
+.proto-ghost {
+  background: repeating-linear-gradient(-45deg, rgba(var(--ai-rgb), 0.05) 0 6px, transparent 6px 12px);
+  border-right: 1px dashed rgba(var(--ai-rgb), 0.4);
+}
+.proto-ghost .cp-rail { color: var(--color-text-3); }
+.proto-ghost .cp-rail .cl-mark { opacity: 0.7; }
+.proto-ghost .cp-rail span:last-child { font-weight: 500; letter-spacing: 0.02em; }
+.proto-ghost.is-flash { animation: proto-flash-rail 1.6s ease-out; }
+.proto-c-row { border-color: rgba(var(--ai-rgb), 0.4); }
+.proto-c-row.is-flash { animation: proto-flash 1.6s ease-out; }
+.proto-c-where {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 3px 8px;
+  border: 1px dashed rgba(var(--ai-rgb), 0.45);
+  border-radius: var(--radius-pill);
+  color: var(--color-ai);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+.advisor-note > .proto-c-where { flex-direction: row; }
+.proto-bubble {
+  display: flex;
+  gap: 8px;
+  padding: 11px 13px;
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  color: var(--color-text-2);
+}
+.proto-bubble .cl-mark { margin-top: 2px; }
+.proto-bubble b { color: var(--color-text); }
+@keyframes proto-flash {
+  0%, 30% { box-shadow: 0 0 0 2px rgba(var(--ai-rgb), 0.85), 0 0 28px rgba(var(--ai-rgb), 0.4); }
+  100% { box-shadow: 0 0 0 0 rgba(var(--ai-rgb), 0); }
+}
+@keyframes proto-flash-rail {
+  0%, 30% { background-color: rgba(var(--ai-rgb), 0.22); box-shadow: inset 0 0 0 2px rgba(var(--ai-rgb), 0.8); }
+  100% { background-color: transparent; box-shadow: none; }
+}
+
+/* ---------- the switcher ---------- */
+.proto-switch {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  z-index: 1000;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 999px;
+  background: #f4f6f8;
+  color: #0b0d10;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(0, 0, 0, 0.6);
+  font: 600 13px/1 var(--font-sans);
+  white-space: nowrap;
+}
+.proto-switch button {
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  border-radius: 999px;
+  font: inherit;
+}
+.proto-switch > button { width: 26px; height: 26px; }
+.proto-switch > button:hover { background: rgba(0, 0, 0, 0.08); }
+.proto-switch-label { min-width: 236px; text-align: center; }
+.proto-switch-sep { width: 1px; height: 18px; background: rgba(0, 0, 0, 0.2); margin: 0 4px; }
+.proto-switch-k { font-weight: 500; color: #555c66; font-size: 12px; }
+.proto-switch-seg { display: flex; padding: 2px; border-radius: 999px; background: rgba(0, 0, 0, 0.08); }
+.proto-switch-seg button { padding: 4px 9px; font-size: 12px; font-weight: 600; color: #3a4048; }
+.proto-switch-seg button.is-on { background: #0b0d10; color: #f4f6f8; }
