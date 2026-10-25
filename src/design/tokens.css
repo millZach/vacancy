@@ -2,6 +2,16 @@
    prototype's variant D ("Atlas + Wrapped", tag prototype/vacancy-ui). Components use these variables and never
    hard-code a palette colour or a font. */
 
+/* The middle dot "·" from the system's own text font: Overpass draws it as a mark with no width of its own, so
+   "On · Opus 5.5 · High" set in Overpass reads "On ·Opus 5.5 ·High". Only U+00B7 comes from this face; every other
+   character is Overpass's. Where none of these fonts is installed, Overpass's dot is used as before. */
+@font-face {
+  font-family: 'Vacancy Dot';
+  src: local('Segoe UI'), local('SegoeUI'), local('Helvetica Neue'), local('HelveticaNeue'), local('Arial'), local('ArialMT');
+  font-weight: 100 900;
+  unicode-range: U+00B7;
+}
+
 :root {
   /* ---------- colour ---------- */
   --color-bg: #0f1318; /* app background */
@@ -296,7 +306,7 @@
   --hatch: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.075) 0 1.5px, transparent 1.5px 7px);
 
   /* ---------- type ---------- */
-  --font-sans: 'Overpass Variable', 'Overpass', 'Segoe UI', system-ui, sans-serif;
+  --font-sans: 'Vacancy Dot', 'Overpass Variable', 'Overpass', 'Segoe UI', system-ui, sans-serif;
   --font-mono: 'Overpass Mono', ui-monospace, Consolas, monospace;
   --font-script: 'Neonderthaw', 'Brush Script MT', cursive;
   --text-tag: 9.5px; /* drive kind tags */
