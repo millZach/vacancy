@@ -49,6 +49,7 @@ button.advisor-trigger:hover {
 .advisor-note > svg { flex: none; color: var(--color-ai); }
 .advisor-note > span { display: flex; flex-direction: column; }
 .advisor-note b { font-weight: 600; color: var(--color-text); }
+.advisor-note .cl-note-act { flex: none; margin-left: auto; }
 
 /* ---------- provider rows, the switch, the privacy notice and the hidden places ---------- */
 .cl-provider {
@@ -76,6 +77,41 @@ button.advisor-trigger:hover {
 .cl-privacy-row { padding: 9px 0 4px; gap: 10px; }
 .cl-privacy-row .cl-provider-icon { width: 26px; height: 26px; color: var(--color-text-2); }
 .cl-privacy-row b { font-size: var(--text-ui); }
+
+/* The model and reasoning picker, under privacy mode, and "Answered by" under each answer. */
+.cl-model { align-items: flex-start; padding-top: 8px; }
+.cl-model .cl-model-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.75fr) minmax(0, 1fr);
+  gap: 6px 8px;
+  flex: 1;
+}
+.cl-model-grid label { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.cl-model .cl-model-grid b { font-size: var(--text-xs); font-weight: 600; color: var(--color-text-3); }
+.cl-model-grid select {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--color-line-2);
+  border-radius: var(--radius-md);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font: 500 var(--text-xs) var(--font-sans);
+  cursor: pointer;
+}
+.cl-model-grid select:hover { border-color: var(--color-line-hover); }
+.cl-model-grid select:focus-visible { outline: none; border-color: rgba(var(--ai-rgb), 0.6); }
+.cl-model .cl-model-fine { grid-column: 1 / -1; color: var(--color-text-3); font-size: var(--text-2xs, 11px); line-height: 1.4; }
+.cl-answered {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 6px 0 0;
+  font-size: var(--text-2xs, 11px);
+  color: var(--color-text-3);
+  letter-spacing: 0.01em;
+}
+.cl-answered svg { flex: none; color: var(--color-ai); }
 
 .cl-toggle {
   width: 29px;
@@ -294,6 +330,21 @@ button.advisor-trigger:hover {
 .cp-head h2 { display: flex; align-items: center; gap: 7px; margin: 0; font: 700 17px/1.2 var(--font-sans); }
 .cp-head p { margin: 3px 0 0; font-size: var(--text-sm); color: var(--color-text-3); }
 .cp-wait { margin: 0; padding: 16px var(--space-6); color: var(--color-text-3); font-size: var(--text-ui); }
+/* Before a scan: Claude's jobs wait for one. */
+.cp-scan-first {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 10px 11px;
+  border: 1px dashed rgba(var(--ai-rgb), 0.45);
+  border-radius: var(--radius-md);
+  color: var(--color-text-2);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+.cp-scan-first svg { flex: none; margin-top: 1px; color: var(--color-ai); }
+.cp-scan-first b { color: var(--color-text); }
+.cp-foot-note { margin: -2px 0 8px; font-size: var(--text-xs); color: var(--color-text-3); }
 .cp-status {
   flex: none;
   display: flex;

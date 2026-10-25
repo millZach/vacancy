@@ -12,7 +12,8 @@
 //! - **The call:** made exactly as a privacy-off call is, by the same builder ([`super::runner::invocation`]): the
 //!   settings in a file, the same flags and environment, `blockReadsOutsideWorkingDirectories`, and the folder as
 //!   what Claude may read ([`Access::Drive`] with the folder as its root, or in fixture mode [`Access::Fixture`]).
-//!   No `--model`. Claude is asked to Read both files and say what it read, in a strict JSON schema.
+//!   No `--model` and no `--effort`, whatever the person picked: the result is kept per executable, not per model.
+//!   Claude is asked to Read both files and say what it read, in a strict JSON schema.
 //! - **Passed** only when the control's words came back, the canary's didn't, and Claude Code's JSON output records
 //!   refusing the canary's read (`permission_denials`): Claude might simply skip a read, so without that record
 //!   nothing shows the deny rule held. Anything else (the canary read, the control missing, no refusal recorded, an
@@ -39,6 +40,7 @@ use ts_rs::TS;
 
 use super::hidden::Hider;
 use super::runner::{Access, Call, Cli, Control, Drive, Failure, Reply, Style, allow_rule_in};
+use super::settings::{Effort, Model};
 use crate::{CancelToken, Env, ScanOptions};
 
 /// The file the check's result is kept in, inside the app's data folder.
@@ -373,6 +375,8 @@ impl Canary {
                 prompt: String::new(),
                 schema: json!({}),
                 deny: Vec::new(),
+                model: Model::Default,
+                effort: Effort::Default,
             },
             access: Access::Private,
             dir,
@@ -442,6 +446,10 @@ impl Canary {
                 }
             }),
             deny: hider.deny_rules(),
+            // Never the person's model or reasoning: the check is about the executable (it is kept per executable,
+            // not per model), so it always runs as Claude Code's defaults do.
+            model: Model::Default,
+            effort: Effort::Default,
         };
         canary.access = match scope {
             Scope::Drive { others, mounts } => Access::Drive(Drive {

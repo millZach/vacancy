@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   useBridge,
   type ClaudeAbout,
+  type ClaudeAnswer,
   type ClaudeEvent,
   type ClaudeJob,
+  type ClaudeModel,
   type ClaudeStatus,
   type TidyProposal,
 } from '../bridge';
@@ -13,6 +15,7 @@ import { errorMessage } from '../errors';
 import {
   ClaudeContext,
   chatStarting,
+  type Choice,
   isEnabled,
   pickOffer,
   readsFiles,
@@ -56,7 +59,11 @@ const EMPTY: Conversation = { entries: [], about: null, layouts: {}, pick: null 
 
 const keyOf = (w: Where) => `${w.mountPoint}#${w.run}`;
 const sameAbout = (a: ClaudeAbout, b: ClaudeAbout) =>
-  a.kind === 'proposal' ? b.kind === 'proposal' && a.id === b.id : b.kind === 'folder' && a.path === b.path;
+  a.kind === 'proposal'
+    ? b.kind === 'proposal' && a.id === b.id
+    : a.kind === 'folder'
+      ? b.kind === 'folder' && a.path === b.path
+      : b.kind === 'scan';
 const sameSet = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((id) => b.includes(id));
 
 /**
@@ -91,6 +98,8 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   const [privacyChanging, setPrivacyChanging] = useState(false);
   const [ended, setEnded] = useState<boolean | null>(null);
   const [convos, setConvos] = useState<Record<string, Conversation>>({});
+  /** The model each alias last answered as, from Claude Code's own word ("Opus 5.5"). */
+  const [names, setNames] = useState<Partial<Record<ClaudeModel, string>>>({});
   const drivesRef = useRef(drives);
   const statusRef = useRef(status);
   useEffect(() => {
@@ -137,6 +146,13 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   const modesOut = useRef(0);
   /** Since the queue was last empty: the newest answer from a change the core kept, and the first refusal. */
   const modesKept = useRef<ClaudeStatus | null>(null);
+  /**
+   * The model and reasoning last asked for, while a change of them may still be out: what the picker shows, and what
+   * the next pick is made from, wherever and however often the picker is drawn. The ref has it at once (a second pick
+   * can come before the next render); the state draws it.
+   */
+  const modelAsked = useRef<Choice | null>(null);
+  const [modelWanted, setModelWanted] = useState<Choice | null>(null);
   const modesRefused = useRef<string | null>(null);
 
   /**
@@ -266,6 +282,10 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       if (--modesOut.current > 0) return;
       changing.current = false;
       setPrivacyChanging(false);
+      // Every change asked for has answered, whichever kind came last: the status is the core's word on the model
+      // and reasoning from now on, so a pick the same as one that failed goes again.
+      modelAsked.current = null;
+      setModelWanted(null);
       const s = modesKept.current;
       const refused = modesRefused.current;
       modesKept.current = null;
@@ -339,9 +359,16 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     );
   };
 
+  /** An answer names the model that made it: the alias it was asked with answers by that name from now on. */
+  const heard = (answer: ClaudeAnswer) => {
+    const { model, name } = answer.made;
+    if (name) setNames((n) => (n[model] === name ? n : { ...n, [model]: name }));
+  };
+
   /** Attempt `token` ended: forget it, and look again at Claude Code if it went missing or signed out. */
   const finished = (rkey: string, token: number, event: ClaudeEvent) => {
     if (requests.current.get(rkey)?.token === token) requests.current.delete(rkey);
+    if (event.kind === 'done') heard(event.answer);
     if (event.kind === 'failed' && (event.failure.kind === 'notFound' || event.failure.kind === 'signedOut')) recheck();
     else refreshAfter(event);
   };
@@ -507,7 +534,10 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
           ...e,
           phase: 'done',
           failure: null,
-          turns: [...e.turns, { from: 'claude', text: r.reply, privacy: basis.privacy, basis, followUps: r.followUps }],
+          turns: [
+            ...e.turns,
+            { from: 'claude', text: r.reply, privacy: basis.privacy, basis, made: event.answer.made, followUps: r.followUps },
+          ],
         };
       });
     };
@@ -535,10 +565,13 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     let chat: ChatEntry;
     let question: string | null;
     if (!had) {
+      // A row's or folder's chat opens with what it is; the whole scan's with the person's own question.
+      const first = about.kind === 'scan' ? text?.trim() : FIRST_QUESTION;
+      if (!first) return;
       chat = {
-        kind: 'chat', id: `chat-${++seq}`, about, name, conversation: null, turns: [{ from: 'person', text: FIRST_QUESTION, privacy }], phase: 'working', failure: null,
+        kind: 'chat', id: `chat-${++seq}`, about, name, conversation: null, turns: [{ from: 'person', text: first, privacy }], phase: 'working', failure: null,
       };
-      question = FIRST_QUESTION;
+      question = first;
     } else if (text !== undefined && text.trim() && !busy && !chatStarting(had)) {
       chat = { ...had, turns: [...had.turns, { from: 'person', text: text.trim(), privacy }], phase: 'working', failure: null };
       question = text.trim();
@@ -552,9 +585,12 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
     }
     edit(scope, (cv) => {
       const others = cv.entries.filter((e) => e.id !== chat.id);
-      // A chat opened again comes to the bottom of the log, where the composer is.
-      const entries = !had || text === undefined ? [...others, chat] : cv.entries.map((e) => (e.id === chat.id ? chat : e));
-      return { ...cv, entries, about: chat.id };
+      // A chat opened again comes to the bottom of the log, where the composer is; so does the whole scan's chat
+      // each time it is asked, since jobs' answers come in between.
+      const bottom = !had || text === undefined || about.kind === 'scan';
+      const entries = bottom ? [...others, chat] : cv.entries.map((e) => (e.id === chat.id ? chat : e));
+      // Asking about the whole scan leaves the composer on it: no row or folder to stop asking about.
+      return { ...cv, entries, about: about.kind === 'scan' ? null : chat.id };
     });
     if (question !== null) send(scope, chat, question);
   };
@@ -706,6 +742,20 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       changePrivacy(false);
     },
     cancelPrivacyOff: () => setPrivacyAsk(false),
+    choice: modelWanted ?? (statusNow ? { model: statusNow.model, effort: statusNow.effort } : null),
+    // In line with the changes of mode, so a question asked after it is prepared with it; it ends no conversation.
+    // Each pick is made from the pair last asked for, not the core's last answer: otherwise picking back, or picking
+    // the other half, while an earlier pick is still out would drop or undo that pick.
+    choose: (change) => {
+      const last = modelAsked.current ?? (statusNow ? { model: statusNow.model, effort: statusNow.effort } : null);
+      if (!last) return;
+      const next: Choice = { ...last, ...change };
+      if (last.model === next.model && last.effort === next.effort) return;
+      modelAsked.current = next;
+      setModelWanted(next);
+      void modeSetting(() => bridge.claudeSetModel(next.model, next.effort));
+    },
+    modelName: (model) => names[model] ?? null,
     conversation: (w) => convos[keyOf(w)] ?? EMPTY,
     start,
     cancel,

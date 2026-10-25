@@ -3,4 +3,4 @@
 /**
  * What a chat is about.
  */
-export type ClaudeAbout = { "kind": "proposal", id: string, } | { "kind": "folder", path: string, };
+export type ClaudeAbout = { "kind": "proposal", id: string, } | { "kind": "folder", path: string, } | { "kind": "scan" };

@@ -9,6 +9,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
+  ScanLine,
   Send,
   ShieldX,
   Sparkles,
@@ -16,14 +17,38 @@ import {
   X,
 } from 'lucide-react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import type { ClaudeAbout, ClaudeStatus, Overview, Proposal, TidyProposal } from '../bridge';
+import { useBridge, type ClaudeAbout, type ClaudeStatus, type Overview, type Proposal, type TidyProposal } from '../bridge';
 import { formatBytes, formatCount } from '../format';
 import { RiskChip, SourceTag } from '../plan/bits';
 import { activeMoves, kindFolders } from '../tidy/model';
-import { Basis, Dropped, HiddenFold, JobLine, Mark, PrivacyNotice, PrivacyRow } from './bits';
+import { AnsweredBy, Basis, Dropped, HiddenFold, JobLine, Mark, ModelPicker, PrivacyNotice, PrivacyRow } from './bits';
 import { FIRST_QUESTION } from './ClaudeProvider';
-import { chatStarting, checkShown, jobRunning, pickOffer, readsFiles, scanUnavailable, tileAt, useClaude, type ChatEntry, type Claude, type Conversation, type JobEntry, type JobKind, type Scope } from './context';
+import {
+  WHOLE_SCAN,
+  WHOLE_SCAN_NAME,
+  chatStarting,
+  checkShown,
+  composerChat,
+  jobRunning,
+  onLine,
+  pickOffer,
+  readsFiles,
+  scanUnavailable,
+  tileAt,
+  useClaude,
+  type ChatEntry,
+  type Claude,
+  type Conversation,
+  type JobEntry,
+  type JobKind,
+  type Scope,
+} from './context';
 import './claude.css';
+
+/** Before a scan, or while one runs: no map yet, so nothing for Claude's jobs to work from. */
+interface NoScan {
+  scope: null;
+}
 
 interface Props {
   /** The drive scan on the map, and its plan now. */
@@ -55,14 +80,18 @@ const WORKING: Record<JobKind, string> = {
   tidyLayout: 'Claude is sorting the file names…',
 };
 
+const NO_CONVERSATION: Conversation = { entries: [], about: null, layouts: {}, pick: null };
+
 /**
- * Variant B's Claude panel (prototype/ai-advisor), docked left of the map: while Claude is off, the turn-on step
- * itself, with the privacy notice and what always stays hidden; once on, privacy mode's switch, a running log of
- * the jobs and chats with Claude's checked answers (their item names light the map and the tray), the four job
- * chips and a composer for the chat it's on. Every answer says what it was based on. Claude proposes only: what
- * it adds is in the tray unticked, and nothing runs until the one confirmation.
+ * Variant B's Claude panel (prototype/ai-advisor), docked left of the map, and of the scan screen before it
+ * (prototype/claude-entry, variant A): while Claude is off, the turn-on step itself, with the privacy notice and what
+ * always stays hidden; once on, privacy mode's switch and the model and reasoning picker, a running log of the jobs
+ * and chats with Claude's checked answers (their item names light the map and the tray), the job chips and a
+ * composer: about the row or folder it's on, or else about the whole scan. Before a scan, Claude can be turned on and
+ * set, and its jobs and chat wait for the scan. Every answer says what it was based on and which model made it.
+ * Claude proposes only: what it adds is in the tray unticked, and nothing runs until the one confirmation.
  */
-export function ClaudePanel(props: Props) {
+export function ClaudePanel(props: Props | NoScan) {
   const claude = useClaude();
   if (!claude) return null;
   const status = claude.status.phase === 'ready' ? claude.status.status : null;
@@ -82,7 +111,7 @@ export function ClaudePanel(props: Props) {
         </button>
       </aside>
     );
-  const c = claude.conversation(props.scope);
+  const c = props.scope ? claude.conversation(props.scope) : NO_CONVERSATION;
   return (
     <aside className="cp" aria-label="Claude" data-no-ripple>
       <div className="cp-head">
@@ -90,7 +119,7 @@ export function ClaudePanel(props: Props) {
           <h2>
             <Mark size={15} /> Claude
           </h2>
-          <p>{headLine(status, c)}</p>
+          <p>{headLine(status, c, claude)}</p>
         </div>
         <button type="button" className="icon-btn" onClick={() => claude.setFolded(true)} aria-label="Fold the Claude panel">
           <PanelLeftClose size={16} aria-hidden />
@@ -106,12 +135,14 @@ export function ClaudePanel(props: Props) {
         </div>
       )}
       {status && status.state !== 'on' && <PanelOff claude={claude} status={status} />}
-      {status && status.state === 'on' && <PanelOn claude={claude} status={status} c={c} {...props} />}
+      {status &&
+        status.state === 'on' &&
+        (props.scope ? <PanelOn claude={claude} status={status} c={c} {...props} /> : <PanelNoScan claude={claude} status={status} />)}
     </aside>
   );
 }
 
-function headLine(status: ClaudeStatus | null, c: Conversation): string {
+function headLine(status: ClaudeStatus | null, c: Conversation, claude: Claude): string {
   if (!status) return 'Checking';
   if (status.state === 'notFound') return 'Not found';
   if (status.state === 'off') return 'Off';
@@ -121,7 +152,7 @@ function headLine(status: ClaudeStatus | null, c: Conversation): string {
   if (c.entries.some((e) => e.phase === 'slow')) return 'On · replies are slow';
   const last = c.entries.at(-1);
   if (last?.phase === 'failed' && last.failure?.kind !== 'cancelled') return 'On · the last request failed';
-  return 'On · through your Claude Code';
+  return onLine(claude.choice ?? status, claude.modelName);
 }
 
 /** Off, not found or not signed in: the panel is the turn-on step, with the privacy notice. */
@@ -193,6 +224,71 @@ function PanelOff({ claude, status }: { claude: Claude; status: ClaudeStatus }) 
 
 type OnProps = Props & { claude: Claude; status: ClaudeStatus; c: Conversation };
 
+/** Claude on: privacy mode's switch, the model and reasoning picker, and Turn off Claude. The same with or without a scan. */
+function StatusArea({ claude, status, unavailable }: { claude: Claude; status: ClaudeStatus; unavailable: string | null }) {
+  return (
+    <div className="cp-status">
+      <PrivacyRow
+        claude={claude}
+        privacy={status.privacy}
+        fixture={status.fixture}
+        unavailable={unavailable}
+        check={checkShown(status, claude.verifying)}
+      />
+      <ModelPicker claude={claude} status={status} />
+      <button type="button" className="link-button cp-off" onClick={claude.turnOff}>
+        Turn off Claude
+      </button>
+      {claude.settingError && (
+        <p className="cl-job is-error" role="alert">
+          <TriangleAlert size={13} aria-hidden /> <span>{claude.settingError}</span>
+        </p>
+      )}
+    </div>
+  );
+}
+
+const SCAN_FIRST = 'Scan a drive first — Claude works from the scan.';
+
+/** Claude on, with no map yet: its settings work; its jobs and the chat wait for a scan. */
+function PanelNoScan({ claude, status }: { claude: Claude; status: ClaudeStatus }) {
+  const bridge = useBridge();
+  const jobs: JobKind[] = ['reviewPlan', 'pickPlan', 'explainFolders', ...(bridge.platform === 'windows' ? (['tidyLayout'] as const) : [])];
+  return (
+    <>
+      <StatusArea claude={claude} status={status} unavailable={status.privacy ? null : status.readsUnavailable} />
+      <div className="cp-log" aria-label="Claude’s answers">
+        <div className="cp-msg is-claude">
+          <p>
+            <Mark size={12} />{' '}
+            {readsFiles(status)
+              ? 'Once you scan, I can see the scan, and open files on the drive you scanned, except the places that always stay hidden.'
+              : 'Once you scan, I can see the names, sizes, counts and dates from the scan. Nothing inside your files.'}{' '}
+            I only propose: nothing changes until you confirm.
+          </p>
+        </div>
+        <div className="cp-scan-first">
+          <ScanLine size={16} aria-hidden />
+          <span>
+            <b>Scan a drive first.</b> Claude works from the scan, so its jobs start once the map is up.
+          </span>
+        </div>
+      </div>
+      <div className="cp-foot">
+        <div className="cp-acts">
+          {jobs.map((job) => (
+            <button key={job} type="button" className="cl-chip" disabled title={SCAN_FIRST}>
+              {ASKED[job]}
+            </button>
+          ))}
+        </div>
+        <p className="cp-foot-note">{SCAN_FIRST}</p>
+        <Composer disabled locked placeholder="Ask Claude, after the scan" onSend={() => {}} />
+      </div>
+    </>
+  );
+}
+
 function PanelOn(p: OnProps) {
   const { claude, status, c, scope } = p;
   const unavailable = status.privacy ? null : (status.readsUnavailable ?? scanUnavailable(c));
@@ -203,7 +299,8 @@ function PanelOn(p: OnProps) {
     const el = log.current;
     el?.scrollTo?.({ top: el.scrollHeight, behavior: 'smooth' });
   }, [c.entries.length, last?.phase, turns]);
-  const about = c.entries.find((e): e is ChatEntry => e.kind === 'chat' && e.id === c.about) ?? null;
+  // The composer asks about the row or folder it's on, or else about the whole scan.
+  const { chat: about, row } = composerChat(c);
   const chip = (job: JobKind) => (
     <button type="button" className="cl-chip" onClick={() => claude.start(scope, job)} disabled={jobRunning(c, job) || claude.privacyChanging}>
       {ASKED[job]}
@@ -211,25 +308,11 @@ function PanelOn(p: OnProps) {
   );
   const aboutBusy = about?.phase === 'working' || about?.phase === 'slow';
   const aboutStarting = about !== null && chatStarting(about);
+  // A row's chat takes follow-ups once its first answer is in; the whole scan's from its first question.
+  const aboutWaits = row && about !== null && about.turns.length < 2;
   return (
     <>
-      <div className="cp-status">
-        <PrivacyRow
-          claude={claude}
-          privacy={status.privacy}
-          fixture={status.fixture}
-          unavailable={unavailable}
-          check={checkShown(status, claude.verifying)}
-        />
-        <button type="button" className="link-button cp-off" onClick={claude.turnOff}>
-          Turn off Claude
-        </button>
-        {claude.settingError && (
-          <p className="cl-job is-error" role="alert">
-            <TriangleAlert size={13} aria-hidden /> <span>{claude.settingError}</span>
-          </p>
-        )}
-      </div>
+      <StatusArea claude={claude} status={status} unavailable={unavailable} />
       <div className="cp-log" ref={log} aria-label="Claude’s answers" aria-live="polite">
         <div className="cp-msg is-claude">
           <p>
@@ -256,15 +339,15 @@ function PanelOn(p: OnProps) {
           {p.tidy.length > 0 && chip('tidyLayout')}
         </div>
         <Composer
-          key={about?.id ?? 'none'}
-          disabled={!about || about.turns.length < 2 || aboutBusy || aboutStarting || claude.privacyChanging}
-          placeholder={about ? (aboutStarting ? 'Starting the chat…' : `Ask about ${about.name}`) : 'Ask Claude about a row or a folder first'}
-          onSend={(q) => about && claude.ask(scope, about.about, about.name, q)}
+          key={row && about ? about.id : 'scan'}
+          disabled={aboutWaits || aboutBusy || aboutStarting || claude.privacyChanging}
+          placeholder={aboutStarting ? 'Starting the chat…' : row && about ? `Ask about ${about.name}` : 'Ask Claude about this scan'}
+          onSend={(q) => (row && about ? claude.ask(scope, about.about, about.name, q) : claude.ask(scope, WHOLE_SCAN, WHOLE_SCAN_NAME, q))}
         >
-          {about && (
+          {row && about && (
             <span className="cp-about">
               <MessageCircle size={11} aria-hidden /> <span className="cp-about-n">{about.name}</span>
-              <button type="button" aria-label="Stop asking about it" onClick={() => claude.clearAbout(scope)}>
+              <button type="button" aria-label="Stop asking about it" title="Ask about the whole scan instead" onClick={() => claude.clearAbout(scope)}>
                 <X size={11} aria-hidden />
               </button>
             </span>
@@ -278,11 +361,15 @@ function PanelOn(p: OnProps) {
 function Composer({
   onSend,
   disabled,
+  locked = false,
   placeholder,
   children,
 }: {
   onSend: (q: string) => void;
+  /** Nothing can be sent now (the question can still be typed). */
   disabled: boolean;
+  /** Nothing can be typed either: there's no scan to ask about yet. */
+  locked?: boolean;
   placeholder: string;
   children?: ReactNode;
 }) {
@@ -298,7 +385,7 @@ function Composer({
       }}
     >
       {children}
-      <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={placeholder} aria-label={placeholder} />
+      <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={placeholder} aria-label={placeholder} disabled={locked} />
       <button type="submit" className="icon-btn" aria-label="Send" disabled={disabled || !q.trim()}>
         <Send size={14} aria-hidden />
       </button>
@@ -310,7 +397,8 @@ function Composer({
 function ItemLink({ about, name, p }: { about: ClaudeAbout; name: string; p: OnProps }) {
   const tile = about.kind === 'folder' ? tileAt(p.overview, about.path) : null;
   const go = () => (about.kind === 'proposal' ? p.onShow(about.id) : tile && p.onShowTile(tile));
-  if (about.kind === 'folder' && !tile) return <b className="cp-name">{name}</b>;
+  // The whole scan is the map itself: nothing to light.
+  if (about.kind === 'scan' || (about.kind === 'folder' && !tile)) return <b className="cp-name">{name}</b>;
   return (
     <button type="button" className="cp-link" onClick={go}>
       {name}
@@ -341,6 +429,7 @@ function JobItem({ e, ...p }: OnProps & { e: JobEntry }) {
           {a.result.kind === 'tidy' && <TidyReply e={e} {...p} />}
           {a.result.kind !== 'pick' && a.result.kind !== 'explain' && <Dropped items={a.dropped} />}
           <Basis basis={a.basis} />
+          <AnsweredBy made={a.made} />
         </div>
       )}
     </div>
@@ -675,15 +764,18 @@ function ChatItem({ e, ...p }: OnProps & { e: ChatEntry }) {
   const asked = new Set(e.turns.filter((t) => t.from === 'person').map((t) => t.text));
   const lastClaude = [...e.turns].reverse().find((t) => t.from === 'claude');
   const chips = (lastClaude?.followUps ?? []).filter((q) => !asked.has(q));
+  // A row's chat opens with what it is, unsaid; the whole scan's with the person's own question, shown at once.
+  const hidden = (i: number, text: string) => i === 0 && text === FIRST_QUESTION && e.about.kind !== 'scan';
+  const shown = e.turns.some((t, i) => !hidden(i, t.text));
   return (
     <div className={p.c.about === e.id ? 'cp-entry is-about' : 'cp-entry'} data-chat={e.name}>
       <p className="cp-you">
         About <ItemLink about={e.about} name={e.name} p={p} />
       </p>
-      {e.turns.length > 1 && (
+      {shown && (
         <div className="cp-msg is-claude cl-chat">
           {e.turns.map((t, i) =>
-            i === 0 && t.text === FIRST_QUESTION ? null : t.from === 'person' ? (
+            hidden(i, t.text) ? null : t.from === 'person' ? (
               <p key={i} className="cl-msg is-you">
                 {t.text}
               </p>
@@ -694,6 +786,7 @@ function ChatItem({ e, ...p }: OnProps & { e: ChatEntry }) {
                 </p>
                 {t.basis && i === 1 && <Basis basis={t.basis} />}
                 {t.basis && i > 1 && !t.basis.privacy && <Basis basis={t.basis} />}
+                <AnsweredBy made={t.made} />
               </div>
             ),
           )}
@@ -717,7 +810,7 @@ function ChatItem({ e, ...p }: OnProps & { e: ChatEntry }) {
       <JobLine
         phase={e.phase}
         failure={e.failure}
-        working={e.turns.length === 1 ? `Claude is looking at ${e.name}…` : 'Claude is answering…'}
+        working={e.turns.length === 1 && e.about.kind !== 'scan' ? `Claude is looking at ${e.name}…` : 'Claude is answering…'}
         onCancel={() => claude.cancel(scope, e.id)}
         onRetry={() => claude.ask(scope, e.about, e.name)}
       />

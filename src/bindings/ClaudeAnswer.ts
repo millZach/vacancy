@@ -2,13 +2,18 @@
 import type { ClaudeBasis } from "./ClaudeBasis";
 import type { ClaudeDropped } from "./ClaudeDropped";
 import type { ClaudeJobKind } from "./ClaudeJobKind";
+import type { ClaudeMade } from "./ClaudeMade";
 import type { ClaudeRefreshed } from "./ClaudeRefreshed";
 import type { ClaudeResult } from "./ClaudeResult";
 
 /**
  * Claude's answer to a job, checked.
  */
-export type ClaudeAnswer = { job: ClaudeJobKind, basis: ClaudeBasis, result: ClaudeResult, 
+export type ClaudeAnswer = { job: ClaudeJobKind, basis: ClaudeBasis, 
+/**
+ * Which model made it, and with what reasoning.
+ */
+made: ClaudeMade, result: ClaudeResult, 
 /**
  * What Vacancy left out of the answer, by name, with why.
  */

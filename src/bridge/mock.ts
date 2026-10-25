@@ -357,6 +357,7 @@ export function createMockBridge(fixture: Fixture, options: MockOptions = {}): M
     claudeStatus: () => (options.fail !== undefined ? failure(options.fail) : claude.status()),
     claudeSetEnabled: (on) => claude.setEnabled(on),
     claudeSetPrivacy: (on) => claude.setPrivacy(on),
+    claudeSetModel: (model, effort) => claude.setModel(model, effort),
     claudeCheck: (again) => claude.check(again),
     claudeStart: (mountPoint, scan, job, onEvent) => claude.start(mountPoint, scan, job, onEvent),
     claudeChat: (mountPoint, scan, conversation, about, text, onEvent) =>

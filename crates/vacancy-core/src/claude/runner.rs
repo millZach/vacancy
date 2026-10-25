@@ -15,8 +15,10 @@
 //! removed with it, for the same reason: the rules grow with long config paths and with each browser profile a
 //! scan finds. The file denies itself, because privacy mode off's root is a whole drive. A command still longer
 //! than [`MAX_COMMAND_UNITS`] isn't started, and neither is one whose settings fail [`check_settings`] (over
-//! [`MAX_SETTINGS_BYTES`], or anything Claude Code might drop without a word). No `--model`: the account's default
-//! applies. The always-hidden places are `permissions.deny` rules Claude Code enforces (see [`super::hidden`]) in
+//! [`MAX_SETTINGS_BYTES`], or anything Claude Code might drop without a word). The person's model and reasoning
+//! ([`Call::model`], [`Call::effort`]) add `--model <alias>` and `--effort <level>` after the system prompt, each
+//! only from a fixed list (an enum, never a free string); with "Your default" and "Default" there is neither, so the
+//! account's and Claude Code's defaults apply. The always-hidden places are `permissions.deny` rules Claude Code enforces (see [`super::hidden`]) in
 //! both modes, with the scan's browser profiles ([`Call::deny`]): with privacy mode on Claude has no tool to read
 //! with, so they are defence in depth there. With privacy mode off, reads are allowed on the scanned drive only
 //! ([`Access::Drive`]: every other drive is denied), or in fixture mode only in the fixture folder: anything else
@@ -33,6 +35,7 @@ use serde::Serialize;
 use serde_json::Value;
 use ts_rs::TS;
 
+use super::settings::{Effort, Model};
 use super::{browsers, hidden};
 use crate::CancelToken;
 use crate::tools::{Limits, Status, run_contained};
@@ -136,14 +139,17 @@ pub struct Drive {
 /// and nothing in its output says so: [`check_settings`] is the guard.
 pub const MAX_SETTINGS_BYTES: usize = 1536 * 1024;
 
-/// One request: Vacancy's system prompt, the prompt, the JSON schema the answer must match, and the deny rules its
-/// scan adds to the always-hidden ones (the browser profiles it found: [`hidden::Hider::deny_rules`]).
+/// One request: Vacancy's system prompt, the prompt, the JSON schema the answer must match, the deny rules its
+/// scan adds to the always-hidden ones (the browser profiles it found: [`hidden::Hider::deny_rules`]), and the model
+/// and reasoning it asks for (chosen when it was prepared: a change of choice applies to later calls only).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Call {
     pub system: String,
     pub prompt: String,
     pub schema: Value,
     pub deny: Vec<String>,
+    pub model: Model,
+    pub effort: Effort,
 }
 
 /// Exactly what is started for a call: the program, its arguments, its environment changes, its input, and the
@@ -170,8 +176,20 @@ pub fn command_units(invocation: &Invocation) -> usize {
         + invocation.args.iter().map(|a| units(a)).sum::<usize>()
 }
 
-/// The arguments both modes share, in order.
+/// The arguments both modes share, in order: the locked flags, then the model and reasoning, if chosen.
 fn locked(call: &Call) -> Vec<String> {
+    let mut args = fixed(call);
+    if let Some(model) = call.model.flag() {
+        args.extend(["--model".to_owned(), model.to_owned()]);
+    }
+    if let Some(effort) = call.effort.flag() {
+        args.extend(["--effort".to_owned(), effort.to_owned()]);
+    }
+    args
+}
+
+/// The locked flags, the schema and the system prompt.
+fn fixed(call: &Call) -> Vec<String> {
     [
         "-p",
         "--setting-sources",
@@ -815,11 +833,66 @@ impl Failure {
 }
 
 /// A call's answer: the structured output, checked against the schema by Claude Code (Vacancy checks it again),
-/// and the reads Claude Code refused (an always-hidden place, or outside what it may read), by path.
+/// the reads Claude Code refused (an always-hidden place, or outside what it may read), by path, and the model that
+/// made it, as Claude Code reports it (`claude-opus-5-5`), if it did.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reply {
     pub structured: Value,
     pub refused: Vec<String>,
+    pub model: Option<String>,
+}
+
+/// The model that made an answer, from Claude Code's JSON output: of its `modelUsage` keys (one per model the call
+/// used), the one that wrote the most. Only a plain id (letters, digits, `.`, `-`, `_`, `[`, `]`, at most 80) is kept.
+fn answering_model(envelope: &Value) -> Option<String> {
+    let usage = envelope.get("modelUsage")?.as_object()?;
+    let written = |v: &Value| {
+        v.get("outputTokens")
+            .and_then(Value::as_u64)
+            .unwrap_or_default()
+    };
+    let mut best: Option<(&String, u64)> = None;
+    for (id, v) in usage {
+        let n = written(v);
+        if best.is_none_or(|(_, m)| n > m) {
+            best = Some((id, n));
+        }
+    }
+    let id = best?.0;
+    let plain = !id.is_empty()
+        && id.len() <= 80
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '[' | ']'));
+    plain.then(|| id.clone())
+}
+
+/// A model's id as Claude Code reports it, in words: `claude-opus-5-5` is "Opus 5.5", `claude-sonnet-4-5-20250929`
+/// "Sonnet 4.5", `claude-3-5-haiku-20241022` "Haiku 3.5". An id of no known line is given as it is.
+pub fn model_name(id: &str) -> String {
+    let base = id.split('[').next().unwrap_or(id).to_ascii_lowercase();
+    let parts: Vec<&str> = base.split('-').filter(|p| !p.is_empty()).collect();
+    let line = parts.iter().find_map(|p| match *p {
+        "opus" => Some("Opus"),
+        "sonnet" => Some("Sonnet"),
+        "haiku" => Some("Haiku"),
+        "fable" => Some("Fable"),
+        _ => None,
+    });
+    let Some(line) = line else {
+        return id.to_owned();
+    };
+    // The version's numbers: short ones only (a release date is eight digits).
+    let version: Vec<&str> = parts
+        .iter()
+        .copied()
+        .filter(|p| p.len() <= 2 && p.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    if version.is_empty() {
+        line.to_owned()
+    } else {
+        format!("{line} {}", version.join("."))
+    }
 }
 
 /// How a call is watched: its cancel button and its clock.
@@ -1185,6 +1258,7 @@ pub fn parse(stdout: &str, stderr: &str) -> Result<Reply, Failure> {
     Ok(Reply {
         structured,
         refused,
+        model: answering_model(&envelope),
     })
 }
 
@@ -1198,6 +1272,8 @@ mod tests {
             prompt: "PROMPT".into(),
             schema: serde_json::json!({"type": "object"}),
             deny: vec!["Read(//d/BrowserData/Work/?*)".into()],
+            model: Model::Default,
+            effort: Effort::Default,
         }
     }
 
@@ -1244,8 +1320,8 @@ mod tests {
         );
         assert!(!inv.args.iter().any(|a| a == "PROMPT"));
         assert!(
-            !inv.args.iter().any(|a| a == "--model"),
-            "the account's default model"
+            !inv.args.iter().any(|a| a == "--model" || a == "--effort"),
+            "Your default and Default: the account's model and Claude Code's reasoning, no flag for either"
         );
         assert!(
             !inv.args.iter().any(|a| a == "--bare"),
@@ -2047,6 +2123,7 @@ mod tests {
             reply.refused,
             vec![r"C:\Users\alex\.ssh\id_rsa", r"C:\Users\alex\.aws"]
         );
+        assert_eq!(reply.model, None, "no modelUsage, no model");
         let signed_out = r#"{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login"}"#;
         assert_eq!(parse(signed_out, ""), Err(Failure::SignedOut));
         assert_eq!(parse("", "Not logged in"), Err(Failure::SignedOut));
@@ -2070,6 +2147,113 @@ mod tests {
             Err(Failure::Error { message }) if message == "boom"
         ));
         assert!(matches!(parse("", ""), Err(Failure::Error { .. })));
+    }
+
+    #[test]
+    fn the_answer_says_which_model_made_it() {
+        let used = |usage: &str| {
+            parse(
+                &format!(
+                    r#"{{"type":"result","subtype":"success","is_error":false,"structured_output":{{}},"modelUsage":{usage}}}"#
+                ),
+                "",
+            )
+            .unwrap()
+            .model
+        };
+        assert_eq!(
+            used(r#"{"claude-opus-5-5":{"inputTokens":9,"outputTokens":120,"costUSD":0.1}}"#),
+            Some("claude-opus-5-5".to_owned())
+        );
+        // A small helper model besides the one that answered: the one that wrote the most.
+        assert_eq!(
+            used(
+                r#"{"claude-haiku-5-5":{"outputTokens":12},"claude-sonnet-5-5":{"outputTokens":800}}"#
+            ),
+            Some("claude-sonnet-5-5".to_owned())
+        );
+        assert_eq!(used("{}"), None);
+        assert_eq!(used(r#"{"claude opus; rm -rf":{"outputTokens":3}}"#), None);
+        assert_eq!(model_name("claude-opus-5-5"), "Opus 5.5");
+        assert_eq!(model_name("claude-sonnet-4-5-20250929"), "Sonnet 4.5");
+        assert_eq!(model_name("claude-3-5-haiku-20241022"), "Haiku 3.5");
+        assert_eq!(model_name("claude-opus-4-1-20250805[1m]"), "Opus 4.1");
+        assert_eq!(model_name("claude-fable-5"), "Fable 5");
+        assert_eq!(model_name("claude-haiku"), "Haiku");
+        assert_eq!(model_name("some-model-7"), "some-model-7");
+    }
+
+    #[test]
+    fn the_chosen_model_and_reasoning_are_exactly_one_flag_each_or_none() {
+        let flags = |inv: &Invocation| -> Vec<String> {
+            inv.args
+                .windows(2)
+                .filter(|w| w[0] == "--model" || w[0] == "--effort")
+                .map(|w| format!("{} {}", w[0], w[1]))
+                .collect()
+        };
+        let program = Path::new("claude");
+        let none = invocation_in(program, &call(), &Access::Private, &[], &settings_file());
+        assert!(flags(&none).is_empty(), "the account's default model");
+        assert_eq!(
+            none.args
+                .iter()
+                .filter(|a| a.starts_with("--model") || a.starts_with("--effort"))
+                .count(),
+            0
+        );
+        for (model, effort, want) in [
+            (
+                Model::Opus,
+                Effort::High,
+                vec!["--model opus", "--effort high"],
+            ),
+            (Model::Sonnet, Effort::Default, vec!["--model sonnet"]),
+            (
+                Model::Haiku,
+                Effort::Low,
+                vec!["--model haiku", "--effort low"],
+            ),
+            (
+                Model::Fable,
+                Effort::Max,
+                vec!["--model fable", "--effort max"],
+            ),
+            (Model::Default, Effort::Xhigh, vec!["--effort xhigh"]),
+            (Model::Default, Effort::Medium, vec!["--effort medium"]),
+        ] {
+            let chosen = Call {
+                model,
+                effort,
+                ..call()
+            };
+            for access in [
+                Access::Private,
+                Access::Read(vec![PathBuf::from(if cfg!(windows) {
+                    r"D:\"
+                } else {
+                    "/Volumes/X"
+                })]),
+            ] {
+                let inv = invocation_in(program, &chosen, &access, &[], &settings_file());
+                assert_eq!(flags(&inv), want, "{model:?} {effort:?}");
+                // Right after the system prompt, before the tools: the locked flags stay as they are.
+                let at = inv
+                    .args
+                    .iter()
+                    .position(|a| a == "--system-prompt")
+                    .unwrap()
+                    + 2;
+                let n = want.len() * 2;
+                assert_eq!(inv.args[at..at + n].join(" "), want.join(" "));
+                assert_eq!(inv.args[at + n], "--tools");
+                assert_eq!(inv.args[..LOCKED.len() - 1], LOCKED[..LOCKED.len() - 1]);
+                assert_eq!(
+                    inv.args.iter().filter(|a| *a == "--model").count(),
+                    usize::from(model.flag().is_some())
+                );
+            }
+        }
     }
 
     #[test]

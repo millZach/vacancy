@@ -47,7 +47,7 @@ pub mod settings;
 pub use fake::FakeClaude;
 pub use jobs::{Prepared, SYSTEM, apply, prepare, remove_items, run};
 pub use runner::{Access, Call, ClaudeCode, Cli, Control, Failure, Progress, Reply};
-pub use settings::Settings;
+pub use settings::{Effort, Model, Settings};
 
 /// Where Claude is, as the panel's head shows it. A request's own states (working, slow, timed out, error) come in
 /// its [`Event`]s.
@@ -90,6 +90,10 @@ pub struct Status {
     /// Whether this Claude Code passed the check privacy mode off needs before Claude opens files ([`canary`]):
     /// until it has, every call runs as if privacy mode were on. Asked only with Claude on and privacy mode off.
     pub check: canary::Check,
+    /// The model new questions ask for ([`Settings::model`]).
+    pub model: Model,
+    /// The reasoning new questions ask for ([`Settings::effort`]).
+    pub effort: Effort,
 }
 
 impl Status {
@@ -137,6 +141,8 @@ impl Status {
             message,
             reads_unavailable: None,
             check: canary::Check::Unchecked,
+            model: settings.model,
+            effort: settings.effort,
         }
     }
 }
@@ -150,8 +156,9 @@ pub enum Job {
     ReviewPlan { ids: Vec<String> },
     /// Let Claude pick: ticks and unticks among the scan's proposals (the plan is `ids` now), and may add its own.
     PickPlan { ids: Vec<String> },
-    /// Ask Claude the person's newest question `text` in the chat `conversation` (from [`Chats::open`]). The core
-    /// sends the chat's turns so far with it (capped); the UI never sends them.
+    /// Ask Claude the person's newest question `text` in the chat `conversation` (from [`Chats::open`]), about one
+    /// item or about the whole scan. The core sends the chat's turns so far with it (capped); the UI never sends
+    /// them. A chat only answers: it adds nothing to the plan.
     Ask { conversation: String, text: String },
     /// Explain the biggest folders the rules don't recognize, with anything removable in them.
     ExplainFolders,
@@ -195,6 +202,10 @@ pub enum About {
     Proposal { id: String },
     /// A folder on the map, by its path as the map gives it.
     Folder { path: String },
+    /// The whole scan: anything on the drive. Its prompt carries what the jobs get from the scan (the drive's
+    /// totals, the map's categories and biggest items, the proposals, and the biggest folders the rules don't
+    /// recognize), never the always-hidden places.
+    Scan,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,7 +223,7 @@ pub struct Message {
     pub privacy: bool,
 }
 
-/// One chat about a proposal or folder, as the core keeps it.
+/// One chat about a proposal, a folder or the whole scan, as the core keeps it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Chat {
     about: About,
@@ -503,6 +514,17 @@ pub struct ChatStarted {
     pub conversation: String,
 }
 
+/// What an answer was made with: the model and reasoning it asked for, and the model Claude Code says answered, in
+/// words ("Opus 5.5"), when it said. The panel shows "Answered by Opus 5.5 · High".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, rename = "ClaudeMade")]
+pub struct Made {
+    pub model: Model,
+    pub effort: Effort,
+    pub name: Option<String>,
+}
+
 /// Claude's answer to a job, checked.
 #[derive(Clone, Debug, PartialEq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -510,6 +532,8 @@ pub struct ChatStarted {
 pub struct Answer {
     pub job: JobKind,
     pub basis: Basis,
+    /// Which model made it, and with what reasoning.
+    pub made: Made,
     pub result: JobResult,
     /// What Vacancy left out of the answer, by name, with why.
     pub dropped: Vec<Dropped>,

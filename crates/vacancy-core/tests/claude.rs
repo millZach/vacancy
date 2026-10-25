@@ -161,6 +161,7 @@ fn reply(structured: Value) -> Result<Reply, Failure> {
     Ok(Reply {
         structured,
         refused: Vec::new(),
+        model: None,
     })
 }
 
@@ -356,6 +357,7 @@ fn a_guard_that_changed_or_a_file_that_changed_since_the_prompt_drops_the_item()
         Reply {
             structured,
             refused: Vec::new(),
+            model: None,
         },
         &mut case.scanned,
         &env,
@@ -399,6 +401,7 @@ fn privacy_off_says_where_claude_may_read_and_what_it_opened_and_takes_paths_it_
                     "opened": [root.join("render-03.png").display().to_string()]
                 }),
                 refused: vec![root.join(".ssh").join("key.bin").display().to_string()],
+                model: None,
             })
         }
     });
@@ -620,6 +623,151 @@ fn ask_sends_the_subject_and_the_capped_conversation_and_answers_it() {
         Failure::ChatEnded
     );
     assert_eq!(fake.calls().len(), calls + 1, "refused chats send nothing");
+}
+
+/// A chat about the whole scan: what the jobs get from the scan (names, sizes, counts and dates, never a hidden
+/// place), in a chat the core keeps like any other, and it only answers: nothing goes in the plan from it.
+#[test]
+fn a_chat_about_the_whole_scan_sends_what_the_jobs_get_and_adds_nothing() {
+    let mut case = case();
+    let before = case.scanned.proposals.list().to_vec();
+    let fake = FakeClaude::always(json!({
+        "reply": "Your caches are the biggest win.",
+        "followUps": ["Which caches?"],
+        "opened": []
+    }));
+    let c = chat(&mut case, About::Scan, true);
+    let answer = ask(
+        &fake,
+        &question(&c, "What should I clean up?"),
+        &mut case,
+        None,
+    )
+    .unwrap();
+    let JobResult::Ask { reply, follow_ups } = &answer.result else {
+        panic!()
+    };
+    assert_eq!(reply, "Your caches are the biggest win.");
+    assert_eq!(follow_ups, &["Which caches?"]);
+    assert!(answer.refreshed.is_none() && answer.dropped.is_empty());
+    assert_eq!(
+        case.scanned.proposals.list(),
+        &before[..],
+        "a chat adds nothing to the plan"
+    );
+    let prompt = fake.calls()[0].prompt.clone();
+    assert!(prompt.starts_with("Job: answer the person's questions about their disk"));
+    assert!(prompt.contains("You can't add anything to the plan from this chat"));
+    assert!(prompt.contains("Privacy mode is on: you have no tools"));
+    let sent = blocks(&prompt);
+    let scan = &sent[0];
+    assert_eq!(scan["kind"], "scan");
+    assert_eq!(
+        scan["proposals"].as_array().unwrap().len(),
+        before.len().min(80)
+    );
+    for p in before.iter().take(80) {
+        assert!(
+            prompt.contains(&format!("\"{}\"", p.id)),
+            "{} is sent",
+            p.id
+        );
+    }
+    assert_eq!(
+        scan["categories"].as_array().unwrap().len(),
+        case.scanned.overview.categories.len()
+    );
+    root_id(&scan["unknownFolders"], "Old Renders");
+    assert!(scan["drive"]["totalBytes"].as_u64().unwrap() > 0);
+    // Never a hidden place or a file's contents, and the account's name stays out with privacy mode on.
+    assert!(!prompt.contains(".ssh") && !prompt.contains("PRIVATE KEY"));
+    assert!(!prompt.contains(&case.env.home.display().to_string()));
+    assert_eq!(
+        sent[1],
+        json!([{"from": "person", "text": "What should I clean up?"}])
+    );
+    // Its follow-ups go in the same chat, with the turns so far.
+    ask(&fake, &question(&c, "Which caches?"), &mut case, None).unwrap();
+    assert_eq!(
+        blocks(&fake.calls()[1].prompt)[1].as_array().unwrap().len(),
+        3
+    );
+    // A privacy change ends it like any chat: a question to it sends nothing.
+    case.scanned.claude.chats.end_all();
+    assert_eq!(
+        ask(&fake, &question(&c, "And now?"), &mut case, None).unwrap_err(),
+        Failure::ChatEnded
+    );
+    assert_eq!(fake.calls().len(), 2);
+
+    // With privacy mode off, Claude may look where the scan's big folders are, on the drive it scanned only.
+    let readable = vec![case.root.clone()];
+    let off = chat(&mut case, About::Scan, false);
+    ask(
+        &fake,
+        &question(&off, "What's in Old Renders?"),
+        &mut case,
+        Some(&readable),
+    )
+    .unwrap();
+    let prompt = fake.calls().last().unwrap().prompt.clone();
+    assert!(prompt.contains("Privacy mode is off: you may use Read, Glob and Grep"));
+    assert!(prompt.contains(&renders(&case).display().to_string()));
+}
+
+/// Each answer says which model made it: the one Claude Code reports, with the reasoning that was asked for. The
+/// model and reasoning are fixed when the job is prepared.
+#[test]
+fn each_answer_says_which_model_made_it_and_with_what_reasoning() {
+    use vacancy_core::claude::{Cli, Effort, Made, Model};
+    let mut case = case();
+    let fake = FakeClaude::new(|_: &Call| {
+        Ok(Reply {
+            structured: json!({"summary": "Fine.", "flags": [], "fine": [], "opened": []}),
+            refused: Vec::new(),
+            model: Some("claude-opus-5-5".into()),
+        })
+    });
+    let job = Job::ReviewPlan {
+        ids: plan_ids(&case),
+    };
+    let prepared = claude::prepare(&job, &case.scanned, &case.env, None, &CancelToken::new())
+        .unwrap()
+        .with_choice(Model::Opus, Effort::High);
+    assert_eq!(
+        (prepared.call().model, prepared.call().effort),
+        (Model::Opus, Effort::High)
+    );
+    let reply = fake.call(prepared.call(), &control(), &mut |_| {}).unwrap();
+    let answer = claude::apply(
+        prepared,
+        reply,
+        &mut case.scanned,
+        &case.env,
+        &CancelToken::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        answer.made,
+        Made {
+            model: Model::Opus,
+            effort: Effort::High,
+            name: Some("Opus 5.5".into()),
+        }
+    );
+    // Prepared with no choice: Claude Code's defaults; and an answer that names no model says none.
+    let plain =
+        FakeClaude::always(json!({"summary": "Fine.", "flags": [], "fine": [], "opened": []}));
+    let answer = ask(&plain, &job, &mut case, None).unwrap();
+    assert_eq!(
+        answer.made,
+        Made {
+            model: Model::Default,
+            effort: Effort::Default,
+            name: None,
+        }
+    );
+    assert_eq!(plain.calls()[0].model, Model::Default);
 }
 
 #[test]
@@ -845,6 +993,7 @@ fn status_reads_off_until_turned_on_and_asks_sign_in_only_when_on() {
     let on = Settings {
         enabled: true,
         privacy: false,
+        ..Settings::default()
     };
     assert_eq!(
         Status::of(on, false, false, || Ok(true)).state,
@@ -857,6 +1006,21 @@ fn status_reads_off_until_turned_on_and_asks_sign_in_only_when_on() {
     let ready = Status::of(on, true, true, || Ok(true));
     assert_eq!(ready.state, State::On);
     assert!(!ready.privacy && ready.fixture);
+    assert_eq!(
+        (ready.model, ready.effort),
+        (claude::Model::Default, claude::Effort::Default)
+    );
+    // The model and reasoning picked are in the status, also while Claude is off.
+    let picked = Settings {
+        model: claude::Model::Haiku,
+        effort: claude::Effort::Max,
+        ..Settings::default()
+    };
+    let status = Status::of(picked, true, false, || panic!("not asked while off"));
+    assert_eq!(
+        (status.model, status.effort),
+        (claude::Model::Haiku, claude::Effort::Max)
+    );
 }
 
 /// With privacy mode off Claude may read the fixture folder only in fixture mode, and otherwise only the drive that
@@ -1569,13 +1733,16 @@ fn privacy_on_calls_never_send_what_claude_said_with_privacy_mode_off() {
                 json!({"reply": "It's an old render.", "followUps": [], "opened": []})
             },
             refused: Vec::new(),
+            model: None,
         })
     });
     let c = chat(&mut case, About::Proposal { id: id.clone() }, true);
+    let whole = chat(&mut case, About::Scan, true);
     for job in [
         Job::ReviewPlan { ids: plan.clone() },
         Job::PickPlan { ids: plan.clone() },
         question(&c, "What is it?"),
+        question(&whole, "What should I clean up?"),
     ] {
         ask(&fake, &job, &mut case, None).unwrap();
         let prompt = fake.calls().last().unwrap().prompt.clone();
@@ -1696,6 +1863,7 @@ fn a_privacy_on_call_never_sends_a_turn_made_with_privacy_mode_off() {
         Reply {
             structured: json!({"reply": "OFF-REPLY late.", "followUps": [], "opened": []}),
             refused: Vec::new(),
+            model: None,
         },
         &mut case.scanned,
         &case.env,
@@ -1823,6 +1991,7 @@ fn a_sign_in_check_that_fails_keeps_why_and_is_never_not_signed_in() {
     let on = Settings {
         enabled: true,
         privacy: true,
+        ..Settings::default()
     };
     let timed_out = Status::of(on, true, false, || Err(Failure::TimedOut));
     assert_eq!(timed_out.state, State::CheckTimedOut);
@@ -2197,6 +2366,8 @@ fn live_claude_glob_probe() {
             "properties": { "steps": { "type": "array", "maxItems": 8, "items": step } }
         }),
         deny: Vec::new(),
+        model: claude::Model::Default,
+        effort: claude::Effort::Default,
     };
     let configured = std::slice::from_ref(&config);
     let invocation = claude::runner::invocation_in(
@@ -2351,6 +2522,8 @@ fn live_claude_settings_file_probe() {
             "properties": { "steps": { "type": "array", "maxItems": 8, "items": step } }
         }),
         deny: hider.deny_rules(),
+        model: claude::Model::Default,
+        effort: claude::Effort::Default,
     };
     // The same command and file as the call's, but for the file's own name.
     let invocation = claude::runner::invocation(

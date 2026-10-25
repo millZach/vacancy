@@ -57,8 +57,10 @@ function Screens() {
     },
     [bridge, reportUpdated],
   );
-  // Claude's panel is beside the map while the plan can still change; the header's control unfolds it.
+  // Claude's panel is beside the scan screen, and beside the map while the plan can still change (not while a plan
+  // runs or beside its finish, nor over a past run); the header's control unfolds it.
   const where = onMap && planning && scan.phase === 'done' ? { mountPoint: scan.overview.volume.mountPoint, run: scan.run } : null;
+  const panelShown = !past && !!ready && (ready.screen !== 'map' || scan?.phase !== 'done' || planning);
   const entries = where && claude ? claude.conversation(where).entries : [];
   const busy = entries.some((e) => e.phase === 'working' || e.phase === 'slow');
   const last = entries.at(-1);
@@ -70,7 +72,7 @@ function Screens() {
       <Shell
         platform={bridge.platform}
         drive={ready && <DriveMenu drives={ready} />}
-        advisor={<ClaudeTrigger busy={busy} failed={failed} closed={closed} onOpen={where && claude ? () => claude.setFolded(false) : null} />}
+        advisor={<ClaudeTrigger busy={busy} failed={failed} closed={closed} onOpen={panelShown && claude ? () => claude.setFolded(false) : null} />}
         reclaimable={onMap && scan && planning ? reclaimableOf(scan) : null}
         lit={(!!report && report.freedBytes > 0) || (!!past && past.freedBytes > 0)}
         history={ready && <HistoryMenu locked={ready.locked} onOpen={setPast} {...(bridge.platform === 'windows' ? { onUndo: undoTidy } : {})} />}

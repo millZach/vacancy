@@ -10,16 +10,18 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::hidden::{self, Hider};
+use super::runner::model_name;
 use super::runner::{Call, Cli, Control, Failure, Progress, Reply};
+use super::settings::{Effort, Model};
 use super::{
     About, Answer, Basis, Change, ChangeKind, Dropped, Fine, Flag, FolderNote, Job, JobKind,
-    JobResult, Message, Refreshed, Speaker,
+    JobResult, Made, Message, Refreshed, Speaker,
 };
 use crate::advisor::{MetadataKind, MetadataPayload, SummaryLimits, summarize};
 use crate::categorize::{Env, ItemRef, Platform};
 use crate::fsid;
 use crate::guard::Guard;
-use crate::map::ScannedVolume;
+use crate::map::{ItemKind, ScannedVolume};
 use crate::rules::{Claims, Guarded, Proposal, ProposalAction, ProposalSource, Risk};
 use crate::scan::CancelToken;
 use crate::snapshot::{DirFlags, DirId, Snapshot};
@@ -47,6 +49,8 @@ const MAX_MESSAGES: usize = 12;
 pub(crate) const MAX_MESSAGE_CHARS: usize = 2000;
 /// A folder's biggest items a chat about it sends.
 const MAX_CHILDREN: usize = 40;
+/// Each map category's biggest items a chat about the whole scan sends.
+const MAX_CATEGORY_ITEMS: usize = 12;
 
 /// A job, ready to send: its call, and what checking the answer needs. Made from one scan; the caller makes sure
 /// the answer is applied to that same scan.
@@ -63,6 +67,13 @@ pub struct Prepared {
 impl Prepared {
     pub fn call(&self) -> &Call {
         &self.call
+    }
+    /// The same job, asking for `model` and `effort` (the person's choice when it was prepared; a later change
+    /// applies to later jobs only).
+    pub fn with_choice(mut self, model: Model, effort: Effort) -> Self {
+        self.call.model = model;
+        self.call.effort = effort;
+        self
     }
     pub fn kind(&self) -> JobKind {
         self.kind
@@ -226,16 +237,42 @@ pub fn prepare(
                 privacy,
             };
             let messages: Vec<Message> = turns.iter().cloned().chain([question.clone()]).collect();
-            let (subject, dirs) = subject_json(about, scanned, &shown, privacy, &hider)?;
+            let (subject, dirs) =
+                subject_json(about, scanned, env, &shown, privacy, &hider, cancel)?;
             let conversation = conversation(&messages)?;
             let reads = read_note(readable, fixture, &dirs, &shown, &hider);
+            let job = match about {
+                About::Scan => "Job: answer the person's questions about their disk, from Vacancy's scan of it.\n"
+                    .to_owned(),
+                About::Proposal { .. } | About::Folder { .. } => {
+                    "Job: answer the person's questions about one item of their disk.\n".to_owned()
+                }
+            };
+            let first = match about {
+                // A chat about the whole scan only answers: what goes in the plan comes from the rules' proposals
+                // the person ticks, or from Let Claude pick and Explain big folders, which Vacancy checks.
+                About::Scan => "You can't add anything to the plan from this chat, and nothing you say changes it: \
+                                the person ticks the proposals below in Vacancy's plan tray, or asks you to Let \
+                                Claude pick or Explain big folders. "
+                    .to_owned(),
+                About::Proposal { .. } | About::Folder { .. } => {
+                    "In your first answer cover what it is, what they'd lose by deleting it, and whether it comes \
+                     back on its own. "
+                        .to_owned()
+                }
+            };
+            let what = match about {
+                About::Scan => "What Vacancy's scan saw (sizes in bytes, dates as last used)",
+                About::Proposal { .. } | About::Folder { .. } => {
+                    "What they're asking about, from Vacancy's scan (sizes in bytes)"
+                }
+            };
             let prompt = format!(
-                "Job: answer the person's questions about one item of their disk.\n{reads}\n\
-                 In your first answer cover what it is, what they'd lose by deleting it, and whether it comes back \
-                 on its own. Vacancy deletes permanently (no Recycle Bin or Trash); only Tidy up's moves can be \
+                "{job}{reads}\n\
+                 {first}Vacancy deletes permanently (no Recycle Bin or Trash); only Tidy up's moves can be \
                  undone. `reply` answers the person's last message in a few short sentences. `followUps` are up \
                  to three short questions they might ask next.\n\n\
-                 What they're asking about, from Vacancy's scan (sizes in bytes):\n```json\n{}\n```\n\n\
+                 {what}:\n```json\n{}\n```\n\n\
                  The conversation so far, oldest first:\n```json\n{}\n```",
                 serde_json::to_string_pretty(&subject).unwrap_or_default(),
                 serde_json::to_string_pretty(&conversation).unwrap_or_default()
@@ -370,6 +407,8 @@ pub fn prepare(
             prompt: format!("{}\n", prompt.trim_end()),
             schema,
             deny: hider.deny_rules(),
+            model: Model::Default,
+            effort: Effort::Default,
         },
         privacy,
         fixture,
@@ -531,6 +570,11 @@ pub fn apply(
 ) -> Result<Answer, Failure> {
     let privacy = prepared.privacy;
     let fixture = prepared.fixture;
+    let made = Made {
+        model: prepared.call.model,
+        effort: prepared.call.effort,
+        name: reply.model.as_deref().map(model_name),
+    };
     let mut dropped = Vec::new();
     let mut changed = false;
     // A chat's question and reply, kept in its chat once the whole answer has passed.
@@ -832,6 +876,7 @@ pub fn apply(
     Ok(Answer {
         job: prepared.kind,
         basis: basis(privacy, fixture, opened, reply.refused),
+        made,
         result,
         dropped,
         refreshed: changed.then(|| Refreshed::of(scanned)),
@@ -1414,12 +1459,15 @@ fn unknown_json(unknown: &Unknown, snap: &Snapshot, shown: &dyn Fn(&Path) -> Str
 fn subject_json(
     about: &About,
     scanned: &ScannedVolume,
+    env: &Env,
     shown: &dyn Fn(&Path) -> String,
     privacy: bool,
     hider: &Hider,
+    cancel: &CancelToken,
 ) -> Result<(Value, Vec<PathBuf>), Failure> {
     let snap = &scanned.snapshot;
     match about {
+        About::Scan => scan_json(scanned, env, shown, privacy, hider, cancel),
         About::Proposal { id } => {
             let p = scanned
                 .proposals
@@ -1500,6 +1548,93 @@ fn subject_json(
             ))
         }
     }
+}
+
+/// The whole scan, for a chat about it: what the jobs get from the scan, and no more. The drive's totals, each map
+/// category with its biggest folders and files, the proposals (biggest first, capped; Claude's items made with
+/// privacy mode off by their name in the scan only, with privacy mode on), and the biggest folders the rules don't
+/// recognize. Names, sizes, counts and dates only; nothing the always-hidden list hides. Where Claude may look: the
+/// proposals' places, those folders, and the categories' folders.
+fn scan_json(
+    scanned: &ScannedVolume,
+    env: &Env,
+    shown: &dyn Fn(&Path) -> String,
+    privacy: bool,
+    hider: &Hider,
+    cancel: &CancelToken,
+) -> Result<(Value, Vec<PathBuf>), Failure> {
+    let o = &scanned.overview;
+    let proposals = scanned.proposals.list();
+    let unknown = unknown(scanned, env, cancel)?;
+    let items: Vec<Value> = proposals
+        .iter()
+        .take(MAX_PROPOSALS)
+        .map(|p| {
+            let redact = privacy && scanned.claude.off.made(&p.id);
+            proposal_json(p, None, shown, redact, hider)
+        })
+        .collect();
+    let mut dirs = sample_dirs(
+        proposals,
+        &proposals.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
+    );
+    dirs.extend(unknown_roots(&unknown, &scanned.snapshot));
+    let categories: Vec<Value> = o
+        .categories
+        .iter()
+        .map(|c| {
+            // Folders and files the scan saw, by name: never a tile Vacancy made up (a proposal's, which the
+            // proposals list says better, or one of folded items), and never a hidden place.
+            let biggest: Vec<Value> = c
+                .items
+                .iter()
+                .filter(|i| matches!(i.kind, ItemKind::Folder | ItemKind::File))
+                .filter(|i| !i.path.is_empty() && hider.hides(Path::new(&i.path)).is_none())
+                .take(MAX_CATEGORY_ITEMS)
+                .map(|i| {
+                    if i.kind == ItemKind::Folder {
+                        dirs.push(PathBuf::from(&i.path));
+                    }
+                    json!({
+                        "name": i.name,
+                        "kind": if i.kind == ItemKind::Folder { "folder" } else { "file" },
+                        "path": shown(Path::new(&i.path)),
+                        "bytes": i.bytes,
+                        "files": i.files,
+                        "lastUsed": date(i.last_used.unwrap_or(0) / 1000),
+                    })
+                })
+                .collect();
+            json!({
+                "name": c.name,
+                "bytes": c.bytes,
+                "protected": c.protected,
+                "biggest": biggest,
+            })
+        })
+        .collect();
+    Ok((
+        json!({
+            "kind": "scan",
+            "drive": {
+                "name": o.volume.name,
+                "mountPoint": shown(Path::new(&o.volume.mount_point)),
+                "totalBytes": o.volume.total_bytes,
+                "freeBytes": o.free_bytes,
+            },
+            "scanned": {
+                "files": o.scan.files,
+                "folders": o.scan.folders,
+                "bytes": o.scan.scanned_bytes,
+                "foldersNotRead": o.scan.unreadable,
+            },
+            "categories": categories,
+            "proposals": items,
+            "moreProposals": proposals.len().saturating_sub(MAX_PROPOSALS),
+            "unknownFolders": unknown_json(&unknown, &scanned.snapshot, shown),
+        }),
+        dirs,
+    ))
 }
 
 /// The chat, capped: its last messages, each shortened, the person's last. Nothing is kept between turns.
