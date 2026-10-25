@@ -1476,3 +1476,39 @@ describe('the model and reasoning picker, with the core slow to answer', () => {
     expect(model).toHaveValue('opus');
   });
 });
+
+describe('a picker change that fails while Claude is turned off', () => {
+  it('sends the same pick again once Claude is back on, and the core keeps it', async () => {
+    const bridge = windows({ claude: 'on' });
+    const real = bridge.claudeSetModel.bind(bridge);
+    let fail: ((e: Error) => void) | null = null;
+    const set = vi.spyOn(bridge, 'claudeSetModel');
+    // The first save waits, then fails; any later one goes through.
+    set.mockImplementationOnce(() => new Promise((_, reject) => (fail = reject)));
+    set.mockImplementation((model, effort) => real(model, effort));
+    renderApp(bridge);
+    const model = await within(await screen.findByRole('complementary', { name: 'Claude' })).findByRole('combobox', { name: 'Model' });
+    await userEvent.selectOptions(model, 'opus');
+    await waitFor(() => expect(fail).not.toBeNull());
+    // Turned off while the save is still out: the turn-off waits behind it.
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Turn off Claude' }));
+    await act(async () => {
+      fail!(new Error('Vacancy couldn’t keep the setting: Access is denied.'));
+      await Promise.resolve();
+    });
+    // Off, the panel folds to its rail again.
+    await waitFor(() => expect(panel()).toHaveClass('is-folded'));
+    expect(await bridge.claudeStatus()).toMatchObject({ state: 'off', model: 'default' });
+    await unfold();
+
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Turn on Claude' }));
+    const again = await within(panel()).findByRole('combobox', { name: 'Model' });
+    expect(again).toHaveValue('default');
+    await userEvent.selectOptions(again, 'opus');
+    await waitFor(() => expect(set).toHaveBeenCalledTimes(2));
+    expect(set).toHaveBeenLastCalledWith('opus', 'default');
+    await waitFor(async () => expect(await bridge.claudeStatus()).toMatchObject({ model: 'opus' }));
+    await waitFor(() => expect(within(panel()).getByText('On · Opus, through your Claude Code')).toBeInTheDocument());
+    expect(within(panel()).getByRole('combobox', { name: 'Model' })).toHaveValue('opus');
+  });
+});

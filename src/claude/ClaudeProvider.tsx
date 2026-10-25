@@ -277,6 +277,9 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       if (--modesOut.current > 0) return;
       changing.current = false;
       setPrivacyChanging(false);
+      // Every change asked for has answered, whichever kind came last: the status is the core's word on the model
+      // and reasoning from now on, so a pick the same as one that failed goes again.
+      modelAsked.current = null;
       const s = modesKept.current;
       const refused = modesRefused.current;
       modesKept.current = null;
@@ -740,10 +743,7 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       const last = modelAsked.current ?? (statusNow ? { model: statusNow.model, effort: statusNow.effort } : null);
       if (last?.model === model && last.effort === effort) return;
       modelAsked.current = { model, effort };
-      void modeSetting(() => bridge.claudeSetModel(model, effort)).then(() => {
-        // Every change asked for has answered: the status is the core's word from now on.
-        if (modesOut.current === 0) modelAsked.current = null;
-      });
+      void modeSetting(() => bridge.claudeSetModel(model, effort));
     },
     modelName: (model) => names[model] ?? null,
     conversation: (w) => convos[keyOf(w)] ?? EMPTY,
