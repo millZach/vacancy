@@ -67,11 +67,11 @@ describe('the scan plate', () => {
     expect(screen.getByRole('button', { name: 'Scan Local Disk (C:)' })).toBeEnabled();
   });
 
-  it('says Claude stays off until it is turned on beside the map, and that scanning only reads', async () => {
+  it('says Claude is off, in the panel on the left, until it is turned on, and that scanning only reads', async () => {
     renderApp(windows());
 
     expect(await screen.findByText('Built-in rules. Claude is off.')).toBeInTheDocument();
-    expect(screen.getByText(/turn on Claude, your own Claude Code, in the panel beside the map/)).toBeInTheDocument();
+    expect(screen.getByText('Turn it on in the Claude panel on the left, now or after the scan.')).toBeInTheDocument();
     expect(screen.getByText('Rules only')).toBeInTheDocument();
     expect(screen.getByText('Scanning only reads. Nothing changes until you approve a plan.')).toBeInTheDocument();
   });

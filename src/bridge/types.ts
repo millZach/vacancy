@@ -65,6 +65,7 @@ import type { ClaudeChange } from '../bindings/ClaudeChange';
 import type { ClaudeChangeKind } from '../bindings/ClaudeChangeKind';
 import type { ClaudeCheck } from '../bindings/ClaudeCheck';
 import type { ClaudeDropped } from '../bindings/ClaudeDropped';
+import type { ClaudeEffort } from '../bindings/ClaudeEffort';
 import type { ClaudeEvent } from '../bindings/ClaudeEvent';
 import type { ClaudeFailure } from '../bindings/ClaudeFailure';
 import type { ClaudeFine } from '../bindings/ClaudeFine';
@@ -74,6 +75,8 @@ import type { ClaudeHidden } from '../bindings/ClaudeHidden';
 import type { ClaudeHiddenGroup } from '../bindings/ClaudeHiddenGroup';
 import type { ClaudeJob } from '../bindings/ClaudeJob';
 import type { ClaudeJobKind } from '../bindings/ClaudeJobKind';
+import type { ClaudeMade } from '../bindings/ClaudeMade';
+import type { ClaudeModel } from '../bindings/ClaudeModel';
 import type { ClaudeChatStarted } from '../bindings/ClaudeChatStarted';
 import type { ClaudeRefreshed } from '../bindings/ClaudeRefreshed';
 import type { ClaudeResult } from '../bindings/ClaudeResult';
@@ -147,6 +150,7 @@ export type {
   ClaudeChange,
   ClaudeChangeKind,
   ClaudeDropped,
+  ClaudeEffort,
   ClaudeEvent,
   ClaudeFailure,
   ClaudeFine,
@@ -156,6 +160,8 @@ export type {
   ClaudeHiddenGroup,
   ClaudeJob,
   ClaudeJobKind,
+  ClaudeMade,
+  ClaudeModel,
   ClaudeChatStarted,
   ClaudeRefreshed,
   ClaudeResult,
@@ -268,6 +274,11 @@ export interface Bridge {
   /** Turns privacy mode on or off (confirm before turning it off). Remembered, also while Claude is off. */
   claudeSetPrivacy(on: boolean): Promise<ClaudeStatus>;
   /**
+   * Picks the model (`default`: no `--model`, the account's) and reasoning (`default`: no `--effort`) new questions
+   * ask for. Remembered, also while Claude is off. It ends no chat; a request already running keeps its own.
+   */
+  claudeSetModel(model: ClaudeModel, effort: ClaudeEffort): Promise<ClaudeStatus>;
+  /**
    * Checks this Claude Code before privacy mode off lets Claude open files (`check` in the status): one small real
    * call that reads a file Vacancy made and is refused one Vacancy hides. Kept per Claude Code (its path, size,
    * modified time and version), so it runs when the check is due, or always with `again` (Check again). Only with
@@ -287,7 +298,8 @@ export interface Bridge {
    */
   claudeStart(mountPoint: string, scan: number, job: ClaudeJob, onEvent: (event: ClaudeEvent) => void): Promise<string>;
   /**
-   * Asks the person's question `text` about one proposal or folder, in the chat `conversation`, or with `null` in a
+   * Asks the person's question `text` about one proposal or folder, or the whole scan (`{ kind: 'scan' }`: it only
+   * answers, and adds nothing to the plan), in the chat `conversation`, or with `null` in a
    * new chat (begun in the privacy mode now). The core keeps every chat and sends its turns so far itself; the UI
    * sends only the new question. Resolves with the request id and the chat's id. A chat that a privacy change (or
    * Claude turned off) ended answers `failed` with `chatEnded`, having sent nothing: ask again in a new chat.

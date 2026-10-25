@@ -5,7 +5,10 @@ import type {
   ClaudeBasis,
   ClaudeFailure,
   ClaudeFlag,
+  ClaudeEffort,
   ClaudeFolderNote,
+  ClaudeMade,
+  ClaudeModel,
   ClaudeStatus,
   Overview,
   TidyLayout,
@@ -75,12 +78,13 @@ export interface ChatTurn {
    * made in, and never sends a privacy-off turn with privacy mode on.
    */
   privacy: boolean;
-  /** Claude's turns: what the answer was based on, and what to ask next. */
+  /** Claude's turns: what the answer was based on, which model made it, and what to ask next. */
   basis?: ClaudeBasis;
+  made?: ClaudeMade;
   followUps?: string[];
 }
 
-/** A chat about one proposal or folder. */
+/** A chat about one proposal or folder, or about the whole scan. */
 export interface ChatEntry {
   kind: 'chat';
   id: string;
@@ -122,10 +126,25 @@ export interface Layouts {
   error: string | null;
 }
 
+/** What the whole-scan chat is about, and its name in the log. */
+export const WHOLE_SCAN: ClaudeAbout = { kind: 'scan' };
+export const WHOLE_SCAN_NAME = 'the whole scan';
+
+/**
+ * The chat the composer asks in: the chat about a row or folder it is on, or else the chat about the whole scan
+ * (null until its first question). `row` says which.
+ */
+export function composerChat(c: Conversation): { chat: ChatEntry | null; row: boolean } {
+  const on = c.entries.find((e): e is ChatEntry => e.kind === 'chat' && e.id === c.about);
+  if (on && on.about.kind !== 'scan') return { chat: on, row: true };
+  const whole = c.entries.find((e): e is ChatEntry => e.kind === 'chat' && e.about.kind === 'scan') ?? null;
+  return { chat: whole, row: false };
+}
+
 /** One drive scan's conversation with Claude. A new scan starts a new one. */
 export interface Conversation {
   entries: Entry[];
-  /** The chat the composer asks in, by entry id. */
+  /** The chat the composer asks in, by entry id: a row's or folder's; null for the whole scan. */
   about: string | null;
   /** Each sort's layouts, once Claude has suggested its own, by sort id. */
   layouts: Record<string, Layouts>;
@@ -189,14 +208,21 @@ export interface Claude {
   setPrivacy: (on: boolean) => void;
   confirmPrivacyOff: () => void;
   cancelPrivacyOff: () => void;
+  /** Picks the model and reasoning new questions ask for (remembered). A request running keeps its own. */
+  setModel: (model: ClaudeModel, effort: ClaudeEffort) => void;
+  /** The model an alias last answered as ("Opus 5.5"), from Claude Code's own word, once one has. */
+  modelName: (model: ClaudeModel) => string | null;
 
   conversation: (scope: Where) => Conversation;
   start: (scope: Scope, job: JobKind) => void;
   /** Stops a request: a job's, or a chat's latest turn. */
   cancel: (scope: Where, entryId: string) => void;
-  /** Asks about a proposal or folder: opens its chat (its first answer, if new), or asks `text` in it. */
+  /**
+   * Asks about a proposal or folder: opens its chat (its first answer, if new), or asks `text` in it. About the whole
+   * scan (`WHOLE_SCAN`), `text` is the question, the first one included.
+   */
   ask: (scope: Scope, about: ClaudeAbout, name: string, text?: string) => void;
-  /** The composer stops asking about the chat it was on. */
+  /** The composer stops asking about the row or folder it was on, and asks about the whole scan again. */
   clearAbout: (scope: Where) => void;
   keepFlag: (scope: Where, entryId: string, id: string) => void;
   /** Let Claude pick: puts the plan back and takes Claude's items out again. */
@@ -297,6 +323,44 @@ export function tileAt(overview: Overview, path: string): string | null {
     if (item) return item.id;
   }
   return null;
+}
+
+/** The picker's models, in order: Claude Code's aliases, each the newest of its line. */
+export const MODELS: readonly ClaudeModel[] = ['default', 'opus', 'sonnet', 'haiku', 'fable'];
+export const MODEL_LABEL: Record<ClaudeModel, string> = {
+  default: 'Your default',
+  opus: 'Opus',
+  sonnet: 'Sonnet',
+  haiku: 'Haiku',
+  fable: 'Fable',
+};
+/** The picker's reasoning levels, in order. */
+export const EFFORTS: readonly ClaudeEffort[] = ['default', 'low', 'medium', 'high', 'xhigh', 'max'];
+export const EFFORT_LABEL: Record<ClaudeEffort, string> = {
+  default: 'Default',
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'Extra high',
+  max: 'Max',
+};
+
+/** "Answered by Opus 5.5 · High": the model Claude Code says made an answer, and the reasoning asked for, if any. */
+export function answeredBy(made: ClaudeMade | null | undefined): string | null {
+  if (!made?.name) return null;
+  return made.effort === 'default' ? `Answered by ${made.name}` : `Answered by ${made.name} · ${EFFORT_LABEL[made.effort]}`;
+}
+
+/**
+ * The panel head's line with Claude on: the model new questions ask for (by the name it last answered as, once one
+ * has; by its alias until then) and the reasoning, through the person's Claude Code.
+ */
+export function onLine(status: ClaudeStatus, nameOf: (m: ClaudeModel) => string | null): string {
+  const model = nameOf(status.model) ?? (status.model === 'default' ? null : MODEL_LABEL[status.model]);
+  const effort = status.effort === 'default' ? null : EFFORT_LABEL[status.effort];
+  const parts = model ? [model, effort] : [effort && `${effort} reasoning`];
+  const shown = parts.filter((p): p is string => !!p);
+  return shown.length === 0 ? 'On · through your Claude Code' : `On · ${shown.join(' · ')}, through your Claude Code`;
 }
 
 /** Why a request gave no answer, as the panel says it. */

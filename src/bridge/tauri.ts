@@ -59,6 +59,7 @@ export function createTauriBridge(): Bridge {
     claudeStatus: () => invoke<ClaudeStatus>('claude_status'),
     claudeSetEnabled: (on) => invoke<ClaudeStatus>('claude_set_enabled', { on }),
     claudeSetPrivacy: (on) => invoke<ClaudeStatus>('claude_set_privacy', { on }),
+  claudeSetModel: (model, effort) => invoke<ClaudeStatus>('claude_set_model', { model, effort }),
     claudeCheck: (again) => invoke<ClaudeStatus>('claude_check', { again }),
     claudeStart: (mountPoint, scan, job, onEvent) => {
       const onEventChannel = new Channel<ClaudeEvent>();

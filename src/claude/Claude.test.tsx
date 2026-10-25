@@ -990,6 +990,7 @@ describe('the jobs', () => {
       },
       dropped: [],
       refreshed: null,
+      made: { model: 'default', effort: 'default', name: null },
     };
     act(() => listeners[0]!({ kind: 'done', requestId: 'claude-p1', answer }));
     await new Promise((r) => setTimeout(r, 50));
@@ -1035,6 +1036,7 @@ describe('the jobs', () => {
       result: { kind: 'ask', reply: text, followUps: [] },
       dropped: [],
       refreshed: null,
+      made: { model: 'default', effort: 'default', name: null },
     });
     // The first attempt's late events: its Cancelled, then an answer it had already sent. Neither counts.
     act(() => {
@@ -1077,6 +1079,7 @@ describe('the jobs', () => {
           result: { kind: 'ask', reply: 'Build output; it comes back.', followUps: [] },
           dropped: [],
           refreshed: null,
+          made: { model: 'default', effort: 'default', name: null },
         },
       }),
     );
@@ -1111,6 +1114,7 @@ describe('the jobs', () => {
         result: { kind: 'ask', reply: text, followUps: ['Is it safe?'] },
         dropped: [],
         refreshed: null,
+        made: { model: 'default', effort: 'default', name: null },
       },
     });
     await toMap(bridge);
@@ -1277,5 +1281,127 @@ describe('Claude’s marks after the plan', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Past runs' }));
     const row = await screen.findByRole('menuitem', { name: /2 steps suggested by Claude/ });
     expect(row).toHaveTextContent('Claude');
+  });
+});
+
+describe('Claude before a scan, the model picker and the whole-scan chat', () => {
+  /** Renders the app on the scan plate, without scanning. */
+  async function toPlate(bridge: Bridge) {
+    const view = renderApp(bridge);
+    await screen.findByRole('button', { name: /^Scan Local Disk|^Scan Macintosh HD/ });
+    return view;
+  }
+
+  it('sits beside the scan screen from the start: the pill unfolds it, and Claude turns on before a scan', async () => {
+    const bridge = windows();
+    await toPlate(bridge);
+    expect(panel()).toHaveClass('is-folded');
+    expect(screen.getByText('Turn it on in the Claude panel on the left, now or after the scan.')).toBeInTheDocument();
+    // The header pill is a button before a scan too.
+    await userEvent.click(within(header()).getByRole('button', { name: 'Rules only: show the Claude panel' }));
+    expect(within(panel()).getByRole('heading', { name: 'Turn on Claude?' })).toBeInTheDocument();
+    expect(window.localStorage.getItem(PANEL_KEY)).toBe('open');
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Turn on Claude' }));
+    expect(await within(panel()).findByRole('button', { name: 'Turn off Claude' })).toBeInTheDocument();
+    expect(within(panel()).getByRole('switch', { name: 'Privacy mode' })).toHaveAttribute('aria-checked', 'true');
+    // Its jobs and the chat wait for a scan, and say so.
+    for (const chip of ['Review my plan', 'Let Claude pick', 'Explain big folders', 'Suggest Tidy up layouts'])
+      expect(within(panel()).getByRole('button', { name: chip })).toBeDisabled();
+    expect(within(panel()).getByText('Scan a drive first — Claude works from the scan.')).toBeInTheDocument();
+    expect(within(panel()).getByRole('textbox', { name: 'Ask Claude, after the scan' })).toBeDisabled();
+    expect(screen.getByText('Built-in rules, and Claude in the panel on the left.')).toBeInTheDocument();
+    expect(within(header()).getByText('Claude on')).toBeInTheDocument();
+    // After the scan everything works as before.
+    await userEvent.click(screen.getByRole('button', { name: 'Scan Local Disk (C:)' }));
+    await screen.findByLabelText('Map key');
+    expect(within(panel()).getByRole('button', { name: 'Review my plan' })).toBeEnabled();
+    expect(within(panel()).getByRole('textbox', { name: 'Ask Claude about this scan' })).toBeEnabled();
+  });
+
+  it('switches privacy mode before a scan, asking first', async () => {
+    const bridge = windows({ claude: 'on' });
+    const set = vi.spyOn(bridge, 'claudeSetPrivacy');
+    await toPlate(bridge);
+    await userEvent.click(within(panel()).getByRole('switch', { name: 'Privacy mode' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Turn privacy mode off' }));
+    await waitFor(() => expect(within(panel()).getByRole('switch', { name: 'Privacy mode' })).toHaveAttribute('aria-checked', 'false'));
+    expect(set).toHaveBeenCalledWith(false);
+  });
+
+  it('picks the model and reasoning for new questions, kept by the core, and says which model answered', async () => {
+    const bridge = windows({ claude: 'on' });
+    const setModel = vi.spyOn(bridge, 'claudeSetModel');
+    const chat = vi.spyOn(bridge, 'claudeChat');
+    await toPlate(bridge);
+    const model = within(panel()).getByRole('combobox', { name: 'Model' });
+    const reasoning = within(panel()).getByRole('combobox', { name: 'Reasoning' });
+    expect([...model.querySelectorAll('option')].map((o) => o.textContent)).toEqual(['Your default', 'Opus', 'Sonnet', 'Haiku', 'Fable']);
+    expect([...reasoning.querySelectorAll('option')].map((o) => o.textContent)).toEqual(['Default', 'Low', 'Medium', 'High', 'Extra high', 'Max']);
+    expect(within(panel()).getByText('On · through your Claude Code')).toBeInTheDocument();
+    await userEvent.selectOptions(model, 'opus');
+    await userEvent.selectOptions(reasoning, 'high');
+    expect(setModel).toHaveBeenLastCalledWith('opus', 'high');
+    await waitFor(() => expect(within(panel()).getByText('On · Opus · High, through your Claude Code')).toBeInTheDocument());
+    expect(await bridge.claudeStatus()).toMatchObject({ model: 'opus', effort: 'high' });
+
+    await userEvent.click(screen.getByRole('button', { name: 'Scan Local Disk (C:)' }));
+    await screen.findByLabelText('Map key');
+    await waitFor(() => expect(screen.queryByRole('progressbar', { name: 'Finding duplicates' })).toBeNull());
+    await userEvent.type(within(panel()).getByRole('textbox', { name: 'Ask Claude about this scan' }), 'What should I clean up?{Enter}');
+    const whole = await waitFor(() => {
+      const e = panel().querySelector<HTMLElement>('.cp-entry[data-chat="the whole scan"]');
+      expect(e?.querySelector('.cl-answered')).not.toBeNull();
+      return e!;
+    });
+    expect(within(whole).getByText('Answered by Opus 5.5 · High')).toBeInTheDocument();
+    expect(within(panel()).getByText('On · Opus 5.5 · High, through your Claude Code')).toBeInTheDocument();
+    expect(chat).toHaveBeenCalledWith('C:\\', expect.any(Number), null, { kind: 'scan' }, 'What should I clean up?', expect.any(Function));
+
+    // A change applies to the next question; the answer before keeps its own, and the chat goes on.
+    await userEvent.selectOptions(within(panel()).getByRole('combobox', { name: 'Model' }), 'sonnet');
+    await userEvent.selectOptions(within(panel()).getByRole('combobox', { name: 'Reasoning' }), 'default');
+    await waitFor(() => expect(within(panel()).getByRole('textbox', { name: 'Ask Claude about this scan' })).toBeEnabled());
+    await userEvent.type(within(panel()).getByRole('textbox', { name: 'Ask Claude about this scan' }), 'Can I get them back after?{Enter}');
+    await waitFor(() => expect(whole.querySelectorAll('.cl-answered')).toHaveLength(2));
+    expect([...whole.querySelectorAll('.cl-answered')].map((e) => e.textContent?.trim())).toEqual([
+      'Answered by Opus 5.5 · High',
+      'Answered by Sonnet 5.5',
+    ]);
+    const conversation = (await started(chat, 0)).conversation;
+    expect(chat).toHaveBeenLastCalledWith('C:\\', expect.any(Number), conversation, { kind: 'scan' }, 'Can I get them back after?', expect.any(Function));
+  });
+
+  it('chats about the whole scan without a row first; Ask on a row still focuses the chat on it', async () => {
+    const bridge = windows({ claude: 'on' });
+    const before = vi.spyOn(bridge, 'claudeChat');
+    await toMap(bridge);
+    const box = within(panel()).getByRole('textbox', { name: 'Ask Claude about this scan' });
+    expect(panel().querySelector('.cp-about')).toBeNull();
+    await userEvent.type(box, 'What should I clean up?{Enter}');
+    const whole = await waitFor(() => {
+      const e = panel().querySelector<HTMLElement>('.cp-entry[data-chat="the whole scan"] .cl-first');
+      expect(e).not.toBeNull();
+      return e!.closest<HTMLElement>('.cp-entry')!;
+    });
+    expect(within(whole).getByText('What should I clean up?')).toBeInTheDocument();
+    expect(within(whole).getByText(/^The biggest things on Local Disk \(C:\)/)).toBeInTheDocument();
+    expect(within(whole).getByText('About')).toBeInTheDocument();
+    // It adds nothing to the plan: the scan's proposals are as they were.
+    const t = await openPlan();
+    expect(t.querySelectorAll('.tray-row.is-ai')).toHaveLength(0);
+
+    // Ask on a row: the chat is about that row, with its chip and ×.
+    const row = within(t).getAllByText('Rust build output in 12 projects')[0]!.closest<HTMLElement>('.tray-row')!;
+    await userEvent.click(within(row).getByRole('button', { name: 'Ask Claude' }));
+    const input = await within(panel()).findByRole('textbox', { name: 'Ask about Rust build output in 12 projects' });
+    expect(panel().querySelector('.cp-about')).toHaveTextContent('Rust build output in 12 projects');
+    await waitFor(() => expect(input).toBeEnabled());
+    expect(before.mock.calls.at(-1)![3]).toEqual({ kind: 'proposal', id: 'w-rust' });
+    // The × goes back to the whole scan, in the same chat as before.
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Stop asking about it' }));
+    await userEvent.type(within(panel()).getByRole('textbox', { name: 'Ask Claude about this scan' }), 'Can I get them back after?{Enter}');
+    await waitFor(() => expect(panel().querySelector('.cp-entry[data-chat="the whole scan"]')?.querySelectorAll('.cl-msg.is-you')).toHaveLength(2));
+    const first = (await started(before, 0)).conversation;
+    expect(before.mock.calls.at(-1)!.slice(2, 5)).toEqual([first, { kind: 'scan' }, 'Can I get them back after?']);
   });
 });

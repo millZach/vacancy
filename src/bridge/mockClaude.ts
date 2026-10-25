@@ -6,7 +6,9 @@
 // on, saying why; `&reads=toobig`: the same for this scan only, because its rules are too many for Claude Code's
 // settings, which the panel learns from the first answer); `&canary=ok|slow|fail` makes the check of Claude Code
 // before privacy mode off lets Claude read due (it passes, passes after 6 s, or fails; unset, it passed before); `&claudeMs=` sets how long an answer takes (default 900 ms; `slow` takes 8 s, saying it's
-// slow after 1.5 s). The answers follow the approved prototype's (prototype/ai-advisor, variant B).
+// slow after 1.5 s). The model and reasoning picker is kept like the core's (in memory here), and each answer says
+// which model made it (`MOCK_MODEL_NAMES`: "Your default" answers as Opus 5.5, as it did on Zach's PC). The answers
+// follow the approved prototypes' (prototype/ai-advisor, variant B; prototype/claude-entry, variant A).
 import type {
   ClaudeAbout,
   ClaudeAnswer,
@@ -14,11 +16,14 @@ import type {
   ClaudeChange,
   ClaudeChatStarted,
   ClaudeDropped,
+  ClaudeEffort,
   ClaudeEvent,
   ClaudeFailure,
   ClaudeFolderNote,
   ClaudeHidden,
   ClaudeJob,
+  ClaudeMade,
+  ClaudeModel,
   ClaudeRefreshed,
   ClaudeResult,
   ClaudeStatus,
@@ -96,7 +101,20 @@ export interface MockClaudeScan {
 /** What the core says when a Claude command names a scan the drive no longer has. */
 export const SCAN_GONE = 'This drive’s map has changed since: scan it again, then ask Claude.';
 
+/** The model each alias answers as in the mock, as the core names Claude Code's `modelUsage` id. */
+export const MOCK_MODEL_NAMES: Record<ClaudeModel, string> = {
+  default: 'Opus 5.5',
+  opus: 'Opus 5.5',
+  sonnet: 'Sonnet 5.5',
+  haiku: 'Haiku 5.5',
+  fable: 'Fable 5.5',
+};
+
+/** A checked answer before the mock stamps it with the model and reasoning it was asked with. */
+type Answered = Omit<ClaudeAnswer, 'made'>;
+
 const GB = 1e9;
+const gb = (bytes: number) => `${(bytes / GB).toFixed(1)} GB`;
 
 /** The privacy screens' list, as the core gives it (`claude::hidden::list`). */
 export const HIDDEN: ClaudeHidden[] = [
@@ -376,6 +394,9 @@ export function createMockClaude(
   const state = options.claude ?? 'off';
   let enabled = state !== 'off' && state !== 'notfound';
   let setting = options.privacy !== 'off';
+  /** The model and reasoning new questions ask for, as the core keeps them. */
+  let model: ClaudeModel = 'default';
+  let effort: ClaudeEffort = 'default';
   /** As the core, when no rule could keep Claude where it may read (`&reads=unavailable`): why. */
   const unavailable = options.reads === 'unavailable' ? READS_UNAVAILABLE : null;
   /** As the core, when the scan's rules wouldn't fit in Claude Code's settings (`&reads=toobig`): why, per answer. */
@@ -429,6 +450,8 @@ export function createMockClaude(
             : checked === 'failed'
               ? { kind: 'failed', message: CHECK_UNVERIFIED }
               : { kind: 'unchecked' },
+    model,
+    effort,
   });
 
   const basis = (opened: string[]): ClaudeBasis => {
@@ -477,7 +500,7 @@ export function createMockClaude(
   const title = (scan: MockClaudeScan, id: string) => scan.proposals.find((p) => p.id === id)?.title ?? id;
 
   /** The answer to `job`, applied to the scan like the core's. */
-  const answer = (scan: MockClaudeScan, job: ClaudeJob): ClaudeAnswer | ClaudeFailure => {
+  const answer = (scan: MockClaudeScan, job: ClaudeJob): Answered | ClaudeFailure => {
     switch (job.job) {
       case 'reviewPlan': {
         if (job.ids.length === 0) return { kind: 'error', message: 'Tick something in the plan first: there’s nothing for Claude to review.' };
@@ -564,7 +587,21 @@ export function createMockClaude(
     }
   };
 
-  const ask = (scan: MockClaudeScan, conversation: string, text: string): ClaudeAnswer | ClaudeFailure => {
+  /** A question about the whole scan: answered from its proposals and categories, names and sizes. It adds nothing. */
+  const aboutScan = (scan: MockClaudeScan, first: boolean, text: string): string => {
+    const top = [...scan.proposals].sort((a, b) => b.bytes - a.bytes).slice(0, 3);
+    const back = scan.proposals.filter((p) => p.regenerable).length;
+    const biggest = [...scan.map.categories].filter((c) => !c.protected).sort((a, b) => b.bytes - a.bytes)[0];
+    if (/back|undo|restore|recycle|trash/i.test(text))
+      return 'Deleting is permanent: it skips the Recycle Bin and the Trash, and Vacancy can’t undo it. Only Tidy up’s moves can be undone. Caches and build output come back on their own; your own files don’t.';
+    if (first || /clean|free|delete|space|biggest/i.test(text))
+      return `The biggest things on ${scan.map.volume.name} you could clean up are ${top.map((p) => `${p.title} (${gb(p.bytes)})`).join(', ')}. ${back} of the ${scan.proposals.length} proposals come back on their own. Tick what you want in the plan tray; nothing changes until you confirm.`;
+    return biggest
+      ? `From the scan: most of the space is ${biggest.name}, ${gb(biggest.bytes)}. Explain big folders tells you about the big folders the rules don’t know.`
+      : 'From the scan, I can’t tell more than the names, sizes and dates show.';
+  };
+
+  const ask = (scan: MockClaudeScan, conversation: string, text: string): Answered | ClaudeFailure => {
     // As the core: only a chat begun in this privacy mode, and not ended since by a privacy change, is asked in.
     const chat = scan.chats.get(conversation);
     if (!chat || chat.ended || chat.privacy !== calls()) return { kind: 'chatEnded' };
@@ -574,7 +611,11 @@ export function createMockClaude(
     const messages = [...chat.turns, last];
     let reply: string;
     let opened: string[] = [];
-    if (about.kind === 'proposal') {
+    let followUps = ['Can I get it back?', 'What would you do?'];
+    if (about.kind === 'scan') {
+      reply = aboutScan(scan, messages.length === 1, last.text);
+      followUps = ['Which of these come back on their own?', 'Can I get them back after?'];
+    } else if (about.kind === 'proposal') {
       const p = scan.proposals.find((x) => x.id === about.id);
       if (!p) return { kind: 'error', message: 'That item isn’t in this scan any more. Scan again.' };
       const first = canned.first[p.id] ?? {
@@ -599,7 +640,7 @@ export function createMockClaude(
     return {
       job: 'ask',
       basis: basis(opened),
-      result: { kind: 'ask', reply, followUps: ['Can I get it back?', 'What would you do?'] },
+      result: { kind: 'ask', reply, followUps },
       dropped: [],
       refreshed: null,
     };
@@ -610,6 +651,8 @@ export function createMockClaude(
     const requestId = `claude-${++next}`;
     const timers: number[] = [];
     let over = false;
+    // As the core: the model and reasoning are fixed when the request starts; a change applies to the next one.
+    const made: ClaudeMade = { model, effort, name: MOCK_MODEL_NAMES[model] };
     const finish = (failure: ClaudeFailure) => {
       if (over) return;
       over = true;
@@ -637,7 +680,7 @@ export function createMockClaude(
       if ('kind' in result) return finish(result);
       over = true;
       requests.delete(requestId);
-      onEvent({ kind: 'done', requestId, answer: structuredClone(result) });
+      onEvent({ kind: 'done', requestId, answer: { ...structuredClone(result), made } });
     });
     return Promise.resolve(requestId);
   };
@@ -658,6 +701,12 @@ export function createMockClaude(
       // As the core: the new mode and the end of every chat in one step.
       setting = on;
       endChats();
+      return Promise.resolve(status());
+    },
+    /** As the core's `claude_set_model`: kept, and no chat ends. */
+    setModel: (m: ClaudeModel, e: ClaudeEffort) => {
+      model = m;
+      effort = e;
       return Promise.resolve(status());
     },
     /** As the core's `claude_check`: checks this Claude Code when the check is due, or always with `again`. */

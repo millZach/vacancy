@@ -1,9 +1,33 @@
-import { ChevronDown, Eye, EyeOff, LoaderCircle, Lock, ShieldX, Sparkles, TriangleAlert, X } from 'lucide-react';
+import { ArrowLeft, ChevronDown, Cpu, Eye, EyeOff, LoaderCircle, Lock, ShieldX, Sparkles, TriangleAlert, X } from 'lucide-react';
 import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
-import type { ClaudeBasis, ClaudeDropped, ClaudeFailure, ClaudeFolderNote, ClaudeHidden, Proposal } from '../bridge';
+import type {
+  ClaudeBasis,
+  ClaudeDropped,
+  ClaudeEffort,
+  ClaudeFailure,
+  ClaudeFolderNote,
+  ClaudeHidden,
+  ClaudeMade,
+  ClaudeModel,
+  ClaudeStatus,
+  Proposal,
+} from '../bridge';
 import { formatBytes } from '../format';
-import { failureText, isOn, readsFiles, useClaude, type CheckShown, type Claude, type Phase } from './context';
+import {
+  EFFORT_LABEL,
+  EFFORTS,
+  MODEL_LABEL,
+  MODELS,
+  answeredBy,
+  failureText,
+  isOn,
+  readsFiles,
+  useClaude,
+  type CheckShown,
+  type Claude,
+  type Phase,
+} from './context';
 import './claude.css';
 
 /** Claude's mark, in its lilac. */
@@ -158,6 +182,68 @@ export function PrivacyRow({
       </p>
     )}
     </>
+  );
+}
+
+/**
+ * The model and reasoning new questions ask for, under privacy mode (prototype `prototype/claude-entry`, `model=pick`).
+ * Remembered by the core. A change applies to the next question; one running keeps its own, and no chat ends.
+ */
+export function ModelPicker({ claude, status }: { claude: Claude; status: ClaudeStatus }) {
+  // The choice shows at once; once the core has kept it (no change is out any more), the status says it.
+  const [want, setWant] = useState<{ model: ClaudeModel; effort: ClaudeEffort } | null>(null);
+  const [changing, setChanging] = useState(claude.privacyChanging);
+  if (changing !== claude.privacyChanging) {
+    setChanging(claude.privacyChanging);
+    if (!claude.privacyChanging) setWant(null);
+  }
+  const model = want?.model ?? status.model;
+  const effort = want?.effort ?? status.effort;
+  const pick = (m: ClaudeModel, e: ClaudeEffort) => {
+    setWant({ model: m, effort: e });
+    claude.setModel(m, e);
+  };
+  const usual = claude.modelName('default');
+  return (
+    <div className="cl-provider cl-privacy-row cl-model">
+      <span className="cl-provider-icon" aria-hidden>
+        <Cpu size={14} />
+      </span>
+      <div className="cl-model-grid">
+        <label>
+          <b>Model</b>
+          <select value={model} onChange={(e) => pick(e.target.value as ClaudeModel, effort)} aria-label="Model">
+            {MODELS.map((m) => (
+              <option key={m} value={m}>
+                {m === 'default' && usual ? `${MODEL_LABEL[m]} (${usual})` : MODEL_LABEL[m]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <b>Reasoning</b>
+          <select value={effort} onChange={(e) => pick(model, e.target.value as ClaudeEffort)} aria-label="Reasoning">
+            {EFFORTS.map((x) => (
+              <option key={x} value={x}>
+                {EFFORT_LABEL[x]}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span className="cl-model-fine">For new questions. Each answer says which model made it.</span>
+      </div>
+    </div>
+  );
+}
+
+/** "Answered by Opus 5.5 · High" under an answer, when Claude Code said which model made it. */
+export function AnsweredBy({ made }: { made: ClaudeMade | null | undefined }) {
+  const line = answeredBy(made);
+  if (!line) return null;
+  return (
+    <p className="cl-answered">
+      <Cpu size={10} aria-hidden /> {line}
+    </p>
   );
 }
 
@@ -325,7 +411,8 @@ export function Dropped({ items, heading = 'Vacancy left out' }: { items: Claude
 
 /**
  * The header's control: "Rules only" while Claude is off; Claude's state once it's on. A click unfolds the Claude
- * panel beside the map; before there's a map it only says where Claude is.
+ * panel, beside the scan screen or the map. Without `onOpen` (no panel on screen: a run, its finish, a past run) it
+ * only says where Claude is.
  */
 export function ClaudeTrigger({
   busy,
@@ -359,7 +446,7 @@ export function ClaudeTrigger({
   const cls = on ? 'pill advisor-trigger cl-trigger' : 'pill advisor-trigger';
   if (!onOpen)
     return (
-      <span className={cls} title="Claude’s panel is beside the map, once a drive is scanned.">
+      <span className={cls} title="Claude’s panel is beside the scan screen and the map.">
         {icon} {label}
       </span>
     );
@@ -372,35 +459,46 @@ export function ClaudeTrigger({
   );
 }
 
-/** The scan plate's note: built-in rules always; Claude off until it's turned on, beside the map. */
+/**
+ * The scan plate's note: built-in rules always, and Claude in the panel on the left, where it can be turned on and
+ * set before a scan; its jobs start once the scan is done. While the panel is folded, Show Claude unfolds it.
+ */
 export function ClaudeNote() {
   const claude = useClaude();
   const status = claude?.status.phase === 'ready' ? claude.status.status : null;
+  const on = status?.state === 'on';
   const [title, detail] = !status
-    ? ['Built-in rules find cleanups offline.', 'Claude stays off until you turn it on, beside the map.']
+    ? ['Built-in rules find cleanups offline.', 'Claude stays off until you turn it on, in the panel on the left.']
     : status.state === 'notFound'
       ? ['Built-in rules find cleanups offline.', 'Claude Code isn’t on this computer, so Claude stays off.']
       : status.state === 'off'
-        ? ['Built-in rules. Claude is off.', 'After the scan you can turn on Claude, your own Claude Code, in the panel beside the map.']
+        ? ['Built-in rules. Claude is off.', 'Turn it on in the Claude panel on the left, now or after the scan.']
         : status.state === 'signedOut'
-          ? ['Built-in rules. Claude Code isn’t signed in.', 'Run claude in a terminal and sign in to use Claude beside the map.']
+          ? ['Built-in rules. Claude Code isn’t signed in.', 'Run claude in a terminal and sign in, then check again in the Claude panel on the left.']
           : status.state === 'checkTimedOut' || status.state === 'checkFailed'
-            ? ['Built-in rules. Vacancy couldn’t check Claude Code.', 'Check again in the Claude panel beside the map.']
+            ? ['Built-in rules. Vacancy couldn’t check Claude Code.', 'Check again in the Claude panel on the left.']
             : [
-              'Built-in rules, and Claude beside the map.',
-              status.privacy
-                ? 'Privacy mode is on: Claude gets names, sizes, counts and dates only.'
-                : !readsFiles(status)
-                  ? 'Privacy mode is off, but Claude can’t open files for now: it gets names, sizes, counts and dates only.'
-                  : 'Privacy mode is off: Claude can read files, except the places that always stay hidden.',
-            ];
+                'Built-in rules, and Claude in the panel on the left.',
+                `${
+                  status.privacy
+                    ? 'Privacy mode is on: Claude gets names, sizes, counts and dates only.'
+                    : !readsFiles(status)
+                      ? 'Privacy mode is off, but Claude can’t open files for now: it gets names, sizes, counts and dates only.'
+                      : 'Privacy mode is off: Claude can read files on the drive you scan, except the places that always stay hidden.'
+                } Its jobs start once the scan is done.`,
+              ];
   return (
     <div className="advisor-note" data-no-ripple>
-      {status?.state === 'on' ? <Mark size={15} /> : <Sparkles size={15} aria-hidden />}
+      {on ? <Mark size={15} /> : status?.state === 'notFound' ? <Sparkles size={15} aria-hidden /> : <ArrowLeft size={15} aria-hidden />}
       <span>
         <b>{title}</b>
         <span>{detail}</span>
       </span>
+      {claude?.folded && (
+        <button type="button" className="btn btn--sm cl-note-act" onClick={() => claude.setFolded(false)}>
+          Show Claude
+        </button>
+      )}
     </div>
   );
 }

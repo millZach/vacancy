@@ -472,7 +472,14 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
     if (levels.length > 0) navigate([]);
     setHot(tile);
   };
-  const panel = overview && scope && !summary && !run && (
+  // Claude's panel: beside the scan screen from the start (it can be turned on and set before a scan; its jobs wait
+  // for one), and beside the map while the plan can change. Not while a plan runs, nor beside its finish.
+  const panel = !overview ? (
+    <ClaudePanel scope={null} />
+  ) : (
+    scope &&
+    !summary &&
+    !run && (
     <ClaudePanel
       scope={scope}
       proposals={proposals}
@@ -488,6 +495,7 @@ export function Atlas({ drives, agent, advisorNote, advisorOpen, planOpen, onPla
       }}
       onUntick={(id) => setInPlan(id, false)}
     />
+    )
   );
 
   return (
