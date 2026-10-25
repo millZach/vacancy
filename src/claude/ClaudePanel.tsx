@@ -152,7 +152,7 @@ function headLine(status: ClaudeStatus | null, c: Conversation, claude: Claude):
   if (c.entries.some((e) => e.phase === 'slow')) return 'On · replies are slow';
   const last = c.entries.at(-1);
   if (last?.phase === 'failed' && last.failure?.kind !== 'cancelled') return 'On · the last request failed';
-  return onLine(status, claude.modelName);
+  return onLine(claude.choice ?? status, claude.modelName);
 }
 
 /** Off, not found or not signed in: the panel is the turn-on step, with the privacy notice. */

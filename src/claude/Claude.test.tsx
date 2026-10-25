@@ -1460,6 +1460,49 @@ describe('the model and reasoning picker, with the core slow to answer', () => {
     expect(within(panel()).getByText('On · through your Claude Code')).toBeInTheDocument();
   });
 
+  it('keeps a pick still being saved when the panel is folded and opened again, and builds the next pick on it', async () => {
+    const { bridge, set, answer } = slowPicks();
+    renderApp(bridge);
+    const p = await screen.findByRole('complementary', { name: 'Claude' });
+    await userEvent.selectOptions(await within(p).findByRole('combobox', { name: 'Model' }), 'opus');
+    await userEvent.click(within(panel()).getByRole('button', { name: 'Fold the Claude panel' }));
+    await unfold();
+    // Drawn again while the save is out: it still shows the pick, not the core's last answer.
+    expect(within(panel()).getByRole('combobox', { name: 'Model' })).toHaveValue('opus');
+    await userEvent.selectOptions(within(panel()).getByRole('combobox', { name: 'Reasoning' }), 'high');
+    expect(within(panel()).getByText('On · Opus · High, through your Claude Code')).toBeInTheDocument();
+    await answer(1);
+    await answer(2);
+    expect(set.mock.calls).toEqual([
+      ['opus', 'default'],
+      ['opus', 'high'],
+    ]);
+    expect(await bridge.claudeStatus()).toMatchObject({ model: 'opus', effort: 'high' });
+    await waitFor(() => expect(within(panel()).getByRole('combobox', { name: 'Model' })).toHaveValue('opus'));
+    expect(within(panel()).getByRole('combobox', { name: 'Reasoning' })).toHaveValue('high');
+    expect(within(panel()).getByText('On · Opus · High, through your Claude Code')).toBeInTheDocument();
+  });
+
+  it('keeps a pick still being saved when the scan finishes and the panel moves beside the map', async () => {
+    const { bridge, set, answer } = slowPicks();
+    renderApp(bridge);
+    const p = await screen.findByRole('complementary', { name: 'Claude' });
+    await userEvent.selectOptions(await within(p).findByRole('combobox', { name: 'Model' }), 'opus');
+    await userEvent.click(screen.getByRole('button', { name: 'Scan Local Disk (C:)' }));
+    await screen.findByLabelText('Map key');
+    expect(within(panel()).getByRole('combobox', { name: 'Model' })).toHaveValue('opus');
+    await userEvent.selectOptions(within(panel()).getByRole('combobox', { name: 'Reasoning' }), 'high');
+    await answer(1);
+    await answer(2);
+    expect(set.mock.calls).toEqual([
+      ['opus', 'default'],
+      ['opus', 'high'],
+    ]);
+    expect(await bridge.claudeStatus()).toMatchObject({ model: 'opus', effort: 'high' });
+    await waitFor(() => expect(within(panel()).getByRole('combobox', { name: 'Model' })).toHaveValue('opus'));
+    expect(within(panel()).getByRole('combobox', { name: 'Reasoning' })).toHaveValue('high');
+  });
+
   it('keeps the last of several quick picks, each one asked of the core in order', async () => {
     const { bridge, set, answer } = slowPicks();
     renderApp(bridge);

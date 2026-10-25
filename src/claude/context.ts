@@ -168,7 +168,13 @@ export interface Scope extends Where {
   tidyIds: string[];
 }
 
-export type StatusState = { phase: 'loading' } | { phase: 'ready'; status: ClaudeStatus } | { phase: 'error'; message: string };
+/** A model and a reasoning level, as the picker sets them. */
+export interface Choice {
+  model: ClaudeModel;
+  effort: ClaudeEffort;
+}
+
+export type StatusState ={ phase: 'loading' } | { phase: 'ready'; status: ClaudeStatus } | { phase: 'error'; message: string };
 
 export interface Claude {
   status: StatusState;
@@ -208,8 +214,16 @@ export interface Claude {
   setPrivacy: (on: boolean) => void;
   confirmPrivacyOff: () => void;
   cancelPrivacyOff: () => void;
-  /** Picks the model and reasoning new questions ask for (remembered). A request running keeps its own. */
-  setModel: (model: ClaudeModel, effort: ClaudeEffort) => void;
+  /**
+   * The model and reasoning new questions ask for, as the picker shows them: the pair last asked for while a change
+   * of them is still out, or else the core's. Null until the status has come.
+   */
+  choice: Choice | null;
+  /**
+   * Picks the model, the reasoning or both (remembered by the core), made from `choice`: what isn't changed stays as
+   * last asked for. A request running keeps its own.
+   */
+  choose: (change: Partial<Choice>) => void;
   /** The model an alias last answered as ("Opus 5.5"), from Claude Code's own word, once one has. */
   modelName: (model: ClaudeModel) => string | null;
 
@@ -355,7 +369,7 @@ export function answeredBy(made: ClaudeMade | null | undefined): string | null {
  * The panel head's line with Claude on: the model new questions ask for (by the name it last answered as, once one
  * has; by its alias until then) and the reasoning, through the person's Claude Code.
  */
-export function onLine(status: ClaudeStatus, nameOf: (m: ClaudeModel) => string | null): string {
+export function onLine(status: Choice, nameOf: (m: ClaudeModel) => string | null): string {
   const model = nameOf(status.model) ?? (status.model === 'default' ? null : MODEL_LABEL[status.model]);
   const effort = status.effort === 'default' ? null : EFFORT_LABEL[status.effort];
   const parts = model ? [model, effort] : [effort && `${effort} reasoning`];

@@ -190,19 +190,9 @@ export function PrivacyRow({
  * Remembered by the core. A change applies to the next question; one running keeps its own, and no chat ends.
  */
 export function ModelPicker({ claude, status }: { claude: Claude; status: ClaudeStatus }) {
-  // The choice shows at once; once the core has kept it (no change is out any more), the status says it.
-  const [want, setWant] = useState<{ model: ClaudeModel; effort: ClaudeEffort } | null>(null);
-  const [changing, setChanging] = useState(claude.privacyChanging);
-  if (changing !== claude.privacyChanging) {
-    setChanging(claude.privacyChanging);
-    if (!claude.privacyChanging) setWant(null);
-  }
-  const model = want?.model ?? status.model;
-  const effort = want?.effort ?? status.effort;
-  const pick = (m: ClaudeModel, e: ClaudeEffort) => {
-    setWant({ model: m, effort: e });
-    claude.setModel(m, e);
-  };
+  // The provider keeps the pair last asked for while its save is out, so the picker shows it however often it is
+  // drawn (folded and opened again, or the panel moving from the scan screen to the map), and builds each pick on it.
+  const { model, effort } = claude.choice ?? status;
   const usual = claude.modelName('default');
   return (
     <div className="cl-provider cl-privacy-row cl-model">
@@ -212,7 +202,7 @@ export function ModelPicker({ claude, status }: { claude: Claude; status: Claude
       <div className="cl-model-grid">
         <label>
           <b>Model</b>
-          <select value={model} onChange={(e) => pick(e.target.value as ClaudeModel, effort)} aria-label="Model">
+          <select value={model} onChange={(e) => claude.choose({ model: e.target.value as ClaudeModel })} aria-label="Model">
             {MODELS.map((m) => (
               <option key={m} value={m}>
                 {m === 'default' && usual ? `${MODEL_LABEL[m]} (${usual})` : MODEL_LABEL[m]}
@@ -222,7 +212,7 @@ export function ModelPicker({ claude, status }: { claude: Claude; status: Claude
         </label>
         <label>
           <b>Reasoning</b>
-          <select value={effort} onChange={(e) => pick(model, e.target.value as ClaudeEffort)} aria-label="Reasoning">
+          <select value={effort} onChange={(e) => claude.choose({ effort: e.target.value as ClaudeEffort })} aria-label="Reasoning">
             {EFFORTS.map((x) => (
               <option key={x} value={x}>
                 {EFFORT_LABEL[x]}

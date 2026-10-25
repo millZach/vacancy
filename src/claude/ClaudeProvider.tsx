@@ -3,7 +3,6 @@ import {
   useBridge,
   type ClaudeAbout,
   type ClaudeAnswer,
-  type ClaudeEffort,
   type ClaudeEvent,
   type ClaudeJob,
   type ClaudeModel,
@@ -16,6 +15,7 @@ import { errorMessage } from '../errors';
 import {
   ClaudeContext,
   chatStarting,
+  type Choice,
   isEnabled,
   pickOffer,
   readsFiles,
@@ -146,8 +146,13 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
   const modesOut = useRef(0);
   /** Since the queue was last empty: the newest answer from a change the core kept, and the first refusal. */
   const modesKept = useRef<ClaudeStatus | null>(null);
-  /** The model and reasoning last asked for, while a change of them may still be out. */
-  const modelAsked = useRef<{ model: ClaudeModel; effort: ClaudeEffort } | null>(null);
+  /**
+   * The model and reasoning last asked for, while a change of them may still be out: what the picker shows, and what
+   * the next pick is made from, wherever and however often the picker is drawn. The ref has it at once (a second pick
+   * can come before the next render); the state draws it.
+   */
+  const modelAsked = useRef<Choice | null>(null);
+  const [modelWanted, setModelWanted] = useState<Choice | null>(null);
   const modesRefused = useRef<string | null>(null);
 
   /**
@@ -280,6 +285,7 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       // Every change asked for has answered, whichever kind came last: the status is the core's word on the model
       // and reasoning from now on, so a pick the same as one that failed goes again.
       modelAsked.current = null;
+      setModelWanted(null);
       const s = modesKept.current;
       const refused = modesRefused.current;
       modesKept.current = null;
@@ -736,14 +742,18 @@ export function ClaudeProvider({ drives, children }: { drives: ReadyDrives | nul
       changePrivacy(false);
     },
     cancelPrivacyOff: () => setPrivacyAsk(false),
+    choice: modelWanted ?? (statusNow ? { model: statusNow.model, effort: statusNow.effort } : null),
     // In line with the changes of mode, so a question asked after it is prepared with it; it ends no conversation.
-    // A pick the same as the last one asked for is no change; compared with the core's last answer instead, picking
-    // back while an earlier pick is still out would be dropped, and the earlier pick would be the one kept.
-    setModel: (model, effort) => {
+    // Each pick is made from the pair last asked for, not the core's last answer: otherwise picking back, or picking
+    // the other half, while an earlier pick is still out would drop or undo that pick.
+    choose: (change) => {
       const last = modelAsked.current ?? (statusNow ? { model: statusNow.model, effort: statusNow.effort } : null);
-      if (last?.model === model && last.effort === effort) return;
-      modelAsked.current = { model, effort };
-      void modeSetting(() => bridge.claudeSetModel(model, effort));
+      if (!last) return;
+      const next: Choice = { ...last, ...change };
+      if (last.model === next.model && last.effort === next.effort) return;
+      modelAsked.current = next;
+      setModelWanted(next);
+      void modeSetting(() => bridge.claudeSetModel(next.model, next.effort));
     },
     modelName: (model) => names[model] ?? null,
     conversation: (w) => convos[keyOf(w)] ?? EMPTY,
