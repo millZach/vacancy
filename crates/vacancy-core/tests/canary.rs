@@ -46,6 +46,7 @@ fn honest(check: &Canary, list_refusal: bool) -> FakeClaude {
             } else {
                 Vec::new()
             },
+            model: None,
         })
     })
 }
@@ -99,6 +100,7 @@ fn the_check_passes_only_when_the_canary_stays_hidden_and_the_control_comes_back
         Ok(Reply {
             structured: json!({"first": std::fs::read_to_string(&control_path).unwrap(), "second": "denied"}),
             refused: vec![skipped.clone()],
+            model: None,
         })
     });
     assert!(canary::run(&fake, &check, &cancel).passed);
@@ -112,6 +114,7 @@ fn the_check_passes_only_when_the_canary_stays_hidden_and_the_control_comes_back
             Ok(Reply {
                 structured: json!({"first": control_text, "second": canary_text}),
                 refused: Vec::new(),
+                model: None,
             }),
             "let Claude read a file",
         ),
@@ -120,6 +123,7 @@ fn the_check_passes_only_when_the_canary_stays_hidden_and_the_control_comes_back
             Ok(Reply {
                 structured: json!({"first": control_text, "second": format!("x {canary_text} y")}),
                 refused: vec![hidden_file.display().to_string()],
+                model: None,
             }),
             "let Claude read a file",
         ),
@@ -128,6 +132,7 @@ fn the_check_passes_only_when_the_canary_stays_hidden_and_the_control_comes_back
             Ok(Reply {
                 structured: json!({"first": "Error: denied", "second": "Error: denied"}),
                 refused: vec![hidden_file.display().to_string()],
+                model: None,
             }),
             "didn't return the check's readable file",
         ),
@@ -136,6 +141,7 @@ fn the_check_passes_only_when_the_canary_stays_hidden_and_the_control_comes_back
             Ok(Reply {
                 structured: json!({"first": control_text, "second": "Error"}),
                 refused: vec!["/elsewhere/x".into()],
+                model: None,
             }),
             "didn't record refusing the hidden file",
         ),
@@ -144,6 +150,7 @@ fn the_check_passes_only_when_the_canary_stays_hidden_and_the_control_comes_back
             Ok(Reply {
                 structured: json!({"first": control_text, "second": "I didn't read it."}),
                 refused: Vec::new(),
+                model: None,
             }),
             "didn't record refusing the hidden file",
         ),
@@ -262,9 +269,17 @@ fn the_check_is_a_privacy_off_call_from_the_real_settings_builder() {
     assert_eq!(at("--add-dir"), dir.display().to_string());
     assert_eq!(at("--settings"), file.display().to_string());
     assert_eq!(at("--output-format"), "json");
+    // Never the person's model or reasoning: the check is kept per executable, not per model.
     assert!(
-        !inv.args.iter().any(|a| a == "--model"),
-        "no --model, as with every call"
+        !inv.args.iter().any(|a| a == "--model" || a == "--effort"),
+        "no --model and no --effort, whatever the person picked"
+    );
+    assert_eq!(
+        (check.call().model, check.call().effort),
+        (
+            vacancy_core::claude::Model::Default,
+            vacancy_core::claude::Effort::Default
+        )
     );
     let set: Vec<(String, String)> = runner::ENV_SET
         .iter()

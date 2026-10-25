@@ -826,6 +826,34 @@ async fn claude_set_privacy(on: bool, app: AppHandle) -> Result<claude::Status, 
     .map_err(|e| e.to_string())?
 }
 
+/// Picks the model and reasoning new questions ask for, and says the status after. Remembered, also while Claude is
+/// off. Unlike privacy mode it ends no chat: what Claude may see is the same. A job already prepared keeps the choice
+/// it was prepared with; only the next ones ask for this one. Only the fixed values of [`claude::Model`] and
+/// [`claude::Effort`] reach here (anything else fails to deserialize), and so only those reach the command line.
+#[tauri::command]
+async fn claude_set_model(
+    model: claude::Model,
+    effort: claude::Effort,
+    app: AppHandle,
+) -> Result<claude::Status, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        {
+            let session = app.state::<Session>();
+            // Under the same lock a job is prepared under: it is prepared wholly before the change, or after it.
+            let _mode = lock(&session.claude_mode);
+            let home = claude_home(&app)?;
+            let mut settings = claude::settings::load(&home);
+            settings.model = model;
+            settings.effort = effort;
+            claude::settings::save(&home, settings)
+                .map_err(|e| format!("Vacancy couldn't keep the setting: {e}"))?;
+        }
+        claude_status_now(&app)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Changes Claude's settings with `change` and keeps them, and ends every chat on every drive's scan, all under
 /// [`Session::claude_mode`]: a request is prepared either wholly before (and its chat then ends) or wholly after.
 fn claude_change_settings(
@@ -1034,7 +1062,9 @@ fn claude_job(
             // This scan's rules wouldn't fit in the settings Claude Code takes: as if privacy mode were on too.
             let (access, too_big) = claude::access_on(&scanned.volume, &env, wanted.clone());
             let roots = access.roots();
-            let prepared = claude::prepare(job, &scanned.volume, &env, roots.as_deref(), cancel)?;
+            // The model and reasoning chosen now: a change after this applies to the next job, not this one.
+            let prepared = claude::prepare(job, &scanned.volume, &env, roots.as_deref(), cancel)?
+                .with_choice(settings.model, settings.effort);
             Ok((access, too_big, prepared))
         });
         let (access, too_big, prepared) = prepared?;
@@ -1667,6 +1697,7 @@ pub fn run() {
             claude_check,
             claude_set_enabled,
             claude_set_privacy,
+            claude_set_model,
             claude_start,
             claude_chat,
             claude_cancel,

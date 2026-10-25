@@ -32,12 +32,13 @@ impl FakeClaude {
         }
     }
 
-    /// Always answers `structured`, with nothing refused.
+    /// Always answers `structured`, with nothing refused and no model named.
     pub fn always(structured: serde_json::Value) -> Self {
         Self::new(move |_| {
             Ok(Reply {
                 structured: structured.clone(),
                 refused: Vec::new(),
+                model: None,
             })
         })
     }
